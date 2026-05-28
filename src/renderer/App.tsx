@@ -14,6 +14,7 @@ import {
   UserOutlined,
   RightOutlined,
   BellOutlined,
+  CalendarOutlined,
 } from '@ant-design/icons';
 import ProjectList from './components/ProjectList/ProjectList';
 import VersionViewer from './components/VersionViewer/VersionViewer';
@@ -24,6 +25,7 @@ import TemplateManager from './components/TemplateManager/TemplateManager';
 import DocumentReviewer from './components/DocumentReviewer/DocumentReviewer';
 import AISettings from './components/AISettings/AISettings';
 import Overview from './components/Overview/Overview';
+import PlanManager from './components/PlanManager/PlanManager';
 import { useProjectStore } from './stores/projectStore';
 import { useTemplateStore } from './stores/templateStore';
 import { useTaskStore } from './stores/taskStore';
@@ -78,6 +80,7 @@ const App: React.FC = () => {
   const menuItems = [
     { key: 'overview', icon: <BarChartOutlined />, label: '总览' },
     { key: 'projects', icon: <FolderOutlined />, label: '项目' },
+    { key: 'plan', icon: <CalendarOutlined />, label: '计划' },
     { key: 'templates', icon: <FormOutlined />, label: '模板' },
     { key: 'diff', icon: <DiffOutlined />, label: '日历' },
     { key: 'progress', icon: <BarChartOutlined />, label: '团队' },
@@ -104,6 +107,8 @@ const App: React.FC = () => {
         return <Overview />;
       case 'projects':
         return <ProjectList />;
+      case 'plan':
+        return <PlanManager />;
       case 'templates':
         return <TemplateManager />;
       case 'diff':
