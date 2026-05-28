@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+﻿import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode } from './types';
@@ -844,6 +844,55 @@ ipcMain.handle('folder:getContents', async (_event: any, folderPath: string) => 
   }
 });
 
+interface ScannedStageFile {
+  name: string;
+  path: string;
+  ext: string;
+  size: number;
+  createdAt: string;
+  modifiedAt: string;
+}
+
+const stageScanExts = new Set(['.doc', '.docx', '.pdf', '.txt', '.ppt', '.pptx', '.xls', '.xlsx']);
+const ignoredScanDirs = new Set(['.git', 'node_modules', 'dist', 'build', '.cache']);
+
+function scanStageFiles(folderPath: string, output: ScannedStageFile[] = []): ScannedStageFile[] {
+  if (!fs.existsSync(folderPath)) return output;
+  const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(folderPath, entry.name);
+    if (entry.isDirectory()) {
+      if (!ignoredScanDirs.has(entry.name)) scanStageFiles(fullPath, output);
+      continue;
+    }
+
+    const ext = path.extname(entry.name).toLowerCase();
+    if (!stageScanExts.has(ext)) continue;
+
+    try {
+      const stat = fs.statSync(fullPath);
+      output.push({
+        name: entry.name,
+        path: fullPath,
+        ext,
+        size: stat.size,
+        createdAt: (stat.birthtimeMs > 0 ? stat.birthtime : stat.ctime).toISOString(),
+        modifiedAt: stat.mtime.toISOString(),
+      });
+    } catch {}
+  }
+  return output;
+}
+
+ipcMain.handle('folder:scanStageFiles', async (_event: any, folderPath: string) => {
+  try {
+    const files = scanStageFiles(folderPath)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return { success: true, files };
+  } catch (error: any) {
+    return { success: false, files: [], error: error.message };
+  }
+});
 // 任务操作
 ipcMain.handle('task:save', async (_event: any, task: TaskItem) => {
   const tasks = loadTasksFromDisk();
@@ -1134,3 +1183,4 @@ app.on('activate', () => {
     createWindow();
   }
 });
+

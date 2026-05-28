@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import { Typography, Button, Space, Modal, Form, Input, Select, message } from 'antd';
 import { PlusOutlined, ImportOutlined } from '@ant-design/icons';
 import StatsCards from './StatsCards';
@@ -10,13 +10,14 @@ import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { Project, ProjectDocument } from '../../../shared/types';
+import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 
 const { Text } = Typography;
 
 const Overview: React.FC = () => {
   const { currentProject, addProject } = useProjectStore();
   const { templates } = useTemplateStore();
-  const { addProjectDoc } = useProjectDocStore();
+  const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const { workspacePath } = useSettingsStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
@@ -84,11 +85,16 @@ const Overview: React.FC = () => {
             name: `${values.name}-${template.name}`,
             sections: [],
             overallProgress: 0,
+            sourceFilePath: fileResult.filePath,
+            sourceFileCreatedAt: new Date().toISOString(),
+            sourceFileModifiedAt: new Date().toISOString(),
             createdAt: new Date().toISOString(),
           };
           await addProjectDoc(doc);
         }
       }
+
+      await syncProjectStageFiles(newProject, { projectDocs: useProjectDocStore.getState().projectDocs, addProjectDoc, updateProjectDoc });
 
       setIsModalOpen(false);
       form.resetFields();
@@ -130,7 +136,8 @@ const Overview: React.FC = () => {
     };
 
     await addProject(newProject);
-    message.success(`已导入项目：${folderName}`);
+    const syncResult = await syncProjectStageFiles(newProject, { projectDocs, addProjectDoc, updateProjectDoc });
+    message.success(`已导入项目：${folderName}${syncResult.matched > 0 ? `，识别到 ${syncResult.matched} 个阶段文件` : ''}`);
   };
 
   return (
@@ -221,3 +228,4 @@ const Overview: React.FC = () => {
 };
 
 export default Overview;
+

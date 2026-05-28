@@ -1,4 +1,4 @@
-// 项目类型定义
+﻿// 项目类型定义
 export interface Project {
   id: string;
   name: string;
@@ -164,6 +164,10 @@ export interface ProjectDocument {
   deadline?: string;        // 截止日期 ISO string
   completedAt?: string;     // 完成日期 ISO string
   analyzedAt?: string;      // 最近分析时间
+  sourceFilePath?: string;  // 自动阶段识别关联的真实文件路径
+  sourceFileCreatedAt?: string;  // 真实文件创建时间
+  sourceFileModifiedAt?: string; // 真实文件最近修改时间
+  autoStage?: boolean;      // 是否由文件名/文件夹扫描自动关联
   createdAt: string;
 }
 
@@ -180,3 +184,4 @@ export interface AppSettings {
   workspaceCapacity: number; // 工作区容量上限（GB）
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
 }
+

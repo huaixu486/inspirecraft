@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import {
   Card,
   Button,
@@ -19,6 +19,8 @@ import {
   DeleteOutlined,
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
+import { useProjectDocStore } from '../../stores/projectDocStore';
+import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 import { Project } from '../../../shared/types';
 import ProjectFileExplorer from './ProjectFileExplorer';
 
@@ -27,6 +29,7 @@ const { Text } = Typography;
 const ProjectList: React.FC = () => {
   const { projects, addProject, setCurrentProject, deleteProject } =
     useProjectStore();
+  const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [browsingProject, setBrowsingProject] = useState<Project | null>(null);
   const [form] = Form.useForm();
@@ -44,7 +47,8 @@ const ProjectList: React.FC = () => {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      addProject(newProject);
+      await addProject(newProject);
+      await syncProjectStageFiles(newProject, { projectDocs, addProjectDoc, updateProjectDoc });
       setIsModalOpen(false);
       form.resetFields();
       message.success('项目创建成功');
@@ -192,3 +196,4 @@ const ProjectList: React.FC = () => {
 };
 
 export default ProjectList;
+

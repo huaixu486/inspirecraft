@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+﻿import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   Typography, Button, Space, Tag, Empty, Spin, Select, message, Modal, Input, Popconfirm, Badge, DatePicker,
 } from 'antd';
@@ -11,6 +11,7 @@ import {
 import { Project } from '../../../shared/types';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
+import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 
 const { Text } = Typography;
 
@@ -79,7 +80,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const { templates } = useTemplateStore();
-  const { addProjectDoc } = useProjectDocStore();
+  const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const highlightTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const undoStackRef = useRef<UndoEntry[]>([]);
 
@@ -112,6 +113,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       if (result.success) {
         setItems(result.items);
       }
+      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, addProjectDoc, updateProjectDoc });
     } catch (error) {
       console.error('Failed to load folder contents:', error);
     } finally {
@@ -223,6 +225,9 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
           templateId: selectedTemplateId,
           name: finalName,
           deadline: deadline ? deadline.toISOString() : undefined,
+          sourceFilePath: result.filePath,
+          sourceFileCreatedAt: new Date().toISOString(),
+          sourceFileModifiedAt: new Date().toISOString(),
           sections: [],
           overallProgress: 0,
           createdAt: new Date().toISOString(),
@@ -242,6 +247,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       setAddModalOpen(false);
       setNewFileName('');
       setSelectedTemplateId('');
+      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, addProjectDoc, updateProjectDoc });
       await loadContents();
       highlightFile(createdPath);
     } else {
@@ -548,3 +554,5 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
 };
 
 export default ProjectFileExplorer;
+
+

@@ -1,14 +1,20 @@
 import React, { useState } from 'react';
-import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, message, Popconfirm } from 'antd';
+import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, message, Popconfirm, DatePicker } from 'antd';
 import {
   CheckCircleOutlined, ClockCircleOutlined, CloseOutlined,
   FolderOutlined, FileOutlined, ExclamationCircleOutlined,
   PlusOutlined, DeleteOutlined, ReloadOutlined, ExperimentOutlined,
 } from '@ant-design/icons';
+import dayjs from 'dayjs';
 import { useProjectStore } from '../../stores/projectStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { ProjectDocument, WritingTemplate } from '../../../shared/types';
+import {
+  buildProjectStageSegments,
+  timelineStageMeta,
+  TimelineStageSegment,
+} from '../../utils/timelineStages';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -34,6 +40,7 @@ const DetailPanel: React.FC = () => {
   const projectVersions = versions.filter(v => v.projectId === currentProject.id);
   const projectDocsList = projectDocs.filter(d => d.projectId === currentProject.id);
   const selectedDoc = projectDocsList.find(d => d.id === selectedDocId) || null;
+  const planSegments = buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions);
 
   // 文档平均进度
   const avgProgress = projectDocsList.length > 0
@@ -51,6 +58,12 @@ const DetailPanel: React.FC = () => {
     if (!dateStr) return '-';
     const d = new Date(dateStr);
     return `${d.getMonth() + 1}月${d.getDate()}日`;
+  };
+
+  const formatDateTime = (dateStr?: string) => {
+    if (!dateStr) return '未设置';
+    const d = new Date(dateStr);
+    return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
   // 按模板分组
@@ -155,6 +168,22 @@ const DetailPanel: React.FC = () => {
       return;
     }
     await runAnalysis(doc.id, version.content, template, useAI);
+  };
+
+  const handleStageDeadline = async (segment: TimelineStageSegment, deadline?: string) => {
+    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline })));
+    message.success(deadline ? '已更新计划截止时间' : '已清除计划截止时间');
+  };
+
+  const handleStageComplete = async (segment: TimelineStageSegment) => {
+    const completedAt = new Date().toISOString();
+    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt })));
+    message.success('已标记阶段完成');
+  };
+
+  const handleStageReopen = async (segment: TimelineStageSegment) => {
+    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt: undefined })));
+    message.success('已取消完成状态');
   };
 
   // 状态图标
@@ -339,6 +368,98 @@ const DetailPanel: React.FC = () => {
               </Text>
             )}
           </Modal>
+        </div>
+      ),
+    },
+    {
+      key: 'plan',
+      label: '计划',
+      children: (
+        <div>
+          <div style={{ marginBottom: 12 }}>
+            <Text strong style={{ fontSize: 13 }}>阶段计划 ({planSegments.length})</Text>
+          </div>
+
+          {planSegments.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {planSegments.map(segment => {
+                const color = timelineStageMeta[segment.stage].color;
+                const isCompleted = Boolean(segment.completedAt);
+                const isOverdue = segment.deadline && new Date(segment.deadline).getTime() < Date.now() && !isCompleted;
+
+                return (
+                  <div
+                    key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}
+                    style={{
+                      padding: '10px 12px',
+                      border: `1px solid ${isOverdue ? '#ffccc7' : '#f0f0f0'}`,
+                      borderRadius: 8,
+                      background: isOverdue ? '#fff7f6' : '#fff',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                      <Space size={6}>
+                        <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block' }} />
+                        <Text strong style={{ fontSize: 13 }}>{segment.label}</Text>
+                        {isCompleted ? (
+                          <Tag color="green" style={{ margin: 0, fontSize: 11 }}>已完成</Tag>
+                        ) : isOverdue ? (
+                          <Tag color="red" style={{ margin: 0, fontSize: 11 }}>逾期</Tag>
+                        ) : (
+                          <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>进行中</Tag>
+                        )}
+                      </Space>
+                      {isCompleted ? (
+                        <Button size="small" onClick={() => handleStageReopen(segment)}>
+                          取消完成
+                        </Button>
+                      ) : (
+                        <Button size="small" type="primary" onClick={() => handleStageComplete(segment)}>
+                          完成
+                        </Button>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                        <Text type="secondary" style={{ fontSize: 11 }}>开始</Text>
+                        <Text style={{ fontSize: 11 }}>{formatDateTime(segment.startAt)}</Text>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                        <Text type="secondary" style={{ fontSize: 11 }}>完成</Text>
+                        <Text style={{ fontSize: 11 }}>{formatDateTime(segment.completedAt)}</Text>
+                      </div>
+                      <div>
+                        <Text type="secondary" style={{ display: 'block', fontSize: 11, marginBottom: 4 }}>截止时间</Text>
+                        <DatePicker
+                          showTime
+                          allowClear
+                          size="small"
+                          style={{ width: '100%' }}
+                          value={segment.deadline ? dayjs(segment.deadline) : null}
+                          placeholder="设置计划截止时间"
+                          onChange={(value) => handleStageDeadline(segment, value ? value.toDate().toISOString() : undefined)}
+                        />
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
+                        {segment.sourceDocNames.map(name => (
+                          <Tag key={name} style={{ margin: 0, fontSize: 10, maxWidth: '100%' }}>
+                            {name}
+                          </Tag>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <Empty description="暂无可计划的阶段" image={Empty.PRESENTED_IMAGE_SIMPLE}>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
+                关联文件
+              </Button>
+            </Empty>
+          )}
         </div>
       ),
     },

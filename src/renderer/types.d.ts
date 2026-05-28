@@ -1,4 +1,4 @@
-interface ElectronAPI {
+﻿interface ElectronAPI {
   // 文件操作
   openFolder: () => Promise<string | null>;
   openFile: (filters?: any[]) => Promise<string | null>;
@@ -68,9 +68,11 @@ interface ElectronAPI {
   // 文件创建
   createBlankFile: (params: { folderPath: string; fileName: string; fileType: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
   getFolderContents: (folderPath: string) => Promise<{ success: boolean; items: { name: string; isDirectory: boolean; ext: string; size: number; modifiedAt: string; path: string }[]; error?: string }>;
+  scanStageFiles: (folderPath: string) => Promise<{ success: boolean; files: { name: string; path: string; ext: string; size: number; createdAt: string; modifiedAt: string }[]; error?: string }>;
   createFromTemplate: (params: { folderPath: string; fileName: string; template: any }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
 }
 
 interface Window {
   electronAPI: ElectronAPI;
 }
+

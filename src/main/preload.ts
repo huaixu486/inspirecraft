@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+﻿import { contextBridge, ipcRenderer } from 'electron';
 
 // 暴露给渲染进程的API
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -77,6 +77,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createBlankFile: (params: { folderPath: string; fileName: string; fileType: string }) =>
     ipcRenderer.invoke('file:createBlank', params),
   getFolderContents: (folderPath: string) => ipcRenderer.invoke('folder:getContents', folderPath),
+  scanStageFiles: (folderPath: string) => ipcRenderer.invoke('folder:scanStageFiles', folderPath),
   createFromTemplate: (params: { folderPath: string; fileName: string; template: any }) =>
     ipcRenderer.invoke('file:createFromTemplate', params),
 });
+
