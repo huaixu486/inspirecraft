@@ -4,6 +4,7 @@ import { WarningOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import {
   buildProjectStageSegments,
   timelineStageMeta,
@@ -142,6 +143,7 @@ const GanttChart: React.FC = () => {
   const { projects, versions } = useProjectStore();
   const { projectDocs } = useProjectDocStore();
   const { templates } = useTemplateStore();
+  const { workspacePath } = useSettingsStore();
   const timeAreaRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef({ start: Date.now() - MAX_SPAN / 2, span: MAX_SPAN, initialized: false });
   const [now, setNow] = useState(Date.now());
@@ -325,9 +327,12 @@ const GanttChart: React.FC = () => {
                       const planEnd = toMs(segment.deadline);
                       const completedEnd = toMs(segment.completedAt);
                       const activityEnd = toMs(segment.lastActivityAt);
+                      const isCreatedProject = workspacePath && project.folderPath.startsWith(workspacePath);
                       const actualEnd = Number.isFinite(completedEnd)
                         ? completedEnd
-                        : Number.isFinite(activityEnd) ? activityEnd : now;
+                        : isCreatedProject
+                          ? now
+                          : Number.isFinite(activityEnd) ? activityEnd : now;
                       const hasPlan = Number.isFinite(planEnd);
                       const isDone = Boolean(segment.completedAt);
                       const isOverdue = hasPlan && planEnd < now && !isDone;
