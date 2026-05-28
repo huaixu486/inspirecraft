@@ -9,6 +9,7 @@ import {
   buildProjectStageSegments,
   timelineStageMeta,
   TimelineStageSegment,
+  TimelineStageName,
 } from '../../utils/timelineStages';
 
 const { Text } = Typography;
@@ -21,6 +22,17 @@ const YEAR = 365 * DAY;
 const MIN_SPAN = HOUR;
 const MAX_SPAN = 2 * YEAR;
 const LEFT_COL = 156;
+
+// 每个阶段使用不同条纹角度，重叠时形成交叉纹理便于区分
+const STRIPE_ANGLE: Record<TimelineStageName, number> = {
+  '提案': 45,
+  '指南编写': -45,
+  '可研': 0,
+  '其他': 90,
+};
+
+const stripeBg = (color: string, angle: number, alpha: string) =>
+  `repeating-linear-gradient(${angle}deg, ${color}${alpha} 0, ${color}${alpha} 3px, transparent 3px, transparent 6px)`;
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -338,6 +350,7 @@ const GanttChart: React.FC = () => {
                       const isOverdue = hasPlan && planEnd < now && !isDone;
                       const actualVisible = visible(start, actualEnd, view.start, view.span);
                       const planVisible = hasPlan && visible(start, planEnd, view.start, view.span);
+                      const stripeAngle = STRIPE_ANGLE[segment.stage];
 
                       return (
                         <React.Fragment key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}>
@@ -354,8 +367,8 @@ const GanttChart: React.FC = () => {
                                   borderRadius: 3,
                                   border: `1px dashed ${isOverdue ? '#ff4d4f' : color}`,
                                   background: isOverdue
-                                    ? `repeating-linear-gradient(45deg, #ff4d4f14 0, #ff4d4f14 3px, transparent 3px, transparent 6px)`
-                                    : `repeating-linear-gradient(45deg, ${color}14 0, ${color}14 3px, transparent 3px, transparent 6px)`,
+                                    ? stripeBg('#ff4d4f', stripeAngle, '14')
+                                    : stripeBg(color, stripeAngle, '14'),
                                   zIndex: 1,
                                 }}
                               />
@@ -375,8 +388,8 @@ const GanttChart: React.FC = () => {
                                   borderRadius: 3,
                                   border: `1px solid ${isOverdue ? '#ff4d4f' : color}`,
                                   background: isOverdue
-                                    ? `repeating-linear-gradient(45deg, #ff4d4f80 0, #ff4d4f80 3px, transparent 3px, transparent 6px)`
-                                    : `repeating-linear-gradient(45deg, ${color}80 0, ${color}80 3px, transparent 3px, transparent 6px)`,
+                                    ? stripeBg('#ff4d4f', stripeAngle, '80')
+                                    : stripeBg(color, stripeAngle, '80'),
                                   zIndex: 2,
                                   display: 'flex',
                                   alignItems: 'center',
