@@ -373,10 +373,10 @@ const GanttChart: React.FC = () => {
                                   height: 14,
                                   minWidth: 2,
                                   borderRadius: 3,
+                                  border: `1px solid ${isOverdue ? '#ff4d4f' : color}`,
                                   background: isOverdue
-                                    ? `repeating-linear-gradient(45deg, #ff4d4f 0, #ff4d4f 3px, transparent 3px, transparent 6px)`
-                                    : `repeating-linear-gradient(45deg, ${color} 0, ${color} 3px, transparent 3px, transparent 6px)`,
-                                  opacity: isDone ? 0.86 : 0.62,
+                                    ? `repeating-linear-gradient(45deg, #ff4d4f80 0, #ff4d4f80 3px, transparent 3px, transparent 6px)`
+                                    : `repeating-linear-gradient(45deg, ${color}80 0, ${color}80 3px, transparent 3px, transparent 6px)`,
                                   zIndex: 2,
                                   display: 'flex',
                                   alignItems: 'center',
@@ -384,7 +384,7 @@ const GanttChart: React.FC = () => {
                                   overflow: 'hidden',
                                 }}
                               >
-                                <Text style={{ fontSize: 9, color: '#fff', whiteSpace: 'nowrap' }}>
+                                <Text style={{ fontSize: 9, color: '#000', whiteSpace: 'nowrap' }}>
                                   {segment.stage}
                                 </Text>
                               </div>
