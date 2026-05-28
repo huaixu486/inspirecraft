@@ -1,0 +1,35 @@
+{
+  "name": "project-manager",
+  "version": "1.0.0",
+  "description": "项目开发进度管理工具",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
+    "dev:main": "tsc -p tsconfig.main.json && node start-dev.js",
+    "dev:renderer": "vite",
+    "build": "npm run build:main && npm run build:renderer",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build"
+  },
+  "dependencies": {
+    "antd": "^5.22.0",
+    "diff-match-patch": "^1.0.5",
+    "docx": "^9.7.0",
+    "mammoth": "^1.8.0",
+    "pdf-parse": "^1.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/diff-match-patch": "^1.0.36",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^33.4.11",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0"
+  }
+}

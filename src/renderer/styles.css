@@ -1,0 +1,98 @@
+/* Global styles for ProjectHub */
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  height: 100vh;
+}
+
+/* Sidebar - no scroll, fixed to viewport */
+.ant-layout-sider {
+  overflow: hidden !important;
+}
+
+.ant-layout-sider-children {
+  overflow: hidden !important;
+}
+
+.ant-menu-inline {
+  overflow-x: hidden !important;
+}
+
+.ant-menu-item-selected {
+  background-color: #e6f7ff !important;
+}
+
+.ant-menu-item:hover {
+  background-color: #f0f5ff !important;
+}
+
+.ant-menu-item {
+  border-radius: 8px;
+  margin: 4px 8px !important;
+}
+
+/* Card styles */
+.ant-card {
+  border-radius: 12px;
+}
+
+/* Table styles */
+.ant-table-row:hover td {
+  background-color: #fafafa !important;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+/* Progress bar styles */
+.ant-progress-inner {
+  border-radius: 4px;
+}
+
+.ant-progress-bg {
+  border-radius: 4px;
+}
+
+/* Tag styles */
+.ant-tag {
+  border-radius: 4px;
+}
+
+/* Button styles */
+.ant-btn {
+  border-radius: 6px;
+}
+
+/* Tabs styles */
+.ant-tabs-tab {
+  font-size: 13px;
+}
+
+/* List item styles */
+.ant-list-item {
+  border-color: #f0f0f0 !important;
+}

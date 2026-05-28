@@ -1,0 +1,182 @@
+// 项目类型定义
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  folderPath: string;
+  status: 'active' | 'completed' | 'paused';
+  progress: number; // 0-100
+  templateId?: string; // 关联的模板ID
+  createdAt: string;
+  updatedAt: string;
+}
+
+// 文档版本类型
+export interface DocumentVersion {
+  id: string;
+  projectId: string;
+  fileName: string;
+  filePath: string;
+  fileType: 'docx' | 'pdf' | 'txt';
+  content: string; // 解析后的文本内容
+  summary?: string; // AI生成的摘要
+  createdAt: string;
+}
+
+// 版本对比结果
+export interface DiffResult {
+  versionA: string;
+  versionB: string;
+  changes: DiffChange[];
+}
+
+export interface DiffChange {
+  type: 'insert' | 'delete' | 'equal';
+  text: string;
+}
+
+// 任务项
+export interface TaskItem {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  type: 'ai' | 'manual'; // AI处理或人工处理
+  status: 'pending' | 'in_progress' | 'completed';
+  priority: 'high' | 'medium' | 'low';
+  result?: string; // AI执行结果
+  createdAt: string;
+}
+
+// AI配置
+export interface AIConfig {
+  provider: 'claude' | 'openai' | 'custom';
+  apiKey: string;
+  model: string;
+  endpoint?: string;
+}
+
+// ==================== 模板相关类型 ====================
+
+// 字体格式要求
+export interface FontRequirement {
+  fontFamily?: string; // 字体，如 "宋体"、"Times New Roman"
+  fontSize?: number; // 字号，如 12、14、16
+  fontWeight?: 'normal' | 'bold';
+  fontStyle?: 'normal' | 'italic';
+  lineHeight?: number; // 行距，如 1.5、2.0
+  color?: string; // 颜色，如 "#000000"
+}
+
+// 段落格式要求
+export interface ParagraphRequirement {
+  alignment?: 'left' | 'center' | 'right' | 'justify';
+  indentFirstLine?: number; // 首行缩进（字符数）
+  spaceBefore?: number; // 段前间距（磅）
+  spaceAfter?: number; // 段后间距（磅）
+}
+
+// 模板节点（支持层级结构）
+export interface TemplateNode {
+  id: string;
+  title: string; // 节点标题，如 "一、项目背景"
+  level: number; // 层级，1=一级标题，2=二级标题
+  description?: string; // 写作提示/说明
+  isRequired: boolean; // 是否必需
+  fontRequirement?: FontRequirement; // 字体格式要求
+  paragraphRequirement?: ParagraphRequirement; // 段落格式要求
+  children?: TemplateNode[]; // 子节点
+}
+
+// 写作模板
+export interface WritingTemplate {
+  id: string;
+  name: string; // 模板名称，如 "可研报告模板"
+  description: string; // 模板说明
+  category: string; // 分类，如 "可研报告"、"提案表"
+  nodes: TemplateNode[]; // 模板结构节点
+  filePath?: string; // 模板源文件路径（导入时保存）
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ==================== 审查相关类型 ====================
+
+// 审查问题类型
+export type ReviewIssueType = 'missing_section' | 'wrong_format' | 'content_deviation' | 'typo' | 'suggestion';
+
+// 审查问题严重程度
+export type ReviewIssueSeverity = 'error' | 'warning' | 'info';
+
+// 审查问题
+export interface ReviewIssue {
+  id: string;
+  type: ReviewIssueType;
+  severity: ReviewIssueSeverity;
+  nodeId?: string; // 关联的模板节点ID
+  sectionTitle?: string; // 相关章节标题
+  message: string; // 问题描述
+  suggestion?: string; // 修改建议
+  lineNumber?: number; // 相关行号（如有）
+}
+
+// 审查结果
+export interface ReviewResult {
+  id: string;
+  projectId: string;
+  versionId: string;
+  templateId: string;
+  issues: ReviewIssue[];
+  score: number; // 0-100 分
+  summary: string; // 审查总结
+  aiSuggestions?: string; // AI生成的详细建议
+  createdAt: string;
+}
+
+// 审查配置
+export interface ReviewConfig {
+  checkMissingSections: boolean; // 检查缺失章节
+  checkFormatting: boolean; // 检查格式
+  checkContentDeviation: boolean; // 检查内容偏差
+  enableAI: boolean; // 启用AI建议
+}
+
+// ==================== 项目文档进度相关 ====================
+
+// 章节分析结果
+export interface SectionAnalysis {
+  nodeId: string;           // 模板节点ID
+  title: string;            // 章节标题
+  status: 'completed' | 'partial' | 'missing';
+  wordCount: number;        // 字数
+  aiComment?: string;       // AI 评语
+}
+
+// 项目文档（关联模板+文件）
+export interface ProjectDocument {
+  id: string;
+  projectId: string;
+  templateId: string;       // 使用的模板
+  versionId?: string;       // 关联的文件版本
+  name: string;             // 显示名称，如 "XX项目-提案表"
+  sections: SectionAnalysis[];  // 各章节分析结果
+  overallProgress: number;  // 0-100 整体完成度
+  deadline?: string;        // 截止日期 ISO string
+  completedAt?: string;     // 完成日期 ISO string
+  analyzedAt?: string;      // 最近分析时间
+  createdAt: string;
+}
+
+// 用户资料
+export interface UserProfile {
+  nickname: string;
+  email: string;
+  avatar?: string; // base64 或文件路径
+}
+
+// 应用设置
+export interface AppSettings {
+  workspacePath: string; // 项目工作区路径
+  workspaceCapacity: number; // 工作区容量上限（GB）
+  userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
+}
