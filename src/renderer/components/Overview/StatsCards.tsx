@@ -5,6 +5,7 @@ import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   WarningOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
@@ -33,6 +34,9 @@ const StatsCards: React.FC = () => {
     return diff > 0 && diff <= 7 * 24 * 60 * 60 * 1000;
   });
 
+  // 已完成的文档数
+  const completedDocs = projectDocs.filter(d => d.completedAt).length;
+
   const stats = [
     {
       title: '项目总数',
@@ -42,11 +46,11 @@ const StatsCards: React.FC = () => {
       subtitle: `进行中 ${activeProjects} | 已完成 ${completedProjects}`,
     },
     {
-      title: '进行中',
-      value: activeProjects,
+      title: '已完成阶段',
+      value: completedDocs,
       icon: <CheckCircleOutlined />,
       iconBg: '#52c41a',
-      subtitle: `共 ${totalProjects} 个项目`,
+      subtitle: `共 ${projectDocs.length} 个阶段`,
     },
     {
       title: '即将到期',
@@ -60,7 +64,7 @@ const StatsCards: React.FC = () => {
       value: overdueDocs.length,
       icon: <WarningOutlined />,
       iconBg: overdueDocs.length > 0 ? '#ff4d4f' : '#d9d9d9',
-      subtitle: overdueDocs.length > 0 ? `${overdueDocs.length} 项文档逾期` : '暂无逾期',
+      subtitle: overdueDocs.length > 0 ? `${overdueDocs.length} 项阶段逾期` : '暂无逾期',
     },
   ];
 

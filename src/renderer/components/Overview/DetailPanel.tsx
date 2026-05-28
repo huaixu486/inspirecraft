@@ -253,6 +253,33 @@ const DetailPanel: React.FC = () => {
               )}
             </div>
           </div>
+
+          {/* 阶段完成度 - 联动计划 Tab */}
+          {planSegments.length > 0 && (
+            <>
+              <Title level={5} style={{ fontSize: 14, marginTop: 20, marginBottom: 12 }}>阶段进度</Title>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {planSegments.map(segment => {
+                  const color = timelineStageMeta[segment.stage].color;
+                  const isCompleted = Boolean(segment.completedAt);
+                  const isOverdue = segment.deadline && new Date(segment.deadline).getTime() < Date.now() && !isCompleted;
+                  return (
+                    <div key={`${segment.stage}-${segment.sourceDocIds.join('-')}`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />
+                      <Text style={{ fontSize: 12, flex: 1 }}>{segment.label}</Text>
+                      {isCompleted ? (
+                        <Tag color="green" style={{ margin: 0, fontSize: 10 }}>已完成</Tag>
+                      ) : isOverdue ? (
+                        <Tag color="red" style={{ margin: 0, fontSize: 10 }}>逾期</Tag>
+                      ) : (
+                        <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>进行中</Tag>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </div>
       ),
     },

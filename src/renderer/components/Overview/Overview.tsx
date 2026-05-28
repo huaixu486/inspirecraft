@@ -1,5 +1,5 @@
 ﻿import React, { useState } from 'react';
-import { Typography, Button, Space, Modal, Form, Input, Select, message } from 'antd';
+import { Typography, Button, Space, Modal, Form, Input, Select, message, Checkbox } from 'antd';
 import { PlusOutlined, ImportOutlined } from '@ant-design/icons';
 import StatsCards from './StatsCards';
 import GanttChart from './GanttChart';
@@ -11,6 +11,11 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { Project, ProjectDocument } from '../../../shared/types';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
+import {
+  buildProjectStageSegments,
+  timelineStageMeta,
+  TimelineStageSegment,
+} from '../../utils/timelineStages';
 
 const { Text } = Typography;
 
@@ -22,6 +27,12 @@ const Overview: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [form] = Form.useForm();
+
+  // 导入完成阶段选择弹窗
+  const [importCompleteOpen, setImportCompleteOpen] = useState(false);
+  const [importProject, setImportProject] = useState<Project | null>(null);
+  const [importSegments, setImportSegments] = useState<TimelineStageSegment[]>([]);
+  const [selectedCompletedStages, setSelectedCompletedStages] = useState<string[]>([]);
 
   const projectName = Form.useWatch('name', form);
   const folderPreview = workspacePath && projectName
@@ -137,7 +148,43 @@ const Overview: React.FC = () => {
 
     await addProject(newProject);
     const syncResult = await syncProjectStageFiles(newProject, { projectDocs, addProjectDoc, updateProjectDoc });
-    message.success(`已导入项目：${folderName}${syncResult.matched > 0 ? `，识别到 ${syncResult.matched} 个阶段文件` : ''}`);
+
+    // 检测到阶段文件后，弹窗让用户选择已完成的阶段
+    const latestDocs = useProjectDocStore.getState().projectDocs.filter(d => d.projectId === newProject.id);
+    const segments = buildProjectStageSegments(newProject, latestDocs, templates, []);
+
+    if (segments.length > 0) {
+      setImportProject(newProject);
+      setImportSegments(segments);
+      setSelectedCompletedStages([]);
+      setImportCompleteOpen(true);
+    } else {
+      message.success(`已导入项目：${folderName}`);
+    }
+  };
+
+  const handleImportCompleteOk = async () => {
+    if (!importProject) return;
+    const now = new Date().toISOString();
+
+    // 将用户选中的阶段标记为已完成
+    for (const segment of importSegments) {
+      if (selectedCompletedStages.includes(segment.stage)) {
+        await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt: now })));
+      }
+    }
+
+    const completedCount = selectedCompletedStages.length;
+    setImportCompleteOpen(false);
+    setImportProject(null);
+    setImportSegments([]);
+    setSelectedCompletedStages([]);
+
+    message.success(
+      completedCount > 0
+        ? `已导入项目，${completedCount} 个阶段标记为已完成`
+        : '已导入项目',
+    );
   };
 
   return (
@@ -222,6 +269,65 @@ const Overview: React.FC = () => {
             </Form.Item>
           )}
         </Form>
+      </Modal>
+
+      {/* 导入完成阶段选择弹窗 */}
+      <Modal
+        title="选择已完成的阶段"
+        open={importCompleteOpen}
+        onOk={handleImportCompleteOk}
+        onCancel={() => { setImportCompleteOpen(false); setImportProject(null); setImportSegments([]); setSelectedCompletedStages([]); }}
+        okText="确认"
+        cancelText="跳过"
+        width={420}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            已识别到以下阶段文件，请选择已经完成的阶段：
+          </Text>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {importSegments.map(segment => {
+            const color = timelineStageMeta[segment.stage].color;
+            return (
+              <div
+                key={segment.stage}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '8px 12px',
+                  border: '1px solid #f0f0f0',
+                  borderRadius: 8,
+                  background: selectedCompletedStages.includes(segment.stage) ? '#f6ffed' : '#fff',
+                }}
+              >
+                <Checkbox
+                  checked={selectedCompletedStages.includes(segment.stage)}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedCompletedStages(prev => [...prev, segment.stage]);
+                    } else {
+                      setSelectedCompletedStages(prev => prev.filter(s => s !== segment.stage));
+                    }
+                  }}
+                />
+                <span style={{ width: 10, height: 10, borderRadius: 3, background: color, flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 13 }}>{segment.label}</Text>
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {segment.sourceDocNames.join(', ')}
+                    </Text>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {importSegments.length === 0 && (
+          <Text type="secondary" style={{ fontSize: 12 }}>未识别到阶段文件</Text>
+        )}
       </Modal>
     </div>
   );
