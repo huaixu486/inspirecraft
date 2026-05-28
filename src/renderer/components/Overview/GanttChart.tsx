@@ -353,7 +353,9 @@ const GanttChart: React.FC = () => {
                                   height: 12,
                                   borderRadius: 3,
                                   border: `1px dashed ${isOverdue ? '#ff4d4f' : color}`,
-                                  background: isOverdue ? '#fff1f0' : `${color}14`,
+                                  background: isOverdue
+                                    ? `repeating-linear-gradient(45deg, #ff4d4f14 0, #ff4d4f14 3px, transparent 3px, transparent 6px)`
+                                    : `repeating-linear-gradient(45deg, ${color}14 0, ${color}14 3px, transparent 3px, transparent 6px)`,
                                   zIndex: 1,
                                 }}
                               />
@@ -371,7 +373,9 @@ const GanttChart: React.FC = () => {
                                   height: 14,
                                   minWidth: 2,
                                   borderRadius: 3,
-                                  background: isOverdue ? '#ff4d4f' : color,
+                                  background: isOverdue
+                                    ? `repeating-linear-gradient(45deg, #ff4d4f 0, #ff4d4f 3px, transparent 3px, transparent 6px)`
+                                    : `repeating-linear-gradient(45deg, ${color} 0, ${color} 3px, transparent 3px, transparent 6px)`,
                                   opacity: isDone ? 0.86 : 0.62,
                                   zIndex: 2,
                                   display: 'flex',
