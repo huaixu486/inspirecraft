@@ -327,10 +327,11 @@ const GanttChart: React.FC = () => {
                       gridTemplateColumns: `${PROJECT_COL}px ${STAGE_COL}px minmax(0, 1fr)`,
                       height: 32,
                       alignItems: 'center',
+                      justifyItems: 'center',
                     }}
                   >
-                    <Text ellipsis strong style={{ fontSize: 11, paddingRight: 8 }}>{project.name}</Text>
-                    <Text type="secondary" style={{ fontSize: 10, paddingRight: 8 }}>暂无阶段</Text>
+                    <Text ellipsis strong style={{ fontSize: 11, textAlign: 'center' }}>{project.name}</Text>
+                    <Text type="secondary" style={{ fontSize: 10 }}>暂无阶段</Text>
                     <div />
                   </div>
                 );
@@ -346,10 +347,10 @@ const GanttChart: React.FC = () => {
                 >
                   {/* 项目名称：垂直居中跨所有阶段行 */}
                   <div style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-                    paddingRight: 8, minHeight: segments.length * 28,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    minHeight: segments.length * 28,
                   }}>
-                    <Text ellipsis strong style={{ fontSize: 11, textAlign: 'right' }}>{project.name}</Text>
+                    <Text ellipsis strong style={{ fontSize: 11, textAlign: 'center' }}>{project.name}</Text>
                   </div>
 
                   {/* 阶段行 */}
