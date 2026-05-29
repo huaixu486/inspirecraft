@@ -1,6 +1,6 @@
 import React from 'react';
 import { Card, Table, Tag, Progress, Typography, Space } from 'antd';
-import { FolderOutlined, CalendarOutlined, WarningOutlined } from '@ant-design/icons';
+import { FolderOutlined, CalendarOutlined, WarningOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { Project } from '../../../shared/types';
@@ -86,12 +86,30 @@ const ProjectTable: React.FC = () => {
           return dl > max ? dl : max;
         }, new Date(0));
 
-        const isOverdue = latest < now;
+        // 判断逾期/即将逾期（与 GanttChart 一致）
+        const hasTime = latest.getHours() !== 0 || latest.getMinutes() !== 0 || latest.getSeconds() !== 0;
+        let isOverdue = false;
+        let isAboutToExpire = false;
+        const hasCompleted = docs.some(d => d.completedAt);
+        if (!hasCompleted) {
+          if (hasTime) {
+            isOverdue = latest < now;
+            isAboutToExpire = !isOverdue && now >= new Date(latest.getTime() - 24 * 60 * 60 * 1000);
+          } else {
+            isOverdue = (latest.getFullYear() < now.getFullYear())
+              || (latest.getFullYear() === now.getFullYear() && latest.getMonth() < now.getMonth())
+              || (latest.getFullYear() === now.getFullYear() && latest.getMonth() === now.getMonth() && latest.getDate() < now.getDate());
+            isAboutToExpire = !isOverdue && latest.getFullYear() === now.getFullYear() && latest.getMonth() === now.getMonth() && latest.getDate() === now.getDate();
+          }
+        }
+
+        const statusColor = isOverdue ? '#ff4d4f' : isAboutToExpire ? '#faad14' : '#999';
         return (
           <Space size={4}>
             {isOverdue && <WarningOutlined style={{ color: '#ff4d4f', fontSize: 12 }} />}
-            <CalendarOutlined style={{ color: isOverdue ? '#ff4d4f' : '#999', fontSize: 12 }} />
-            <Text style={{ fontSize: 12, color: isOverdue ? '#ff4d4f' : undefined }}>
+            {isAboutToExpire && <ExclamationCircleOutlined style={{ color: '#faad14', fontSize: 12 }} />}
+            <CalendarOutlined style={{ color: statusColor, fontSize: 12 }} />
+            <Text style={{ fontSize: 12, color: statusColor }}>
               {latest.toLocaleDateString('zh-CN')}
             </Text>
           </Space>

@@ -45,10 +45,32 @@ const PlanManager: React.FC = () => {
   const completedStages = projectSegments.reduce(
     (acc, p) => acc + p.segments.filter(s => Boolean(s.completedAt)).length, 0,
   );
+
+  const isOverdue = (deadline?: string, completedAt?: string) => {
+    if (!deadline || completedAt) return false;
+    const d = new Date(deadline);
+    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
+    if (hasTime) return d.getTime() < Date.now();
+    const now = new Date();
+    return (d.getFullYear() < now.getFullYear())
+      || (d.getFullYear() === now.getFullYear() && d.getMonth() < now.getMonth())
+      || (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() < now.getDate());
+  };
+
+  const isAboutToExpire = (deadline?: string, completedAt?: string) => {
+    if (!deadline || completedAt || isOverdue(deadline, completedAt)) return false;
+    const d = new Date(deadline);
+    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
+    if (hasTime) return Date.now() >= d.getTime() - 24 * 60 * 60 * 1000;
+    const now = new Date();
+    return now.getFullYear() === d.getFullYear() && now.getMonth() === d.getMonth() && now.getDate() === d.getDate();
+  };
+
   const overdueStages = projectSegments.reduce(
-    (acc, p) => acc + p.segments.filter(
-      s => s.deadline && new Date(s.deadline).getTime() < Date.now() && !s.completedAt,
-    ).length, 0,
+    (acc, p) => acc + p.segments.filter(s => isOverdue(s.deadline, s.completedAt)).length, 0,
+  );
+  const aboutToExpireStages = projectSegments.reduce(
+    (acc, p) => acc + p.segments.filter(s => isAboutToExpire(s.deadline, s.completedAt)).length, 0,
   );
 
   const handleStageComplete = async (segment: TimelineStageSegment) => {
@@ -69,30 +91,32 @@ const PlanManager: React.FC = () => {
   const renderSegment = (segment: TimelineStageSegment) => {
     const color = timelineStageMeta[segment.stage].color;
     const isCompleted = Boolean(segment.completedAt);
-    const isOverdue = segment.deadline
-      && new Date(segment.deadline).getTime() < Date.now()
-      && !isCompleted;
+    const segmentOverdue = isOverdue(segment.deadline, segment.completedAt);
+    const segmentAboutToExpire = isAboutToExpire(segment.deadline, segment.completedAt);
+    const statusColor = segmentOverdue ? '#ff4d4f' : segmentAboutToExpire ? '#faad14' : color;
 
     return (
       <div
         key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}
         style={{
           padding: '12px 14px',
-          border: `1px solid ${isOverdue ? '#ffccc7' : '#f0f0f0'}`,
+          border: `1px solid ${segmentOverdue ? '#ffccc7' : segmentAboutToExpire ? '#ffe58f' : '#f0f0f0'}`,
           borderRadius: 8,
-          background: isOverdue ? '#fff7f6' : isCompleted ? '#f6ffed' : '#fff',
+          background: segmentOverdue ? '#fff7f6' : segmentAboutToExpire ? '#fffbe6' : isCompleted ? '#f6ffed' : '#fff',
           transition: 'background 0.3s',
         }}
       >
         {/* Header row */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
           <Space size={8} align="center">
-            <span style={{ width: 10, height: 10, borderRadius: 3, background: color, display: 'inline-block', flexShrink: 0 }} />
+            <span style={{ width: 10, height: 10, borderRadius: 3, background: statusColor, display: 'inline-block', flexShrink: 0 }} />
             <Text strong style={{ fontSize: 14 }}>{segment.label}</Text>
             {isCompleted ? (
               <Tag icon={<CheckCircleOutlined />} color="success" style={{ margin: 0 }}>已完成</Tag>
-            ) : isOverdue ? (
+            ) : segmentOverdue ? (
               <Tag icon={<WarningOutlined />} color="error" style={{ margin: 0 }}>逾期</Tag>
+            ) : segmentAboutToExpire ? (
+              <Tag icon={<WarningOutlined />} color="warning" style={{ margin: 0 }}>即将逾期</Tag>
             ) : (
               <Tag icon={<ClockCircleOutlined />} color="processing" style={{ margin: 0 }}>进行中</Tag>
             )}
@@ -164,7 +188,7 @@ const PlanManager: React.FC = () => {
       </div>
 
       {/* Summary cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 24 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
         <Card size="small" style={{ borderRadius: 8 }}>
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 28, fontWeight: 600, color: '#1890ff' }}>{totalStages}</div>
@@ -175,6 +199,12 @@ const PlanManager: React.FC = () => {
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 28, fontWeight: 600, color: '#52c41a' }}>{completedStages}</div>
             <Text type="secondary" style={{ fontSize: 12 }}>已完成</Text>
+          </div>
+        </Card>
+        <Card size="small" style={{ borderRadius: 8 }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 600, color: '#faad14' }}>{aboutToExpireStages}</div>
+            <Text type="secondary" style={{ fontSize: 12 }}>即将逾期</Text>
           </div>
         </Card>
         <Card size="small" style={{ borderRadius: 8 }}>
@@ -190,9 +220,7 @@ const PlanManager: React.FC = () => {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {projectSegments.map(({ project, segments }) => {
             const completed = segments.filter(s => Boolean(s.completedAt)).length;
-            const overdue = segments.filter(
-              s => s.deadline && new Date(s.deadline).getTime() < Date.now() && !s.completedAt,
-            ).length;
+            const overdue = segments.filter(s => isOverdue(s.deadline, s.completedAt)).length;
 
             return (
               <Card

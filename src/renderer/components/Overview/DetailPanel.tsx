@@ -29,6 +29,26 @@ const DetailPanel: React.FC = () => {
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
+  const isOverdue = (deadline?: string, completedAt?: string) => {
+    if (!deadline || completedAt) return false;
+    const d = new Date(deadline);
+    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
+    if (hasTime) return d.getTime() < Date.now();
+    const now = new Date();
+    return (d.getFullYear() < now.getFullYear())
+      || (d.getFullYear() === now.getFullYear() && d.getMonth() < now.getMonth())
+      || (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() < now.getDate());
+  };
+
+  const isAboutToExpire = (deadline?: string, completedAt?: string) => {
+    if (!deadline || completedAt || isOverdue(deadline, completedAt)) return false;
+    const d = new Date(deadline);
+    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
+    if (hasTime) return Date.now() >= d.getTime() - 24 * 60 * 60 * 1000;
+    const now = new Date();
+    return now.getFullYear() === d.getFullYear() && now.getMonth() === d.getMonth() && now.getDate() === d.getDate();
+  };
+
   if (!currentProject) {
     return (
       <div style={{ padding: 24, textAlign: 'center', color: '#999' }}>
@@ -263,15 +283,19 @@ const DetailPanel: React.FC = () => {
                 {planSegments.map(segment => {
                   const color = timelineStageMeta[segment.stage].color;
                   const isCompleted = Boolean(segment.completedAt);
-                  const isOverdue = segment.deadline && new Date(segment.deadline).getTime() < Date.now() && !isCompleted;
+                  const segOverdue = isOverdue(segment.deadline, segment.completedAt);
+                  const segAboutToExpire = isAboutToExpire(segment.deadline, segment.completedAt);
+                  const statusColor = segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : color;
                   return (
                     <div key={`${segment.stage}-${segment.sourceDocIds.join('-')}`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: statusColor, flexShrink: 0 }} />
                       <Text style={{ fontSize: 12, flex: 1 }}>{segment.label}</Text>
                       {isCompleted ? (
                         <Tag color="green" style={{ margin: 0, fontSize: 10 }}>已完成</Tag>
-                      ) : isOverdue ? (
+                      ) : segOverdue ? (
                         <Tag color="red" style={{ margin: 0, fontSize: 10 }}>逾期</Tag>
+                      ) : segAboutToExpire ? (
+                        <Tag color="orange" style={{ margin: 0, fontSize: 10 }}>即将逾期</Tag>
                       ) : (
                         <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>进行中</Tag>
                       )}
@@ -413,26 +437,30 @@ const DetailPanel: React.FC = () => {
               {planSegments.map(segment => {
                 const color = timelineStageMeta[segment.stage].color;
                 const isCompleted = Boolean(segment.completedAt);
-                const isOverdue = segment.deadline && new Date(segment.deadline).getTime() < Date.now() && !isCompleted;
+                const segOverdue = isOverdue(segment.deadline, segment.completedAt);
+                const segAboutToExpire = isAboutToExpire(segment.deadline, segment.completedAt);
+                const statusColor = segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : color;
 
                 return (
                   <div
                     key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}
                     style={{
                       padding: '10px 12px',
-                      border: `1px solid ${isOverdue ? '#ffccc7' : '#f0f0f0'}`,
+                      border: `1px solid ${segOverdue ? '#ffccc7' : segAboutToExpire ? '#ffe58f' : '#f0f0f0'}`,
                       borderRadius: 8,
-                      background: isOverdue ? '#fff7f6' : '#fff',
+                      background: segOverdue ? '#fff7f6' : segAboutToExpire ? '#fffbe6' : '#fff',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
                       <Space size={6}>
-                        <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block' }} />
+                        <span style={{ width: 8, height: 8, borderRadius: 2, background: statusColor, display: 'inline-block' }} />
                         <Text strong style={{ fontSize: 13 }}>{segment.label}</Text>
                         {isCompleted ? (
                           <Tag color="green" style={{ margin: 0, fontSize: 11 }}>已完成</Tag>
-                        ) : isOverdue ? (
+                        ) : segOverdue ? (
                           <Tag color="red" style={{ margin: 0, fontSize: 11 }}>逾期</Tag>
+                        ) : segAboutToExpire ? (
+                          <Tag color="orange" style={{ margin: 0, fontSize: 11 }}>即将逾期</Tag>
                         ) : (
                           <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>进行中</Tag>
                         )}
