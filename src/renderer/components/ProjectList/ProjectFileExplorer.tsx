@@ -114,7 +114,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       if (result.success) {
         setItems(result.items);
       }
-      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, addProjectDoc, updateProjectDoc });
+      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, templates, addProjectDoc, updateProjectDoc });
     } catch (error) {
       console.error('Failed to load folder contents:', error);
     } finally {
@@ -252,7 +252,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       setAddModalOpen(false);
       setNewFileName('');
       setSelectedTemplateId('');
-      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, addProjectDoc, updateProjectDoc });
+      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, templates, addProjectDoc, updateProjectDoc });
       await loadContents();
       highlightFile(createdPath);
     } else {

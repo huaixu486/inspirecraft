@@ -98,7 +98,7 @@ const Overview: React.FC = () => {
         }
       }
 
-      await syncProjectStageFiles(newProject, { projectDocs: useProjectDocStore.getState().projectDocs, addProjectDoc, updateProjectDoc });
+      await syncProjectStageFiles(newProject, { projectDocs: useProjectDocStore.getState().projectDocs, templates, addProjectDoc, updateProjectDoc });
 
       setIsModalOpen(false);
       form.resetFields();
@@ -135,7 +135,7 @@ const Overview: React.FC = () => {
     };
 
     await addProject(newProject);
-    const syncResult = await syncProjectStageFiles(newProject, { projectDocs, addProjectDoc, updateProjectDoc });
+    const syncResult = await syncProjectStageFiles(newProject, { projectDocs, templates, addProjectDoc, updateProjectDoc });
 
     // 检测到阶段文件后，弹窗让用户选择已完成的阶段
     const latestDocs = useProjectDocStore.getState().projectDocs.filter(d => d.projectId === newProject.id);

@@ -112,6 +112,7 @@ const ProjectList: React.FC = () => {
 
       await syncProjectStageFiles(newProject, {
         projectDocs: useProjectDocStore.getState().projectDocs,
+        templates,
         addProjectDoc,
         updateProjectDoc,
       });

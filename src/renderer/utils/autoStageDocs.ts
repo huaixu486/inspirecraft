@@ -1,4 +1,4 @@
-﻿import { Project, ProjectDocument } from '../../shared/types';
+﻿import { Project, ProjectDocument, WritingTemplate } from '../../shared/types';
 import { detectTimelineStage } from './timelineStages';
 
 interface ScannedStageFile {
@@ -12,6 +12,7 @@ interface ScannedStageFile {
 
 interface SyncDeps {
   projectDocs: ProjectDocument[];
+  templates: WritingTemplate[];
   addProjectDoc: (doc: ProjectDocument) => Promise<void>;
   updateProjectDoc: (id: string, updates: Partial<ProjectDocument>) => Promise<void>;
 }
@@ -75,10 +76,16 @@ export const syncProjectStageFiles = async (
       continue;
     }
 
+    // 通过关键字自动匹配模板
+    const stage = detectTimelineStage(file.name, file.path);
+    const matchedTemplate = deps.templates.find(t =>
+      t.name.includes(stage) || t.category?.includes(stage) || detectTimelineStage(t.name, t.category) === stage
+    );
+
     await deps.addProjectDoc({
       id: `auto-${project.id}-${hashPath(file.path)}`,
       projectId: project.id,
-      templateId: '',
+      templateId: matchedTemplate?.id || '',
       name: file.name,
       sections: [],
       overallProgress: 0,
