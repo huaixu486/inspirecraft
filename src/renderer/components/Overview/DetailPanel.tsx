@@ -4,6 +4,7 @@ import {
   CheckCircleOutlined, ClockCircleOutlined, CloseOutlined,
   FolderOutlined, FileOutlined, ExclamationCircleOutlined,
   PlusOutlined, DeleteOutlined, ReloadOutlined, ExperimentOutlined,
+  RightOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useProjectStore } from '../../stores/projectStore';
@@ -14,6 +15,7 @@ import {
   buildProjectStageSegments,
   timelineStageMeta,
   TimelineStageSegment,
+  TimelineStageName,
 } from '../../utils/timelineStages';
 
 const { Title, Text, Paragraph } = Typography;
@@ -250,61 +252,121 @@ const DetailPanel: React.FC = () => {
             </div>
           </div>
 
-          <Title level={5} style={{ fontSize: 14, marginBottom: 16 }}>文档完成度</Title>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
+          {/* 文档完成度 - 圆形进度 + 百分比统计 */}
+          <Title level={5} style={{ fontSize: 14, marginBottom: 12 }}>文档完成度</Title>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
             <Progress
               type="circle"
               percent={avgProgress}
-              size={100}
+              size={80}
               strokeColor={avgProgress >= 80 ? '#52c41a' : avgProgress >= 40 ? '#1890ff' : '#faad14'}
             />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {projectDocsList.map(doc => (
-                <div key={doc.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={{
-                    width: 8, height: 8, borderRadius: 2,
-                    background: doc.overallProgress >= 80 ? '#52c41a' : doc.overallProgress >= 40 ? '#1890ff' : '#faad14',
-                  }} />
-                  <Text style={{ fontSize: 11 }} ellipsis>{doc.name}</Text>
-                  <Text type="secondary" style={{ fontSize: 11 }}>{doc.overallProgress}%</Text>
-                </div>
-              ))}
-              {projectDocsList.length === 0 && (
-                <Text type="secondary" style={{ fontSize: 12 }}>暂无关联文档</Text>
-              )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
+              {(() => {
+                const completed = projectDocsList.filter(d => d.overallProgress >= 80).length;
+                const inProgress = projectDocsList.filter(d => d.overallProgress > 0 && d.overallProgress < 80).length;
+                const notStarted = projectDocsList.filter(d => d.overallProgress === 0).length;
+                const total = projectDocsList.length || 1;
+                return (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#52c41a', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>已完成</Text></Space>
+                      <Text style={{ fontSize: 12 }}>{Math.round(completed / total * 100)}%</Text>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#1890ff', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>待完成</Text></Space>
+                      <Text style={{ fontSize: 12 }}>{Math.round(inProgress / total * 100)}%</Text>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#d9d9d9', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>待开始</Text></Space>
+                      <Text style={{ fontSize: 12 }}>{Math.round(notStarted / total * 100)}%</Text>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
 
-          {/* 阶段完成度 - 联动计划 Tab */}
+          {/* 下一步计划/建议 */}
           {planSegments.length > 0 && (
             <>
-              <Title level={5} style={{ fontSize: 14, marginTop: 20, marginBottom: 12 }}>阶段进度</Title>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {planSegments.map(segment => {
+              <Title level={5} style={{ fontSize: 14, marginBottom: 10 }}>下一步计划</Title>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+                {planSegments.filter(s => !s.completedAt).slice(0, 3).map(segment => {
                   const color = timelineStageMeta[segment.stage].color;
-                  const isCompleted = Boolean(segment.completedAt);
                   const segOverdue = isOverdue(segment.deadline, segment.completedAt);
                   const segAboutToExpire = isAboutToExpire(segment.deadline, segment.completedAt);
-                  const statusColor = segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : color;
                   return (
-                    <div key={`${segment.stage}-${segment.sourceDocIds.join('-')}`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: statusColor, flexShrink: 0 }} />
-                      <Text style={{ fontSize: 12, flex: 1 }}>{segment.label}</Text>
-                      {isCompleted ? (
-                        <Tag color="green" style={{ margin: 0, fontSize: 10 }}>已完成</Tag>
-                      ) : segOverdue ? (
-                        <Tag color="red" style={{ margin: 0, fontSize: 10 }}>逾期</Tag>
-                      ) : segAboutToExpire ? (
-                        <Tag color="orange" style={{ margin: 0, fontSize: 10 }}>即将逾期</Tag>
-                      ) : (
-                        <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>进行中</Tag>
-                      )}
+                    <div key={`${segment.stage}-${segment.sourceDocIds.join('-')}`} style={{
+                      padding: '8px 10px', borderRadius: 6, border: `1px solid ${segOverdue ? '#ffccc7' : segAboutToExpire ? '#ffe58f' : '#f0f0f0'}`,
+                      background: segOverdue ? '#fff7f6' : segAboutToExpire ? '#fffbe6' : '#fafafa',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                        <span style={{ width: 6, height: 6, borderRadius: 2, background: segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : color, flexShrink: 0 }} />
+                        <Text strong style={{ fontSize: 12 }}>{segment.label}</Text>
+                        {segment.deadline && (
+                          <Text type="secondary" style={{ fontSize: 10, marginLeft: 'auto' }}>截止 {formatDate(segment.deadline)}</Text>
+                        )}
+                      </div>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {segOverdue ? '已逾期，请尽快完成' : segAboutToExpire ? '今天到期，请抓紧完成' : `包含 ${segment.sourceDocNames.length} 个文件，继续推进中`}
+                      </Text>
                     </div>
                   );
                 })}
+                {planSegments.filter(s => !s.completedAt).length === 0 && (
+                  <div style={{ padding: '12px', textAlign: 'center' }}>
+                    <CheckCircleOutlined style={{ fontSize: 24, color: '#52c41a', marginBottom: 8 }} />
+                    <div><Text type="secondary" style={{ fontSize: 12 }}>所有阶段已完成</Text></div>
+                  </div>
+                )}
               </div>
             </>
           )}
+
+          {/* 近期任务汇总 - 跨项目统计 */}
+          {(() => {
+            const { projects: allProjects } = useProjectStore.getState();
+            const allDocs = useProjectDocStore.getState().projectDocs;
+            const allTemplates = useTemplateStore.getState().templates;
+            const stageOrder: TimelineStageName[] = ['提案', '指南编写', '可研', '其他'];
+            const stageSummary = stageOrder.map(stage => {
+              let total = 0;
+              let completed = 0;
+              for (const p of allProjects) {
+                const segs = buildProjectStageSegments(p, allDocs.filter(d => d.projectId === p.id), allTemplates, []);
+                const seg = segs.find(s => s.stage === stage);
+                if (seg) {
+                  total += 1;
+                  if (seg.completedAt) completed += 1;
+                }
+              }
+              return { stage, total, completed };
+            }).filter(s => s.total > 0);
+
+            if (stageSummary.length === 0) return null;
+            return (
+              <>
+                <Title level={5} style={{ fontSize: 14, marginBottom: 10 }}>近期任务</Title>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {stageSummary.map(({ stage, total, completed }) => (
+                    <div key={stage} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: timelineStageMeta[stage].color, flexShrink: 0 }} />
+                      <Text style={{ fontSize: 12, flex: 1 }}>{timelineStageMeta[stage].label}</Text>
+                      <Text style={{ fontSize: 12, fontWeight: 600 }}>{completed}/{total}</Text>
+                      <Progress
+                        percent={Math.round(completed / total * 100)}
+                        size="small"
+                        style={{ width: 60, margin: 0 }}
+                        showInfo={false}
+                        strokeColor={completed === total ? '#52c41a' : '#1890ff'}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </>
+            );
+          })()}
         </div>
       ),
     },
