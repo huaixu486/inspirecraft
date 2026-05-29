@@ -249,18 +249,18 @@ const GanttChart: React.FC = () => {
   const ticks = useMemo(() => buildTicks(view.start, view.span, viewportWidth), [view.start, view.span, viewportWidth]);
   const todayPct = ((now - view.start) / view.span) * 100;
 
-  // 计算内容总高度，决定是否需要滚动
-  const totalContentHeight = useMemo(() => {
-    let h = 0;
-    for (const project of projects) {
-      const segs = segmentsByProject.get(project.id) || [];
-      h += segs.length > 0 ? segs.length * 28 + 2 : 32;
+  // 计算内容总高度和前3个项目的高度，决定是否需要滚动
+  const { totalContentHeight, visibleHeight } = useMemo(() => {
+    let total = 0;
+    let visible = 0;
+    for (let i = 0; i < projects.length; i++) {
+      const segs = segmentsByProject.get(projects[i].id) || [];
+      const h = segs.length > 0 ? segs.length * 28 + 2 : 32;
+      total += h;
+      if (i < 3) visible += h;
     }
-    return h;
+    return { totalContentHeight: total, visibleHeight: visible };
   }, [projects, segmentsByProject]);
-  const ROW_HEIGHT = 30; // 单行平均高度
-  const VISIBLE_ROWS = 3;
-  const visibleHeight = VISIBLE_ROWS * ROW_HEIGHT;
   const needsScroll = totalContentHeight > visibleHeight;
 
   return (
