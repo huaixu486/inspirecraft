@@ -9,33 +9,42 @@ import {
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
+import { useTemplateStore } from '../../stores/templateStore';
+import { buildProjectStageSegments } from '../../utils/timelineStages';
 
 const { Text } = Typography;
 
 const StatsCards: React.FC = () => {
-  const { projects } = useProjectStore();
+  const { projects, versions } = useProjectStore();
   const { projectDocs } = useProjectDocStore();
+  const { templates } = useTemplateStore();
 
   const totalProjects = projects.length;
   const activeProjects = projects.filter(p => p.status === 'active').length;
   const completedProjects = projects.filter(p => p.status === 'completed').length;
 
-  // 逾期：有 deadline 且已过期且未完成的文档
-  const now = new Date();
-  const overdueDocs = projectDocs.filter(d =>
-    d.deadline && !d.completedAt && new Date(d.deadline) < now
+  // 按阶段类型分组统计（一个阶段 = 一个 TimelineStageSegment，不是单个文件）
+  const allSegments = projects.flatMap(project =>
+    buildProjectStageSegments(
+      project,
+      projectDocs.filter(d => d.projectId === project.id),
+      templates,
+      versions.filter(v => v.projectId === project.id),
+    ),
   );
 
-  // 即将到期（7天内）
-  const upcomingDocs = projectDocs.filter(d => {
-    if (!d.deadline || d.completedAt) return false;
-    const deadline = new Date(d.deadline);
-    const diff = deadline.getTime() - now.getTime();
-    return diff > 0 && diff <= 7 * 24 * 60 * 60 * 1000;
-  });
+  const now = Date.now();
 
-  // 已完成的文档数
-  const completedDocs = projectDocs.filter(d => d.completedAt).length;
+  const totalStages = allSegments.length;
+  const completedStages = allSegments.filter(s => Boolean(s.completedAt)).length;
+  const overdueStages = allSegments.filter(s =>
+    s.deadline && new Date(s.deadline).getTime() < now && !s.completedAt,
+  ).length;
+  const upcomingStages = allSegments.filter(s => {
+    if (!s.deadline || s.completedAt) return false;
+    const diff = new Date(s.deadline).getTime() - now;
+    return diff > 0 && diff <= 7 * 24 * 60 * 60 * 1000;
+  }).length;
 
   const stats = [
     {
@@ -47,24 +56,24 @@ const StatsCards: React.FC = () => {
     },
     {
       title: '已完成阶段',
-      value: completedDocs,
+      value: completedStages,
       icon: <CheckCircleOutlined />,
       iconBg: '#52c41a',
-      subtitle: `共 ${projectDocs.length} 个阶段`,
+      subtitle: `共 ${totalStages} 个阶段`,
     },
     {
       title: '即将到期',
-      value: upcomingDocs.length,
+      value: upcomingStages,
       icon: <ClockCircleOutlined />,
       iconBg: '#faad14',
-      subtitle: upcomingDocs.length > 0 ? '7天内到期' : '暂无到期任务',
+      subtitle: upcomingStages > 0 ? '7天内到期' : '暂无到期任务',
     },
     {
       title: '已逾期',
-      value: overdueDocs.length,
+      value: overdueStages,
       icon: <WarningOutlined />,
-      iconBg: overdueDocs.length > 0 ? '#ff4d4f' : '#d9d9d9',
-      subtitle: overdueDocs.length > 0 ? `${overdueDocs.length} 项阶段逾期` : '暂无逾期',
+      iconBg: overdueStages > 0 ? '#ff4d4f' : '#d9d9d9',
+      subtitle: overdueStages > 0 ? `${overdueStages} 项阶段逾期` : '暂无逾期',
     },
   ];
 
