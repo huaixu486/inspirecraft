@@ -388,7 +388,7 @@ const DetailPanel: React.FC = () => {
       key: 'files',
       label: '文件',
       children: (
-        <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+        <div style={{ height: '100%', overflowY: 'auto' }}>
           <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Text strong style={{ fontSize: 13 }}>关联文档 ({projectDocsList.length})</Text>
             <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
@@ -691,7 +691,7 @@ const DetailPanel: React.FC = () => {
   ];
 
   return (
-    <div style={{ padding: '16px 20px' }}>
+    <div style={{ padding: '16px 20px', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -721,7 +721,7 @@ const DetailPanel: React.FC = () => {
         />
       </div>
 
-      <Tabs items={tabItems} size="small" />
+      <Tabs items={tabItems} size="small" style={{ flex: 1, overflow: 'hidden' }} />
     </div>
   );
 };

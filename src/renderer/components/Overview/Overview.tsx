@@ -212,6 +212,9 @@ const Overview: React.FC = () => {
         overflow: 'hidden',
         background: '#fff',
         transition: 'width 0.2s',
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
       }}>
         <DetailPanel />
       </div>

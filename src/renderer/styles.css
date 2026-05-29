@@ -92,6 +92,27 @@ body {
   font-size: 13px;
 }
 
+/* Tabs content fills available height */
+.ant-tabs {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.ant-tabs-content-holder {
+  flex: 1;
+  overflow: auto;
+}
+
+.ant-tabs-content {
+  height: 100%;
+}
+
+.ant-tabs-tabpane {
+  height: 100%;
+  overflow-y: auto;
+}
+
 /* List item styles */
 .ant-list-item {
   border-color: #f0f0f0 !important;
