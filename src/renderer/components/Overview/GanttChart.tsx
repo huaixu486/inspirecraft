@@ -286,7 +286,7 @@ const GanttChart: React.FC = () => {
           </div>
         </div>
 
-        <div style={{ position: 'relative', maxHeight: 420, overflowY: 'auto' }}>
+        <div style={{ position: 'relative', ...(projects.length > 3 ? { maxHeight: 96, overflowY: 'auto' } : {}) }}>
           {/* 网格线随滚动内容一起滚动 */}
           <div
             style={{
@@ -326,11 +326,7 @@ const GanttChart: React.FC = () => {
                 return (
                   <div
                     key={project.id}
-                    style={{
-                      display: 'flex',
-                      height: 28,
-                      alignItems: 'center',
-                    }}
+                    style={{ display: 'flex' }}
                   >
                     <div style={{
                       width: PROJECT_COL, flexShrink: 0,
@@ -341,10 +337,12 @@ const GanttChart: React.FC = () => {
                     </div>
                     <div style={{
                       width: STAGE_COL, flexShrink: 0,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
                       position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2,
                     }}>
-                      <Text type="secondary" style={{ fontSize: 10 }}>暂无阶段</Text>
+                      <div style={{ height: 28, display: 'flex', alignItems: 'center', gap: 4, paddingRight: 8 }}>
+                        <span style={{ width: 7, height: 7, borderRadius: 2, background: '#d9d9d9', flexShrink: 0 }} />
+                        <Text type="secondary" ellipsis style={{ fontSize: 10 }}>暂无阶段</Text>
+                      </div>
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }} />
                   </div>
