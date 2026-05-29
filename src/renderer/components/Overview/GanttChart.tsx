@@ -158,6 +158,7 @@ const GanttChart: React.FC = () => {
   const { templates } = useTemplateStore();
   const { workspacePath } = useSettingsStore();
   const timeAreaRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef({ start: Date.now() - MAX_SPAN / 2, span: MAX_SPAN, initialized: false });
   const [now, setNow] = useState(Date.now());
   const [viewportWidth, setViewportWidth] = useState(900);
@@ -192,6 +193,15 @@ const GanttChart: React.FC = () => {
     const observer = new ResizeObserver(update);
     observer.observe(el);
     return () => observer.disconnect();
+  }, []);
+
+  // 隔离滚动事件：在捕获阶段拦截，阻止冒泡到主页面
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => e.stopPropagation();
+    el.addEventListener('wheel', handler, { capture: true });
+    return () => el.removeEventListener('wheel', handler, { capture: true });
   }, []);
 
   useEffect(() => {
@@ -288,7 +298,7 @@ const GanttChart: React.FC = () => {
           </div>
         </div>
 
-        <div style={{ position: 'relative', ...(projects.length > 3 ? { maxHeight: 96, overflowY: 'auto' } : {}) }}>
+        <div ref={scrollRef} style={{ position: 'relative', ...(projects.length > 3 ? { maxHeight: 96, overflowY: 'auto' } : {}) }}>
           {/* 网格线随滚动内容一起滚动 */}
           <div
             style={{
