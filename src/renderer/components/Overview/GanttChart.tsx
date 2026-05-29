@@ -389,7 +389,7 @@ const GanttChart: React.FC = () => {
                               height: 16,
                               borderRadius: 3,
                               border: `1.5px dashed ${isOverdue ? '#ff4d4f' : color}`,
-                              overflow: 'hidden',
+                              overflow: 'visible',
                               zIndex: 1,
                             }}
                           >
@@ -404,6 +404,7 @@ const GanttChart: React.FC = () => {
                                 background: isOverdue
                                   ? stripeBg('#ff4d4f', stripeAngle, '80')
                                   : stripeBg(color, stripeAngle, '80'),
+                                borderRadius: 3,
                               }}
                             />
                             <Text
@@ -418,23 +419,25 @@ const GanttChart: React.FC = () => {
                             >
                               {segment.stage}
                             </Text>
+                            {/* 逾期三角在截止时间线，放在彩条内部 */}
+                            {isOverdue && (
+                              <WarningOutlined
+                                style={{
+                                  position: 'absolute',
+                                  left: `${clamp(((planEnd - start) / (barEnd - start)) * 100, 0, 100)}%`,
+                                  top: 0,
+                                  height: '100%',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  transform: 'translateX(-50%)',
+                                  fontSize: 11,
+                                  color: '#ff4d4f',
+                                  zIndex: 3,
+                                  pointerEvents: 'none',
+                                }}
+                              />
+                            )}
                           </div>
-                        </Tooltip>
-                      )}
-                      {/* 逾期三角在截止时间线上 */}
-                      {isOverdue && (
-                        <Tooltip title={`逾期：计划截止 ${fmtDate(planEnd)}`}>
-                          <WarningOutlined
-                            style={{
-                              position: 'absolute',
-                              left: `${clamp(((planEnd - view.start) / view.span) * 100, 0, 100)}%`,
-                              top: 0,
-                              transform: 'translateX(-50%)',
-                              fontSize: 11,
-                              color: '#ff4d4f',
-                              zIndex: 3,
-                            }}
-                          />
                         </Tooltip>
                       )}
                     </div>
