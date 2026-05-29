@@ -16,6 +16,7 @@ import {
   timelineStageMeta,
   TimelineStageSegment,
   TimelineStageName,
+  detectTimelineStage,
 } from '../../utils/timelineStages';
 
 const { Title, Text, Paragraph } = Typography;
@@ -88,18 +89,31 @@ const DetailPanel: React.FC = () => {
     return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
-  // 按模板分组
+  // 按模板分组（未关联模板的文件通过关键字自动匹配）
   const groupedByTemplate = () => {
-    const groups: { templateId: string; templateName: string; docs: ProjectDocument[] }[] = [];
     const map = new Map<string, ProjectDocument[]>();
     for (const doc of projectDocsList) {
-      const arr = map.get(doc.templateId) || [];
+      let templateId = doc.templateId;
+      // 未关联模板时，通过关键字自动匹配
+      if (!templateId) {
+        const stage = detectTimelineStage(doc.name, doc.sourceFilePath);
+        const matched = templates.find(t =>
+          t.name.includes(stage) || t.category?.includes(stage) || detectTimelineStage(t.name, t.category) === stage
+        );
+        templateId = matched?.id || '__unmatched__';
+      }
+      const arr = map.get(templateId) || [];
       arr.push(doc);
-      map.set(doc.templateId, arr);
+      map.set(templateId, arr);
     }
+    const groups: { templateId: string; templateName: string; docs: ProjectDocument[] }[] = [];
     for (const [templateId, docs] of map) {
       const template = templates.find(t => t.id === templateId);
-      groups.push({ templateId, templateName: template?.name || '未知模板', docs });
+      groups.push({
+        templateId,
+        templateName: template?.name || (templateId === '__unmatched__' ? '未匹配模板' : '未知模板'),
+        docs,
+      });
     }
     return groups;
   };
@@ -374,7 +388,7 @@ const DetailPanel: React.FC = () => {
       key: 'files',
       label: '文件',
       children: (
-        <div>
+        <div style={{ maxHeight: 400, overflowY: 'auto' }}>
           <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Text strong style={{ fontSize: 13 }}>关联文档 ({projectDocsList.length})</Text>
             <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
