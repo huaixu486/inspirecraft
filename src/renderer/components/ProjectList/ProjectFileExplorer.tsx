@@ -143,9 +143,12 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const totalSize = files.reduce((acc, f) => acc + f.size, 0);
   const KNOWN_EXTS = ['.docx', '.doc', '.pdf', '.xlsx', '.xls', '.pptx', '.ppt', '.txt'];
   const typeCount: Record<string, number> = {};
+  // 初始化所有已知类型，确保始终显示
+  for (const ext of KNOWN_EXTS) typeCount[ext] = 0;
+  typeCount['其他'] = 0;
   for (const f of files) {
     const key = KNOWN_EXTS.includes(f.ext) ? f.ext : '其他';
-    typeCount[key] = (typeCount[key] || 0) + 1;
+    typeCount[key] += 1;
   }
 
   // 选择模板时自动填充
