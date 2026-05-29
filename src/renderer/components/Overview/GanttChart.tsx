@@ -389,10 +389,14 @@ const GanttChart: React.FC = () => {
                           segOverdue = segPlanEnd < now;
                           segAboutToExpire = !segOverdue && now >= segPlanEnd - 24 * HOUR;
                         } else {
-                          const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
-                          const dlDay = new Date(segPlanEnd); dlDay.setHours(0, 0, 0, 0);
-                          segOverdue = dlDay.getTime() < todayMid.getTime();
-                          segAboutToExpire = !segOverdue && dlDay.getTime() === todayMid.getTime();
+                          const nowD = new Date();
+                          const dlD = new Date(segPlanEnd);
+                          const sameDay = nowD.getFullYear() === dlD.getFullYear() && nowD.getMonth() === dlD.getMonth() && nowD.getDate() === dlD.getDate();
+                          const dlBeforeToday = (dlD.getFullYear() < nowD.getFullYear())
+                            || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() < nowD.getMonth())
+                            || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() === nowD.getMonth() && dlD.getDate() < nowD.getDate());
+                          segOverdue = dlBeforeToday;
+                          segAboutToExpire = !dlBeforeToday && sameDay;
                         }
                       }
                       const dotColor = segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : segColor;
@@ -432,10 +436,14 @@ const GanttChart: React.FC = () => {
                           isOverdue = planEnd < now;
                           isAboutToExpire = !isOverdue && now >= planEnd - 24 * HOUR;
                         } else {
-                          const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
-                          const dlDay = new Date(planEnd); dlDay.setHours(0, 0, 0, 0);
-                          isOverdue = dlDay.getTime() < todayMid.getTime();
-                          isAboutToExpire = !isOverdue && dlDay.getTime() === todayMid.getTime();
+                          const nowD = new Date();
+                          const dlD = new Date(planEnd);
+                          const sameDay = nowD.getFullYear() === dlD.getFullYear() && nowD.getMonth() === dlD.getMonth() && nowD.getDate() === dlD.getDate();
+                          const dlBeforeToday = (dlD.getFullYear() < nowD.getFullYear())
+                            || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() < nowD.getMonth())
+                            || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() === nowD.getMonth() && dlD.getDate() < nowD.getDate());
+                          isOverdue = dlBeforeToday;
+                          isAboutToExpire = !dlBeforeToday && sameDay;
                         }
                       }
                       const color = isOverdue ? '#ff4d4f' : isAboutToExpire ? '#faad14' : baseColor;
