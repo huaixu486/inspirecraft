@@ -5,7 +5,7 @@ import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   WarningOutlined,
-  FileTextOutlined,
+  ExclamationCircleOutlined,
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
@@ -33,18 +33,36 @@ const StatsCards: React.FC = () => {
     ),
   );
 
-  const now = Date.now();
+  const nowMs = Date.now();
 
   const totalStages = allSegments.length;
   const completedStages = allSegments.filter(s => Boolean(s.completedAt)).length;
-  const overdueStages = allSegments.filter(s =>
-    s.deadline && new Date(s.deadline).getTime() < now && !s.completedAt,
-  ).length;
-  const upcomingStages = allSegments.filter(s => {
+
+  // 逾期和即将逾期判断（与 GanttChart 逻辑一致）
+  const isSegmentOverdue = (s: { deadline?: string; completedAt?: string }) => {
     if (!s.deadline || s.completedAt) return false;
-    const diff = new Date(s.deadline).getTime() - now;
-    return diff > 0 && diff <= 7 * 24 * 60 * 60 * 1000;
-  }).length;
+    const dlMs = new Date(s.deadline).getTime();
+    const d = new Date(s.deadline);
+    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
+    if (hasTime) return dlMs < nowMs;
+    const nowD = new Date();
+    const dlD = new Date(s.deadline);
+    return (dlD.getFullYear() < nowD.getFullYear())
+      || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() < nowD.getMonth())
+      || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() === nowD.getMonth() && dlD.getDate() < nowD.getDate());
+  };
+
+  const isSegmentAboutToExpire = (s: { deadline?: string; completedAt?: string }) => {
+    if (!s.deadline || s.completedAt || isSegmentOverdue(s)) return false;
+    const d = new Date(s.deadline);
+    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
+    if (hasTime) return nowMs >= new Date(s.deadline).getTime() - 24 * 60 * 60 * 1000;
+    const nowD = new Date();
+    return nowD.getFullYear() === d.getFullYear() && nowD.getMonth() === d.getMonth() && nowD.getDate() === d.getDate();
+  };
+
+  const overdueStages = allSegments.filter(isSegmentOverdue).length;
+  const aboutToExpireStages = allSegments.filter(isSegmentAboutToExpire).length;
 
   const stats = [
     {
@@ -62,11 +80,11 @@ const StatsCards: React.FC = () => {
       subtitle: `共 ${totalStages} 个阶段`,
     },
     {
-      title: '即将到期',
-      value: upcomingStages,
-      icon: <ClockCircleOutlined />,
+      title: '即将逾期',
+      value: aboutToExpireStages,
+      icon: <ExclamationCircleOutlined />,
       iconBg: '#faad14',
-      subtitle: upcomingStages > 0 ? '7天内到期' : '暂无到期任务',
+      subtitle: aboutToExpireStages > 0 ? '今天到期未完成' : '暂无即将逾期',
     },
     {
       title: '已逾期',

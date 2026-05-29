@@ -61,7 +61,9 @@ const PlanManager: React.FC = () => {
   };
 
   const handleStageDeadline = async (segment: TimelineStageSegment, deadline?: string) => {
-    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline })));
+    // 规范化为当天 00:00:00，避免 showTime 导致的时间判断问题
+    const normalized = deadline ? (() => { const d = new Date(deadline); d.setHours(0, 0, 0, 0); return d.toISOString(); })() : undefined;
+    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline: normalized })));
   };
 
   const renderSegment = (segment: TimelineStageSegment) => {

@@ -171,7 +171,8 @@ const DetailPanel: React.FC = () => {
   };
 
   const handleStageDeadline = async (segment: TimelineStageSegment, deadline?: string) => {
-    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline })));
+    const normalized = deadline ? (() => { const d = new Date(deadline); d.setHours(0, 0, 0, 0); return d.toISOString(); })() : undefined;
+    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline: normalized })));
     message.success(deadline ? '已更新计划截止时间' : '已清除计划截止时间');
   };
 
