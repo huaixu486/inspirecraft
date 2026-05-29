@@ -381,8 +381,11 @@ const GanttChart: React.FC = () => {
                       const segColor = timelineStageMeta[segment.stage].color;
                       const segPlanEnd = toMs(segment.deadline);
                       const segDone = Boolean(segment.completedAt);
-                      const segOverdue = Number.isFinite(segPlanEnd) && segPlanEnd < now && !segDone;
-                      const segAboutToExpire = Number.isFinite(segPlanEnd) && !segDone && !segOverdue && segPlanEnd - now <= 7 * DAY;
+                      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+                      const segDeadlineDay = Number.isFinite(segPlanEnd) ? new Date(segPlanEnd) : null;
+                      if (segDeadlineDay) segDeadlineDay.setHours(0, 0, 0, 0);
+                      const segOverdue = segDeadlineDay !== null && segDeadlineDay.getTime() < todayStart.getTime() && !segDone;
+                      const segAboutToExpire = segDeadlineDay !== null && segDeadlineDay.getTime() === todayStart.getTime() && !segDone;
                       const dotColor = segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : segColor;
                       return (
                         <div
@@ -412,8 +415,11 @@ const GanttChart: React.FC = () => {
                           : Number.isFinite(activityEnd) ? activityEnd : now;
                       const hasPlan = Number.isFinite(planEnd);
                       const isDone = Boolean(segment.completedAt);
-                      const isOverdue = hasPlan && planEnd < now && !isDone;
-                      const isAboutToExpire = hasPlan && !isDone && !isOverdue && planEnd - now <= 7 * DAY;
+                      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+                      const deadlineDay = hasPlan ? new Date(planEnd) : null;
+                      if (deadlineDay) deadlineDay.setHours(0, 0, 0, 0);
+                      const isOverdue = hasPlan && deadlineDay !== null && deadlineDay.getTime() < todayStart.getTime() && !isDone;
+                      const isAboutToExpire = hasPlan && deadlineDay !== null && deadlineDay.getTime() === todayStart.getTime() && !isDone;
                       const color = isOverdue ? '#ff4d4f' : isAboutToExpire ? '#faad14' : baseColor;
                       const barEnd = Math.max(actualEnd, hasPlan ? planEnd : actualEnd);
                       const actualVisible = visible(start, actualEnd, view.start, view.span);
