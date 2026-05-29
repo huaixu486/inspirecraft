@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Card, Tooltip, Typography } from 'antd';
 import { WarningOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
@@ -195,11 +195,28 @@ const GanttChart: React.FC = () => {
     return () => observer.disconnect();
   }, []);
 
-  // 隔离滚动事件：在捕获阶段拦截，阻止冒泡到主页面
+  // 隔离滚动 + 缩放：在捕获阶段统一处理，阻止冒泡到主页面
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const handler = (e: WheelEvent) => e.stopPropagation();
+    const handler = (e: WheelEvent) => {
+      // 始终阻止冒泡，防止主页面滚动
+      e.stopPropagation();
+      // 鼠标在时间线区域时触发缩放
+      const rect = timeAreaRef.current?.getBoundingClientRect();
+      if (rect && rect.width > 0 && e.clientX >= rect.left) {
+        e.preventDefault();
+        const mousePct = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+        const current = viewRef.current;
+        const anchorTime = current.start + mousePct * current.span;
+        const zoomFactor = e.deltaY > 0 ? 1.18 : 0.84;
+        const newSpan = clamp(current.span * zoomFactor, MIN_SPAN, MAX_SPAN);
+        const newStart = anchorTime - mousePct * newSpan;
+        viewRef.current = { ...current, start: newStart, span: newSpan };
+        bump(n => n + 1);
+      }
+      // 名称栏区域：不 preventDefault，允许原生垂直滚动
+    };
     el.addEventListener('wheel', handler, { capture: true });
     return () => el.removeEventListener('wheel', handler, { capture: true });
   }, []);
@@ -232,29 +249,9 @@ const GanttChart: React.FC = () => {
   const ticks = useMemo(() => buildTicks(view.start, view.span, viewportWidth), [view.start, view.span, viewportWidth]);
   const todayPct = ((now - view.start) / view.span) * 100;
 
-  const onWheel = useCallback((e: React.WheelEvent) => {
-    // 隔离滚动事件，防止主页面跟着滚动
-    e.stopPropagation();
-    // 只有鼠标在时间线区域（右侧）才触发缩放，名称栏区域允许正常垂直滚动
-    const rect = timeAreaRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return;
-    if (e.clientX < rect.left) return;
-
-    e.preventDefault();
-    const mousePct = clamp((e.clientX - rect.left) / rect.width, 0, 1);
-    const current = viewRef.current;
-    const anchorTime = current.start + mousePct * current.span;
-    const zoomFactor = e.deltaY > 0 ? 1.18 : 0.84;
-    const newSpan = clamp(current.span * zoomFactor, MIN_SPAN, MAX_SPAN);
-    const newStart = anchorTime - mousePct * newSpan;
-
-    viewRef.current = { ...current, start: newStart, span: newSpan };
-    bump(n => n + 1);
-  }, []);
-
   return (
     <Card title="整体计划时间线" bordered={false} style={{ borderRadius: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.09)' }}>
-      <div onWheel={onWheel} style={{ overflow: 'hidden' }}>
+      <div style={{ overflow: 'hidden' }}>
         <div style={{ display: 'grid', gridTemplateColumns: `${PROJECT_COL + STAGE_COL}px minmax(0, 1fr)`, height: 30 }}>
           <div />
           <div ref={timeAreaRef} style={{ position: 'relative', overflow: 'hidden' }}>
