@@ -79,7 +79,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [deadline, setDeadline] = useState<dayjs.Dayjs | null>(null);
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
-  const [filterExt, setFilterExt] = useState<string | null>(null);
+  const [filterType, setFilterType] = useState<string | null>(null);
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const highlightTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
@@ -382,17 +382,27 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
           display: 'flex', gap: 12, marginBottom: 20,
           padding: '14px 16px', background: '#f6f8fa', borderRadius: 10,
         }}>
-          <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#1890ff' }}>{files.length}</div>
-            <Text type="secondary" style={{ fontSize: 11 }}>文件</Text>
-          </div>
-          <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#faad14' }}>{dirs.length}</div>
-            <Text type="secondary" style={{ fontSize: 11 }}>文件夹</Text>
+          <div
+            style={{ flex: 1, textAlign: 'center', cursor: 'pointer', padding: '4px 0', borderRadius: 6, background: filterType === null ? '#e6f7ff' : 'transparent', transition: 'background 0.2s' }}
+            onClick={() => setFilterType(null)}
+            onMouseEnter={e => { if (filterType !== null) e.currentTarget.style.background = '#f0f0f0'; }}
+            onMouseLeave={e => { if (filterType !== null) e.currentTarget.style.background = 'transparent'; }}
+          >
+            <div style={{ fontSize: 22, fontWeight: 'bold', color: filterType === null ? '#1890ff' : '#666' }}>{files.length}</div>
+            <Text type={filterType === null ? undefined : 'secondary'} style={{ fontSize: 11 }}>文件</Text>
           </div>
           <div style={{ flex: 1, textAlign: 'center' }}>
             <div style={{ fontSize: 22, fontWeight: 'bold', color: '#52c41a' }}>{formatSize(totalSize)}</div>
             <Text type="secondary" style={{ fontSize: 11 }}>总大小</Text>
+          </div>
+          <div
+            style={{ flex: 1, textAlign: 'center', cursor: 'pointer', padding: '4px 0', borderRadius: 6, background: filterType === '__dir__' ? '#e6f7ff' : 'transparent', transition: 'background 0.2s' }}
+            onClick={() => setFilterType(filterType === '__dir__' ? null : '__dir__')}
+            onMouseEnter={e => { if (filterType !== '__dir__') e.currentTarget.style.background = '#f0f0f0'; }}
+            onMouseLeave={e => { if (filterType !== '__dir__') e.currentTarget.style.background = 'transparent'; }}
+          >
+            <div style={{ fontSize: 22, fontWeight: 'bold', color: filterType === '__dir__' ? '#1890ff' : '#faad14' }}>{dirs.length}</div>
+            <Text type={filterType === '__dir__' ? undefined : 'secondary'} style={{ fontSize: 11 }}>文件夹</Text>
           </div>
           {Object.entries(typeCount).map(([ext, count]) => (
             <div
@@ -400,15 +410,15 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
               style={{
                 flex: 1, textAlign: 'center', cursor: 'pointer',
                 padding: '4px 0', borderRadius: 6,
-                background: filterExt === ext ? '#e6f7ff' : 'transparent',
+                background: filterType === ext ? '#e6f7ff' : 'transparent',
                 transition: 'background 0.2s',
               }}
-              onClick={() => setFilterExt(filterExt === ext ? null : ext)}
-              onMouseEnter={e => { if (filterExt !== ext) e.currentTarget.style.background = '#f0f0f0'; }}
-              onMouseLeave={e => { if (filterExt !== ext) e.currentTarget.style.background = 'transparent'; }}
+              onClick={() => setFilterType(filterType === ext ? null : ext)}
+              onMouseEnter={e => { if (filterType !== ext) e.currentTarget.style.background = '#f0f0f0'; }}
+              onMouseLeave={e => { if (filterType !== ext) e.currentTarget.style.background = 'transparent'; }}
             >
-              <div style={{ fontSize: 22, fontWeight: 'bold', color: filterExt === ext ? '#1890ff' : '#666' }}>{count}</div>
-              <Text type={filterExt === ext ? undefined : 'secondary'} style={{ fontSize: 11 }}>{ext.replace('.', '').toUpperCase() || '其他'}</Text>
+              <div style={{ fontSize: 22, fontWeight: 'bold', color: filterType === ext ? '#1890ff' : '#666' }}>{count}</div>
+              <Text type={filterType === ext ? undefined : 'secondary'} style={{ fontSize: 11 }}>{ext.replace('.', '').toUpperCase() || '其他'}</Text>
             </div>
           ))}
         </div>
@@ -435,13 +445,18 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
             <Text type="secondary" style={{ width: 140, fontSize: 11, textAlign: 'right' }}>修改时间</Text>
             <Text type="secondary" style={{ width: 70, fontSize: 11, textAlign: 'center' }}>操作</Text>
           </div>
-          {filterExt && (
+          {filterType && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, padding: '4px 8px', background: '#e6f7ff', borderRadius: 4 }}>
-              <Text style={{ fontSize: 11 }}>筛选：{filterExt.replace('.', '').toUpperCase() || '其他'}</Text>
-              <Button type="link" size="small" style={{ fontSize: 11, padding: 0 }} onClick={() => setFilterExt(null)}>清除</Button>
+              <Text style={{ fontSize: 11 }}>筛选：{filterType === '__dir__' ? '文件夹' : filterType.replace('.', '').toUpperCase() || '其他'}</Text>
+              <Button type="link" size="small" style={{ fontSize: 11, padding: 0 }} onClick={() => setFilterType(null)}>清除</Button>
             </div>
           )}
-          {(filterExt ? items.filter(i => i.isDirectory || (i.ext || '其他') === filterExt) : items).map(item => {
+          {(filterType === '__dir__'
+            ? items.filter(i => i.isDirectory)
+            : filterType
+              ? items.filter(i => (i.ext || '其他') === filterType)
+              : items
+          ).map(item => {
             const isHighlighted = highlightedPaths.has(item.path);
             return (
               <div
