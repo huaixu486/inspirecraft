@@ -317,7 +317,7 @@ const GanttChart: React.FC = () => {
               left: PROJECT_COL + STAGE_COL,
               right: 0,
               top: 0,
-              height: 9999,
+              height: totalContentHeight || '100%',
               pointerEvents: 'none',
               overflow: 'hidden',
               zIndex: 0,
