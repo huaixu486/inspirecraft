@@ -348,9 +348,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     <div style={{ padding: 20, height: '100%', overflow: 'auto' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-        {!isInRoot && (
-          <Button type="text" icon={<ArrowLeftOutlined />} onClick={handleBack} />
-        )}
+        <Button type="text" icon={<ArrowLeftOutlined />} onClick={isInRoot ? onBack : handleBack} title={isInRoot ? '返回项目列表' : '返回上级'} />
         <div>
           <div style={{ fontSize: 18, fontWeight: 600, color: '#1a1a1a' }}>{project.name}</div>
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -455,7 +453,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
           {(filterType === '__dir__'
             ? items.filter(i => i.isDirectory)
             : filterType
-              ? items.filter(i => (i.ext || '其他') === filterType)
+              ? items.filter(i => !i.isDirectory && (i.ext || '其他') === filterType)
               : items
           ).map(item => {
             const isHighlighted = highlightedPaths.has(item.path);
