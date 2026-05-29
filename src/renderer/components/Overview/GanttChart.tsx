@@ -378,13 +378,18 @@ const GanttChart: React.FC = () => {
                   {/* 阶段行 */}
                   <div style={{ width: STAGE_COL, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2 }}>
                     {segments.map(segment => {
-                      const color = timelineStageMeta[segment.stage].color;
+                      const segColor = timelineStageMeta[segment.stage].color;
+                      const segPlanEnd = toMs(segment.deadline);
+                      const segDone = Boolean(segment.completedAt);
+                      const segOverdue = Number.isFinite(segPlanEnd) && segPlanEnd < now && !segDone;
+                      const segAboutToExpire = Number.isFinite(segPlanEnd) && !segDone && !segOverdue && segPlanEnd - now <= 7 * DAY;
+                      const dotColor = segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : segColor;
                       return (
                         <div
                           key={`${project.id}-${segment.stage}`}
                           style={{ height: 28, display: 'flex', alignItems: 'center', gap: 4, paddingRight: 8, minWidth: 0 }}
                         >
-                          <span style={{ width: 7, height: 7, borderRadius: 2, background: color, flexShrink: 0 }} />
+                          <span style={{ width: 7, height: 7, borderRadius: 2, background: dotColor, flexShrink: 0 }} />
                           <Text type="secondary" ellipsis style={{ fontSize: 10 }}>{segment.label}</Text>
                         </div>
                       );
@@ -430,7 +435,7 @@ const GanttChart: React.FC = () => {
                               top: 4,
                               height: 16,
                               borderRadius: 3,
-                              border: `1.5px dashed ${isOverdue ? '#ff4d4f' : color}`,
+                              border: `1.5px dashed ${color}`,
                               overflow: 'visible',
                               zIndex: 1,
                             }}
@@ -443,24 +448,10 @@ const GanttChart: React.FC = () => {
                                 top: 0,
                                 bottom: 0,
                                 width: `${Math.max(0, ((Math.min(actualEnd, barEnd) - start) / (barEnd - start)) * 100)}%`,
-                                background: isOverdue
-                                  ? stripeBg('#ff4d4f', stripeAngle, '80')
-                                  : stripeBg(color, stripeAngle, '80'),
+                                background: stripeBg(color, stripeAngle, '80'),
                                 borderRadius: 3,
                               }}
                             />
-                            <Text
-                              style={{
-                                position: 'relative',
-                                fontSize: 9,
-                                color: '#000',
-                                whiteSpace: 'nowrap',
-                                paddingLeft: 4,
-                                lineHeight: '16px',
-                              }}
-                            >
-                              {segment.stage}
-                            </Text>
                             {/* 逾期三角在截止时间线，放在彩条内部 */}
                             {isOverdue && (
                               <WarningOutlined
