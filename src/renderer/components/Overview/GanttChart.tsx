@@ -399,7 +399,7 @@ const GanttChart: React.FC = () => {
                   {/* 时间线彩条 */}
                   <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                     {segments.map(segment => {
-                      const color = timelineStageMeta[segment.stage].color;
+                      const baseColor = timelineStageMeta[segment.stage].color;
                       const start = toMs(segment.startAt);
                       const planEnd = toMs(segment.deadline);
                       const completedEnd = toMs(segment.completedAt);
@@ -413,6 +413,8 @@ const GanttChart: React.FC = () => {
                       const hasPlan = Number.isFinite(planEnd);
                       const isDone = Boolean(segment.completedAt);
                       const isOverdue = hasPlan && planEnd < now && !isDone;
+                      const isAboutToExpire = hasPlan && !isDone && !isOverdue && planEnd - now <= 7 * DAY;
+                      const color = isOverdue ? '#ff4d4f' : isAboutToExpire ? '#faad14' : baseColor;
                       const barEnd = Math.max(actualEnd, hasPlan ? planEnd : actualEnd);
                       const actualVisible = visible(start, actualEnd, view.start, view.span);
                       const planVisible = hasPlan && visible(start, planEnd, view.start, view.span);

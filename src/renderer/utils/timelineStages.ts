@@ -4,7 +4,7 @@ export type TimelineStageName = '提案' | '指南编写' | '可研' | '其他';
 
 export const timelineStageMeta: Record<TimelineStageName, { color: string; label: string }> = {
   '提案': { color: '#1677ff', label: '提案阶段' },
-  '指南编写': { color: '#faad14', label: '指南编写' },
+  '指南编写': { color: '#722ed1', label: '指南编写' },
   '可研': { color: '#52c41a', label: '可研阶段' },
   '其他': { color: '#8c8c8c', label: '其他阶段' },
 };
