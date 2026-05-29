@@ -313,117 +313,134 @@ const GanttChart: React.FC = () => {
             )}
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             {projects.map(project => {
               const segments = segmentsByProject.get(project.id) || [];
-              return (
-                <div
-                  key={project.id}
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: `${LEFT_COL}px minmax(0, 1fr)`,
-                    minHeight: 48,
-                    alignItems: 'center',
-                  }}
-                >
-                  <div style={{ minWidth: 0, paddingRight: 12 }}>
-                    <Text ellipsis style={{ display: 'block', fontSize: 12 }}>{project.name}</Text>
-                    <Text type="secondary" style={{ fontSize: 10 }}>
-                      {segments.length > 0 ? `${segments.length} 个阶段` : '暂无阶段'}
-                    </Text>
+              if (segments.length === 0) {
+                return (
+                  <div
+                    key={project.id}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: `${LEFT_COL}px minmax(0, 1fr)`,
+                      height: 32,
+                      alignItems: 'center',
+                    }}
+                  >
+                    <div style={{ minWidth: 0, paddingRight: 12 }}>
+                      <Text ellipsis style={{ display: 'block', fontSize: 12 }}>{project.name}</Text>
+                      <Text type="secondary" style={{ fontSize: 10 }}>暂无阶段</Text>
+                    </div>
+                    <div />
                   </div>
-                  <div style={{ position: 'relative', height: 40, overflow: 'hidden', minWidth: 0 }}>
-                    {segments.map(segment => {
-                      const color = timelineStageMeta[segment.stage].color;
-                      const start = toMs(segment.startAt);
-                      const planEnd = toMs(segment.deadline);
-                      const completedEnd = toMs(segment.completedAt);
-                      const activityEnd = toMs(segment.lastActivityAt);
-                      const isCreatedProject = workspacePath && project.folderPath.startsWith(workspacePath);
-                      const actualEnd = Number.isFinite(completedEnd)
-                        ? completedEnd
-                        : isCreatedProject
-                          ? now
-                          : Number.isFinite(activityEnd) ? activityEnd : now;
-                      const hasPlan = Number.isFinite(planEnd);
-                      const isDone = Boolean(segment.completedAt);
-                      const isOverdue = hasPlan && planEnd < now && !isDone;
-                      const actualVisible = visible(start, actualEnd, view.start, view.span);
-                      const planVisible = hasPlan && visible(start, planEnd, view.start, view.span);
-                      const stripeAngle = STRIPE_ANGLE[segment.stage];
+                );
+              }
 
-                      return (
-                        <React.Fragment key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}>
-                          {planVisible && (
-                            <Tooltip
-                              title={`${segment.label}计划：${fmtDate(start)} → ${fmtDate(planEnd)}${isOverdue ? '（逾期）' : ''}`}
-                            >
-                              <div
-                                style={{
-                                  position: 'absolute',
-                                  ...barStyle(start, planEnd, view.start, view.span),
-                                  top: 5,
-                                  height: 12,
-                                  borderRadius: 3,
-                                  border: `1px dashed ${isOverdue ? '#ff4d4f' : color}`,
-                                  background: isOverdue
-                                    ? stripeBg('#ff4d4f', stripeAngle, '14')
-                                    : stripeBg(color, stripeAngle, '14'),
-                                  zIndex: 1,
-                                }}
-                              />
-                            </Tooltip>
-                          )}
-                          {actualVisible && (
-                            <Tooltip
-                              title={`${segment.label}实际：${fmtDate(start)} → ${fmtDate(actualEnd)}${isDone ? '（已完成）' : '（进行中）'}`}
-                            >
-                              <div
-                                style={{
-                                  position: 'absolute',
-                                  ...barStyle(start, actualEnd, view.start, view.span),
-                                  top: 18,
-                                  height: 14,
-                                  minWidth: 2,
-                                  borderRadius: 3,
-                                  border: `1px solid ${isOverdue ? '#ff4d4f' : color}`,
-                                  background: isOverdue
-                                    ? stripeBg('#ff4d4f', stripeAngle, '80')
-                                    : stripeBg(color, stripeAngle, '80'),
-                                  zIndex: 2,
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  paddingLeft: 6,
-                                  overflow: 'hidden',
-                                }}
-                              >
-                                <Text style={{ fontSize: 9, color: '#000', whiteSpace: 'nowrap' }}>
-                                  {segment.stage}
-                                </Text>
-                              </div>
-                            </Tooltip>
-                          )}
-                          {isOverdue && (
-                            <Tooltip title={`${segment.label}逾期：${fmtDate(planEnd)}`}>
+              return segments.map((segment, segIdx) => {
+                const color = timelineStageMeta[segment.stage].color;
+                const start = toMs(segment.startAt);
+                const planEnd = toMs(segment.deadline);
+                const completedEnd = toMs(segment.completedAt);
+                const activityEnd = toMs(segment.lastActivityAt);
+                const isCreatedProject = workspacePath && project.folderPath.startsWith(workspacePath);
+                const actualEnd = Number.isFinite(completedEnd)
+                  ? completedEnd
+                  : isCreatedProject
+                    ? now
+                    : Number.isFinite(activityEnd) ? activityEnd : now;
+                const hasPlan = Number.isFinite(planEnd);
+                const isDone = Boolean(segment.completedAt);
+                const isOverdue = hasPlan && planEnd < now && !isDone;
+                const actualVisible = visible(start, actualEnd, view.start, view.span);
+                const planVisible = hasPlan && visible(start, planEnd, view.start, view.span);
+                const stripeAngle = STRIPE_ANGLE[segment.stage];
+
+                return (
+                  <div
+                    key={`${project.id}-${segment.stage}-${segment.sourceDocIds.join('-')}`}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: `${LEFT_COL}px minmax(0, 1fr)`,
+                      height: 28,
+                      alignItems: 'center',
+                    }}
+                  >
+                    <div style={{ minWidth: 0, paddingRight: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {segIdx === 0 && (
+                        <Text ellipsis strong style={{ display: 'block', fontSize: 11, flexShrink: 0 }}>{project.name}</Text>
+                      )}
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />
+                      <Text type={segIdx === 0 ? undefined : 'secondary'} ellipsis style={{ fontSize: 10 }}>
+                        {segment.label}
+                      </Text>
+                    </div>
+                    <div style={{ position: 'relative', height: 24, overflow: 'hidden', minWidth: 0 }}>
+                      {planVisible && (
+                        <Tooltip
+                          title={`${segment.label}计划：${fmtDate(start)} → ${fmtDate(planEnd)}${isOverdue ? '（逾期）' : ''}`}
+                        >
+                          <div
+                            style={{
+                              position: 'absolute',
+                              ...barStyle(start, planEnd, view.start, view.span),
+                              top: 2,
+                              height: 8,
+                              borderRadius: 2,
+                              border: `1px dashed ${isOverdue ? '#ff4d4f' : color}`,
+                              background: isOverdue
+                                ? stripeBg('#ff4d4f', stripeAngle, '14')
+                                : stripeBg(color, stripeAngle, '14'),
+                              zIndex: 1,
+                            }}
+                          />
+                        </Tooltip>
+                      )}
+                      {actualVisible && (
+                        <Tooltip
+                          title={`${segment.label}实际：${fmtDate(start)} → ${fmtDate(actualEnd)}${isDone ? '（已完成）' : isOverdue ? '（逾期）' : '（进行中）'}`}
+                        >
+                          <div
+                            style={{
+                              position: 'absolute',
+                              ...barStyle(start, actualEnd, view.start, view.span),
+                              top: 11,
+                              height: 11,
+                              minWidth: 2,
+                              borderRadius: 2,
+                              border: `1px solid ${isOverdue ? '#ff4d4f' : color}`,
+                              background: isOverdue
+                                ? stripeBg('#ff4d4f', stripeAngle, '80')
+                                : stripeBg(color, stripeAngle, '80'),
+                              zIndex: 2,
+                              display: 'flex',
+                              alignItems: 'center',
+                              paddingLeft: 4,
+                              paddingRight: isOverdue ? 16 : 4,
+                              overflow: 'hidden',
+                            }}
+                          >
+                            <Text style={{ fontSize: 8, color: '#000', whiteSpace: 'nowrap' }}>
+                              {segment.stage}
+                            </Text>
+                            {isOverdue && (
                               <WarningOutlined
                                 style={{
                                   position: 'absolute',
-                                  left: `${clamp(((planEnd - view.start) / view.span) * 100, 0, 100)}%`,
-                                  top: 4,
-                                  transform: 'translateX(-50%)',
-                                  fontSize: 11,
+                                  right: 2,
+                                  top: '50%',
+                                  transform: 'translateY(-50%)',
+                                  fontSize: 9,
                                   color: '#ff4d4f',
-                                  zIndex: 5,
                                 }}
                               />
-                            </Tooltip>
-                          )}
-                        </React.Fragment>
-                      );
-                    })}
+                            )}
+                          </div>
+                        </Tooltip>
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
+                );
+              });
             })}
           </div>
 
