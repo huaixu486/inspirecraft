@@ -428,7 +428,7 @@ const GanttChart: React.FC = () => {
                       {/* 统一彩条：虚线边框 = 计划，实心填充 = 实际 */}
                       {(planVisible || actualVisible) && (
                         <Tooltip
-                          title={`${segment.label}：${fmtDate(start)} → ${isDone ? fmtDate(actualEnd) + '（已完成）' : isOverdue ? fmtDate(planEnd) + '（逾期）' : fmtDate(actualEnd) + '（进行中）'}${hasPlan ? ` | 计划截止 ${fmtDate(planEnd)}` : ''}`}
+                          title={`${segment.label}：${fmtDate(start)} → ${isDone ? fmtDate(actualEnd) + '（已完成）' : isOverdue ? fmtDate(now) + '（逾期）' : fmtDate(actualEnd) + '（进行中）'}${hasPlan ? ` | 计划截止 ${fmtDate(planEnd)}` : ''}`}
                         >
                           <div
                             style={{
