@@ -241,7 +241,7 @@ const GanttChart: React.FC = () => {
   return (
     <Card title="整体计划时间线" bordered={false} style={{ borderRadius: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.09)' }}>
       <div onWheel={onWheel} style={{ overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: `${LEFT_COL}px minmax(0, 1fr)`, height: 30 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: `${PROJECT_COL + STAGE_COL}px minmax(0, 1fr)`, height: 30 }}>
           <div />
           <div ref={timeAreaRef} style={{ position: 'relative', overflow: 'hidden' }}>
             {ticks.map((tick, index) => (
@@ -288,7 +288,7 @@ const GanttChart: React.FC = () => {
           <div
             style={{
               position: 'absolute',
-              left: LEFT_COL,
+              left: PROJECT_COL + STAGE_COL,
               right: 0,
               top: 0,
               bottom: 0,
