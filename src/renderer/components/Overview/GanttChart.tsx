@@ -223,6 +223,8 @@ const GanttChart: React.FC = () => {
   const todayPct = ((now - view.start) / view.span) * 100;
 
   const onWheel = useCallback((e: React.WheelEvent) => {
+    // 隔离滚动事件，防止主页面跟着滚动
+    e.stopPropagation();
     // 只有鼠标在时间线区域（右侧）才触发缩放，名称栏区域允许正常垂直滚动
     const rect = timeAreaRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return;
