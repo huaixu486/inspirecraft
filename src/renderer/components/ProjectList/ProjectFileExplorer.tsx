@@ -141,9 +141,10 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const files = items.filter(i => !i.isDirectory);
   const dirs = items.filter(i => i.isDirectory);
   const totalSize = files.reduce((acc, f) => acc + f.size, 0);
+  const KNOWN_EXTS = ['.docx', '.doc', '.pdf', '.xlsx', '.xls', '.pptx', '.ppt', '.txt'];
   const typeCount: Record<string, number> = {};
   for (const f of files) {
-    const key = f.ext || '其他';
+    const key = KNOWN_EXTS.includes(f.ext) ? f.ext : '其他';
     typeCount[key] = (typeCount[key] || 0) + 1;
   }
 
