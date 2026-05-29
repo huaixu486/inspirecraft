@@ -20,47 +20,114 @@ import {
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
+import { useTemplateStore } from '../../stores/templateStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
-import { Project } from '../../../shared/types';
+import { Project, ProjectDocument } from '../../../shared/types';
 import ProjectFileExplorer from './ProjectFileExplorer';
 
 const { Text } = Typography;
+
+const fileTypeOptions = [
+  { value: 'docx', label: 'Word 文档 (.docx)' },
+  { value: 'pptx', label: 'PowerPoint (.pptx)' },
+  { value: 'xlsx', label: 'Excel (.xlsx)' },
+  { value: 'pdf', label: 'PDF (.pdf)' },
+  { value: 'txt', label: '纯文本 (.txt)' },
+];
 
 const ProjectList: React.FC = () => {
   const { projects, addProject, setCurrentProject, deleteProject } =
     useProjectStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
+  const { templates } = useTemplateStore();
+  const { workspacePath } = useSettingsStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
   const [browsingProject, setBrowsingProject] = useState<Project | null>(null);
   const [form] = Form.useForm();
+
+  const projectName = Form.useWatch('name', form);
+  const folderPreview = workspacePath && projectName
+    ? `${workspacePath}\\${projectName}`
+    : '';
 
   const handleCreate = async () => {
     try {
       const values = await form.validateFields();
+      setIsCreating(true);
+
+      // 在 workspace 中自动创建项目文件夹
+      const result = await window.electronAPI.createProjectFolder({
+        projectName: values.name,
+        workspacePath,
+      });
+
+      if (!result.success) {
+        message.error(`创建文件夹失败: ${result.error}`);
+        return;
+      }
+
+      const folderPath = result.folderPath || '';
+
+      // 创建初始文件
+      const fileResult = await window.electronAPI.createBlankFile({
+        folderPath,
+        fileName: values.name,
+        fileType: values.fileType || 'docx',
+      });
+
       const newProject: Project = {
         id: Date.now().toString(),
         name: values.name,
         description: values.description || '',
-        folderPath: values.folderPath || '',
+        folderPath,
         status: 'active',
         progress: 0,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
+
       await addProject(newProject);
-      await syncProjectStageFiles(newProject, { projectDocs, addProjectDoc, updateProjectDoc });
+
+      // 如果选择了模板，自动创建 ProjectDocument
+      if (values.templateId) {
+        const template = templates.find(t => t.id === values.templateId);
+        if (template) {
+          const doc: ProjectDocument = {
+            id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
+            projectId: newProject.id,
+            templateId: values.templateId,
+            name: `${values.name}-${template.name}`,
+            sections: [],
+            overallProgress: 0,
+            sourceFilePath: fileResult.filePath,
+            sourceFileCreatedAt: new Date().toISOString(),
+            sourceFileModifiedAt: new Date().toISOString(),
+            createdAt: new Date().toISOString(),
+          };
+          await addProjectDoc(doc);
+        }
+      }
+
+      await syncProjectStageFiles(newProject, {
+        projectDocs: useProjectDocStore.getState().projectDocs,
+        addProjectDoc,
+        updateProjectDoc,
+      });
+
       setIsModalOpen(false);
       form.resetFields();
-      message.success('项目创建成功');
-    } catch (error) {
-      console.error('表单验证失败:', error);
-    }
-  };
 
-  const handleSelectFolder = async () => {
-    const folderPath = await window.electronAPI.openFolder();
-    if (folderPath) {
-      form.setFieldsValue({ folderPath });
+      if (fileResult.success) {
+        message.success(`项目创建成功，已生成 ${values.name}.${values.fileType || 'docx'}`);
+      } else {
+        message.success('项目创建成功');
+      }
+    } catch (error) {
+      console.error('创建项目失败:', error);
+    } finally {
+      setIsCreating(false);
     }
   };
 
@@ -162,11 +229,12 @@ const ProjectList: React.FC = () => {
         title="新建项目"
         open={isModalOpen}
         onOk={handleCreate}
-        onCancel={() => setIsModalOpen(false)}
+        onCancel={() => { setIsModalOpen(false); form.resetFields(); }}
         okText="创建"
         cancelText="取消"
+        confirmLoading={isCreating}
       >
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" initialValues={{ fileType: 'docx' }}>
           <Form.Item
             name="name"
             label="项目名称"
@@ -175,20 +243,27 @@ const ProjectList: React.FC = () => {
             <Input placeholder="例如：XX可研报告" />
           </Form.Item>
           <Form.Item name="description" label="项目描述">
-            <Input.TextArea rows={3} placeholder="简要描述项目内容" />
+            <Input.TextArea rows={2} placeholder="简要描述项目内容" />
           </Form.Item>
-          <Form.Item name="folderPath" label="项目文件夹">
-            <Space.Compact style={{ width: '100%' }}>
-              <Input placeholder="选择项目文件夹" readOnly />
-              <Button onClick={handleSelectFolder}>选择</Button>
-            </Space.Compact>
+          <Form.Item
+            name="fileType"
+            label="创建文件类型"
+            rules={[{ required: true, message: '请选择文件类型' }]}
+          >
+            <Select options={fileTypeOptions} placeholder="选择要创建的文件类型" />
           </Form.Item>
-          <Form.Item name="status" label="初始状态" initialValue="active">
-            <Select>
-              <Select.Option value="active">进行中</Select.Option>
-              <Select.Option value="paused">暂停</Select.Option>
-            </Select>
+          <Form.Item name="templateId" label="关联模板（可选）">
+            <Select
+              allowClear
+              placeholder="选择模板，用于跟踪文档进度"
+              options={templates.map(t => ({ value: t.id, label: `${t.name} (${t.category})` }))}
+            />
           </Form.Item>
+          {folderPreview && (
+            <Form.Item label="项目文件夹（自动生成）">
+              <Text type="secondary" style={{ fontSize: 12 }}>{folderPreview}</Text>
+            </Form.Item>
+          )}
         </Form>
       </Modal>
     </div>
