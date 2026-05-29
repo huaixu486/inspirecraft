@@ -452,9 +452,11 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
           )}
           {(filterType === '__dir__'
             ? items.filter(i => i.isDirectory)
-            : filterType
-              ? items.filter(i => !i.isDirectory && (i.ext || '其他') === filterType)
-              : items
+            : filterType === '其他'
+              ? items.filter(i => !i.isDirectory && !KNOWN_EXTS.includes(i.ext))
+              : filterType
+                ? items.filter(i => !i.isDirectory && i.ext === filterType)
+                : items
           ).map(item => {
             const isHighlighted = highlightedPaths.has(item.path);
             return (
