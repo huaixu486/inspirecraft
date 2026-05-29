@@ -351,6 +351,7 @@ const GanttChart: React.FC = () => {
                 const hasPlan = Number.isFinite(planEnd);
                 const isDone = Boolean(segment.completedAt);
                 const isOverdue = hasPlan && planEnd < now && !isDone;
+                const barEnd = Math.max(actualEnd, hasPlan ? planEnd : actualEnd);
                 const actualVisible = visible(start, actualEnd, view.start, view.span);
                 const planVisible = hasPlan && visible(start, planEnd, view.start, view.span);
                 const stripeAngle = STRIPE_ANGLE[segment.stage];
@@ -374,67 +375,66 @@ const GanttChart: React.FC = () => {
                         {segment.label}
                       </Text>
                     </div>
-                    <div style={{ position: 'relative', height: 24, overflow: 'hidden', minWidth: 0 }}>
-                      {planVisible && (
+                    <div style={{ position: 'relative', height: 24, overflow: 'visible', minWidth: 0 }}>
+                      {/* 统一彩条：虚线边框 = 计划，实心填充 = 实际 */}
+                      {(planVisible || actualVisible) && (
                         <Tooltip
-                          title={`${segment.label}计划：${fmtDate(start)} → ${fmtDate(planEnd)}${isOverdue ? '（逾期）' : ''}`}
+                          title={`${segment.label}：${fmtDate(start)} → ${isDone ? fmtDate(actualEnd) + '（已完成）' : isOverdue ? fmtDate(planEnd) + '（逾期）' : fmtDate(actualEnd) + '（进行中）'}${hasPlan ? ` | 计划截止 ${fmtDate(planEnd)}` : ''}`}
                         >
                           <div
                             style={{
                               position: 'absolute',
-                              ...barStyle(start, planEnd, view.start, view.span),
-                              top: 2,
-                              height: 8,
-                              borderRadius: 2,
-                              border: `1px dashed ${isOverdue ? '#ff4d4f' : color}`,
-                              background: isOverdue
-                                ? stripeBg('#ff4d4f', stripeAngle, '14')
-                                : stripeBg(color, stripeAngle, '14'),
+                              ...barStyle(start, barEnd, view.start, view.span),
+                              top: 4,
+                              height: 16,
+                              borderRadius: 3,
+                              border: `1.5px dashed ${isOverdue ? '#ff4d4f' : color}`,
+                              overflow: 'hidden',
                               zIndex: 1,
                             }}
-                          />
-                        </Tooltip>
-                      )}
-                      {actualVisible && (
-                        <Tooltip
-                          title={`${segment.label}实际：${fmtDate(start)} → ${fmtDate(actualEnd)}${isDone ? '（已完成）' : isOverdue ? '（逾期）' : '（进行中）'}`}
-                        >
-                          <div
-                            style={{
-                              position: 'absolute',
-                              ...barStyle(start, actualEnd, view.start, view.span),
-                              top: 11,
-                              height: 11,
-                              minWidth: 2,
-                              borderRadius: 2,
-                              border: `1px solid ${isOverdue ? '#ff4d4f' : color}`,
-                              background: isOverdue
-                                ? stripeBg('#ff4d4f', stripeAngle, '80')
-                                : stripeBg(color, stripeAngle, '80'),
-                              zIndex: 2,
-                              display: 'flex',
-                              alignItems: 'center',
-                              paddingLeft: 4,
-                              paddingRight: isOverdue ? 16 : 4,
-                              overflow: 'hidden',
-                            }}
                           >
-                            <Text style={{ fontSize: 8, color: '#000', whiteSpace: 'nowrap' }}>
+                            {/* 实际进度填充 */}
+                            <div
+                              style={{
+                                position: 'absolute',
+                                left: 0,
+                                top: 0,
+                                bottom: 0,
+                                width: `${Math.max(0, ((Math.min(actualEnd, barEnd) - start) / (barEnd - start)) * 100)}%`,
+                                background: isOverdue
+                                  ? stripeBg('#ff4d4f', stripeAngle, '80')
+                                  : stripeBg(color, stripeAngle, '80'),
+                              }}
+                            />
+                            <Text
+                              style={{
+                                position: 'relative',
+                                fontSize: 9,
+                                color: '#000',
+                                whiteSpace: 'nowrap',
+                                paddingLeft: 4,
+                                lineHeight: '16px',
+                              }}
+                            >
                               {segment.stage}
                             </Text>
-                            {isOverdue && (
-                              <WarningOutlined
-                                style={{
-                                  position: 'absolute',
-                                  right: 2,
-                                  top: '50%',
-                                  transform: 'translateY(-50%)',
-                                  fontSize: 9,
-                                  color: '#ff4d4f',
-                                }}
-                              />
-                            )}
                           </div>
+                        </Tooltip>
+                      )}
+                      {/* 逾期三角在截止时间线上 */}
+                      {isOverdue && (
+                        <Tooltip title={`逾期：计划截止 ${fmtDate(planEnd)}`}>
+                          <WarningOutlined
+                            style={{
+                              position: 'absolute',
+                              left: `${clamp(((planEnd - view.start) / view.span) * 100, 0, 100)}%`,
+                              top: 0,
+                              transform: 'translateX(-50%)',
+                              fontSize: 11,
+                              color: '#ff4d4f',
+                              zIndex: 3,
+                            }}
+                          />
                         </Tooltip>
                       )}
                     </div>
