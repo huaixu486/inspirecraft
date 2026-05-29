@@ -6,7 +6,7 @@ import dayjs from 'dayjs';
 import {
   FolderOutlined, FileTextOutlined, FilePdfOutlined, FileOutlined,
   FileExcelOutlined, FilePptOutlined, ArrowLeftOutlined, PlusOutlined,
-  ReloadOutlined, FileWordOutlined, DeleteOutlined, EyeOutlined, UndoOutlined,
+  ReloadOutlined, FileWordOutlined, DeleteOutlined, FolderOpenOutlined, UndoOutlined,
 } from '@ant-design/icons';
 import { Project } from '../../../shared/types';
 import { useTemplateStore } from '../../stores/templateStore';
@@ -79,6 +79,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [deadline, setDeadline] = useState<dayjs.Dayjs | null>(null);
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
+  const [filterExt, setFilterExt] = useState<string | null>(null);
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const highlightTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
@@ -394,9 +395,20 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
             <Text type="secondary" style={{ fontSize: 11 }}>总大小</Text>
           </div>
           {Object.entries(typeCount).map(([ext, count]) => (
-            <div key={ext} style={{ flex: 1, textAlign: 'center' }}>
-              <div style={{ fontSize: 22, fontWeight: 'bold', color: '#666' }}>{count}</div>
-              <Text type="secondary" style={{ fontSize: 11 }}>{ext.replace('.', '').toUpperCase() || '其他'}</Text>
+            <div
+              key={ext}
+              style={{
+                flex: 1, textAlign: 'center', cursor: 'pointer',
+                padding: '4px 0', borderRadius: 6,
+                background: filterExt === ext ? '#e6f7ff' : 'transparent',
+                transition: 'background 0.2s',
+              }}
+              onClick={() => setFilterExt(filterExt === ext ? null : ext)}
+              onMouseEnter={e => { if (filterExt !== ext) e.currentTarget.style.background = '#f0f0f0'; }}
+              onMouseLeave={e => { if (filterExt !== ext) e.currentTarget.style.background = 'transparent'; }}
+            >
+              <div style={{ fontSize: 22, fontWeight: 'bold', color: filterExt === ext ? '#1890ff' : '#666' }}>{count}</div>
+              <Text type={filterExt === ext ? undefined : 'secondary'} style={{ fontSize: 11 }}>{ext.replace('.', '').toUpperCase() || '其他'}</Text>
             </div>
           ))}
         </div>
@@ -423,7 +435,13 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
             <Text type="secondary" style={{ width: 140, fontSize: 11, textAlign: 'right' }}>修改时间</Text>
             <Text type="secondary" style={{ width: 70, fontSize: 11, textAlign: 'center' }}>操作</Text>
           </div>
-          {items.map(item => {
+          {filterExt && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, padding: '4px 8px', background: '#e6f7ff', borderRadius: 4 }}>
+              <Text style={{ fontSize: 11 }}>筛选：{filterExt.replace('.', '').toUpperCase() || '其他'}</Text>
+              <Button type="link" size="small" style={{ fontSize: 11, padding: 0 }} onClick={() => setFilterExt(null)}>清除</Button>
+            </div>
+          )}
+          {(filterExt ? items.filter(i => i.isDirectory || (i.ext || '其他') === filterExt) : items).map(item => {
             const isHighlighted = highlightedPaths.has(item.path);
             return (
               <div
@@ -458,13 +476,11 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
                   {formatDate(item.modifiedAt)}
                 </Text>
                 <div style={{ width: 70, display: 'flex', justifyContent: 'center', gap: 2 }}>
-                  {!item.isDirectory && (
-                    <Button
-                      type="text" size="small" icon={<EyeOutlined />}
-                      onClick={(e) => { e.stopPropagation(); handleOpenFile(item); }}
-                      title="打开"
-                    />
-                  )}
+                  <Button
+                    type="text" size="small" icon={<FolderOpenOutlined />}
+                    onClick={(e) => { e.stopPropagation(); window.electronAPI.openInExplorer(item.path); }}
+                    title="打开文件所在位置"
+                  />
                   <Popconfirm
                     title={`确定删除 ${item.name}？`}
                     onConfirm={(e) => { e?.stopPropagation(); handleDeleteFile(item); }}
