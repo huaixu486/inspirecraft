@@ -223,8 +223,10 @@ const GanttChart: React.FC = () => {
   const todayPct = ((now - view.start) / view.span) * 100;
 
   const onWheel = useCallback((e: React.WheelEvent) => {
+    // 只有鼠标在时间线区域（右侧）才触发缩放，名称栏区域允许正常垂直滚动
     const rect = timeAreaRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return;
+    if (e.clientX < rect.left) return;
 
     e.preventDefault();
     const mousePct = clamp((e.clientX - rect.left) / rect.width, 0, 1);
@@ -326,17 +328,25 @@ const GanttChart: React.FC = () => {
                     key={project.id}
                     style={{
                       display: 'flex',
-                      height: 32,
+                      height: 28,
                       alignItems: 'center',
                     }}
                   >
-                    <div style={{ width: PROJECT_COL, textAlign: 'center', position: 'sticky', left: 0, background: '#fff', zIndex: 2, flexShrink: 0 }}>
-                      <Text ellipsis strong style={{ fontSize: 11 }}>{project.name}</Text>
+                    <div style={{
+                      width: PROJECT_COL, flexShrink: 0,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      position: 'sticky', left: 0, background: '#fff', zIndex: 2,
+                    }}>
+                      <Text ellipsis strong style={{ fontSize: 11, textAlign: 'center' }}>{project.name}</Text>
                     </div>
-                    <div style={{ width: STAGE_COL, textAlign: 'center', position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2, flexShrink: 0 }}>
+                    <div style={{
+                      width: STAGE_COL, flexShrink: 0,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2,
+                    }}>
                       <Text type="secondary" style={{ fontSize: 10 }}>暂无阶段</Text>
                     </div>
-                    <div style={{ flex: 1 }} />
+                    <div style={{ flex: 1, minWidth: 0 }} />
                   </div>
                 );
               }
