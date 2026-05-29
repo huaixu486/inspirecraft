@@ -284,16 +284,18 @@ const GanttChart: React.FC = () => {
           </div>
         </div>
 
-        <div style={{ position: 'relative' }}>
+        <div style={{ position: 'relative', maxHeight: 420, overflowY: 'auto' }}>
+          {/* 网格线随滚动内容一起滚动 */}
           <div
             style={{
               position: 'absolute',
               left: PROJECT_COL + STAGE_COL,
               right: 0,
               top: 0,
-              bottom: 0,
+              height: 9999,
               pointerEvents: 'none',
               overflow: 'hidden',
+              zIndex: 0,
             }}
           >
             {ticks.filter(tick => tick.major).map((tick, index) => (
@@ -314,8 +316,8 @@ const GanttChart: React.FC = () => {
             )}
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {projects.map(project => {
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, position: 'relative', zIndex: 1 }}>
+            {[...projects].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).map(project => {
               const segments = segmentsByProject.get(project.id) || [];
 
               if (segments.length === 0) {
@@ -323,16 +325,18 @@ const GanttChart: React.FC = () => {
                   <div
                     key={project.id}
                     style={{
-                      display: 'grid',
-                      gridTemplateColumns: `${PROJECT_COL}px ${STAGE_COL}px minmax(0, 1fr)`,
+                      display: 'flex',
                       height: 32,
                       alignItems: 'center',
-                      justifyItems: 'center',
                     }}
                   >
-                    <Text ellipsis strong style={{ fontSize: 11, textAlign: 'center' }}>{project.name}</Text>
-                    <Text type="secondary" style={{ fontSize: 10 }}>暂无阶段</Text>
-                    <div />
+                    <div style={{ width: PROJECT_COL, textAlign: 'center', position: 'sticky', left: 0, background: '#fff', zIndex: 2, flexShrink: 0 }}>
+                      <Text ellipsis strong style={{ fontSize: 11 }}>{project.name}</Text>
+                    </div>
+                    <div style={{ width: STAGE_COL, textAlign: 'center', position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2, flexShrink: 0 }}>
+                      <Text type="secondary" style={{ fontSize: 10 }}>暂无阶段</Text>
+                    </div>
+                    <div style={{ flex: 1 }} />
                   </div>
                 );
               }
@@ -341,20 +345,21 @@ const GanttChart: React.FC = () => {
                 <div
                   key={project.id}
                   style={{
-                    display: 'grid',
-                    gridTemplateColumns: `${PROJECT_COL}px ${STAGE_COL}px minmax(0, 1fr)`,
+                    display: 'flex',
                   }}
                 >
                   {/* 项目名称：垂直居中跨所有阶段行 */}
                   <div style={{
+                    width: PROJECT_COL, flexShrink: 0,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     minHeight: segments.length * 28,
+                    position: 'sticky', left: 0, background: '#fff', zIndex: 2,
                   }}>
                     <Text ellipsis strong style={{ fontSize: 11, textAlign: 'center' }}>{project.name}</Text>
                   </div>
 
                   {/* 阶段行 */}
-                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ width: STAGE_COL, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2 }}>
                     {segments.map(segment => {
                       const color = timelineStageMeta[segment.stage].color;
                       return (
@@ -370,7 +375,7 @@ const GanttChart: React.FC = () => {
                   </div>
 
                   {/* 时间线彩条 */}
-                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                     {segments.map(segment => {
                       const color = timelineStageMeta[segment.stage].color;
                       const start = toMs(segment.startAt);
