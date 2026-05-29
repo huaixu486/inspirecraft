@@ -249,6 +249,20 @@ const GanttChart: React.FC = () => {
   const ticks = useMemo(() => buildTicks(view.start, view.span, viewportWidth), [view.start, view.span, viewportWidth]);
   const todayPct = ((now - view.start) / view.span) * 100;
 
+  // 计算内容总高度，决定是否需要滚动
+  const totalContentHeight = useMemo(() => {
+    let h = 0;
+    for (const project of projects) {
+      const segs = segmentsByProject.get(project.id) || [];
+      h += segs.length > 0 ? segs.length * 28 + 2 : 32;
+    }
+    return h;
+  }, [projects, segmentsByProject]);
+  const ROW_HEIGHT = 30; // 单行平均高度
+  const VISIBLE_ROWS = 3;
+  const visibleHeight = VISIBLE_ROWS * ROW_HEIGHT;
+  const needsScroll = totalContentHeight > visibleHeight;
+
   return (
     <Card title="整体计划时间线" bordered={false} style={{ borderRadius: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.09)' }}>
       <div style={{ overflow: 'hidden' }}>
@@ -295,7 +309,7 @@ const GanttChart: React.FC = () => {
           </div>
         </div>
 
-        <div ref={scrollRef} style={{ position: 'relative', ...(projects.length > 3 ? { maxHeight: 96, overflowY: 'auto' } : {}) }}>
+        <div ref={scrollRef} style={{ position: 'relative', ...(needsScroll ? { maxHeight: visibleHeight, overflowY: 'auto' } : {}) }}>
           {/* 网格线随滚动内容一起滚动 */}
           <div
             style={{
