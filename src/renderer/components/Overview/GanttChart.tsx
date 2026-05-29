@@ -21,7 +21,8 @@ const MONTH = 30 * DAY;
 const YEAR = 365 * DAY;
 const MIN_SPAN = HOUR;
 const MAX_SPAN = 2 * YEAR;
-const LEFT_COL = 156;
+const PROJECT_COL = 100;
+const STAGE_COL = 100;
 
 // 每个阶段使用不同条纹角度，重叠时形成交叉纹理便于区分
 const STRIPE_ANGLE: Record<TimelineStageName, number> = {
@@ -316,66 +317,84 @@ const GanttChart: React.FC = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             {projects.map(project => {
               const segments = segmentsByProject.get(project.id) || [];
+
               if (segments.length === 0) {
                 return (
                   <div
                     key={project.id}
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: `${LEFT_COL}px minmax(0, 1fr)`,
+                      gridTemplateColumns: `${PROJECT_COL}px ${STAGE_COL}px minmax(0, 1fr)`,
                       height: 32,
                       alignItems: 'center',
                     }}
                   >
-                    <div style={{ minWidth: 0, paddingRight: 12 }}>
-                      <Text ellipsis style={{ display: 'block', fontSize: 12 }}>{project.name}</Text>
-                      <Text type="secondary" style={{ fontSize: 10 }}>暂无阶段</Text>
-                    </div>
+                    <Text ellipsis strong style={{ fontSize: 11, paddingRight: 8 }}>{project.name}</Text>
+                    <Text type="secondary" style={{ fontSize: 10, paddingRight: 8 }}>暂无阶段</Text>
                     <div />
                   </div>
                 );
               }
 
-              return segments.map((segment, segIdx) => {
-                const color = timelineStageMeta[segment.stage].color;
-                const start = toMs(segment.startAt);
-                const planEnd = toMs(segment.deadline);
-                const completedEnd = toMs(segment.completedAt);
-                const activityEnd = toMs(segment.lastActivityAt);
-                const isCreatedProject = workspacePath && project.folderPath.startsWith(workspacePath);
-                const actualEnd = Number.isFinite(completedEnd)
-                  ? completedEnd
-                  : isCreatedProject
-                    ? now
-                    : Number.isFinite(activityEnd) ? activityEnd : now;
-                const hasPlan = Number.isFinite(planEnd);
-                const isDone = Boolean(segment.completedAt);
-                const isOverdue = hasPlan && planEnd < now && !isDone;
-                const barEnd = Math.max(actualEnd, hasPlan ? planEnd : actualEnd);
-                const actualVisible = visible(start, actualEnd, view.start, view.span);
-                const planVisible = hasPlan && visible(start, planEnd, view.start, view.span);
-                const stripeAngle = STRIPE_ANGLE[segment.stage];
+              return (
+                <div
+                  key={project.id}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: `${PROJECT_COL}px ${STAGE_COL}px minmax(0, 1fr)`,
+                  }}
+                >
+                  {/* 项目名称：垂直居中跨所有阶段行 */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+                    paddingRight: 8, minHeight: segments.length * 28,
+                  }}>
+                    <Text ellipsis strong style={{ fontSize: 11, textAlign: 'right' }}>{project.name}</Text>
+                  </div>
 
-                return (
-                  <div
-                    key={`${project.id}-${segment.stage}-${segment.sourceDocIds.join('-')}`}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: `${LEFT_COL}px minmax(0, 1fr)`,
-                      height: 28,
-                      alignItems: 'center',
-                    }}
-                  >
-                    <div style={{ minWidth: 0, paddingRight: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {segIdx === 0 && (
-                        <Text ellipsis strong style={{ display: 'block', fontSize: 11, flexShrink: 0 }}>{project.name}</Text>
-                      )}
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />
-                      <Text type={segIdx === 0 ? undefined : 'secondary'} ellipsis style={{ fontSize: 10 }}>
-                        {segment.label}
-                      </Text>
-                    </div>
-                    <div style={{ position: 'relative', height: 24, overflow: 'visible', minWidth: 0 }}>
+                  {/* 阶段行 */}
+                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                    {segments.map(segment => {
+                      const color = timelineStageMeta[segment.stage].color;
+                      return (
+                        <div
+                          key={`${project.id}-${segment.stage}`}
+                          style={{ height: 28, display: 'flex', alignItems: 'center', gap: 4, paddingRight: 8, minWidth: 0 }}
+                        >
+                          <span style={{ width: 7, height: 7, borderRadius: 2, background: color, flexShrink: 0 }} />
+                          <Text type="secondary" ellipsis style={{ fontSize: 10 }}>{segment.label}</Text>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* 时间线彩条 */}
+                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                    {segments.map(segment => {
+                      const color = timelineStageMeta[segment.stage].color;
+                      const start = toMs(segment.startAt);
+                      const planEnd = toMs(segment.deadline);
+                      const completedEnd = toMs(segment.completedAt);
+                      const activityEnd = toMs(segment.lastActivityAt);
+                      const isCreatedProject = workspacePath && project.folderPath.startsWith(workspacePath);
+                      const actualEnd = Number.isFinite(completedEnd)
+                        ? completedEnd
+                        : isCreatedProject
+                          ? now
+                          : Number.isFinite(activityEnd) ? activityEnd : now;
+                      const hasPlan = Number.isFinite(planEnd);
+                      const isDone = Boolean(segment.completedAt);
+                      const isOverdue = hasPlan && planEnd < now && !isDone;
+                      const barEnd = Math.max(actualEnd, hasPlan ? planEnd : actualEnd);
+                      const actualVisible = visible(start, actualEnd, view.start, view.span);
+                      const planVisible = hasPlan && visible(start, planEnd, view.start, view.span);
+                      const stripeAngle = STRIPE_ANGLE[segment.stage];
+
+                      return (
+                        <div
+                          key={`${project.id}-${segment.stage}-${segment.sourceDocIds.join('-')}`}
+                          style={{ position: 'relative', height: 28, overflow: 'visible', minWidth: 0 }}
+                        >
                       {/* 统一彩条：虚线边框 = 计划，实心填充 = 实际 */}
                       {(planVisible || actualVisible) && (
                         <Tooltip
@@ -441,9 +460,11 @@ const GanttChart: React.FC = () => {
                         </Tooltip>
                       )}
                     </div>
+                  );
+                })}
                   </div>
-                );
-              });
+                </div>
+              );
             })}
           </div>
 
