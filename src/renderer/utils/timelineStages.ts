@@ -29,6 +29,21 @@ export const getStageOrder = (allStages: StageConfig[]): string[] => {
   return allStages.map(s => s.name);
 };
 
+// 统一的项目进度计算函数
+// 返回 0-100 的进度百分比，基于已完成阶段数 / 总阶段数
+export const getProjectProgress = (
+  project: Project,
+  projectDocs: ProjectDocument[],
+  templates: WritingTemplate[],
+  versions: DocumentVersion[],
+  allStages: StageConfig[],
+): number => {
+  const segments = buildProjectStageSegments(project, projectDocs, templates, versions, allStages);
+  if (segments.length === 0) return 0;
+  const completed = segments.filter(s => Boolean(s.completedAt)).length;
+  return Math.round((completed / segments.length) * 100);
+};
+
 export interface TimelineStageSegment {
   projectId: string;
   projectName: string;

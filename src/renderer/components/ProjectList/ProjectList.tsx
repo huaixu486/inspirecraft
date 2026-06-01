@@ -28,7 +28,7 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
-import { buildProjectStageSegments, getAllStages, getStageMeta, TimelineStageSegment, StageConfig } from '../../utils/timelineStages';
+import { buildProjectStageSegments, getAllStages, getStageMeta, getProjectProgress as calcProjectProgress, TimelineStageSegment, StageConfig } from '../../utils/timelineStages';
 import { Project, ProjectDocument } from '../../../shared/types';
 import ProjectFileExplorer from './ProjectFileExplorer';
 
@@ -51,20 +51,17 @@ const ProjectList: React.FC = () => {
   const allStages = getAllStages(customStages);
   const stageMeta = getStageMeta(allStages);
 
-  // 动态计算项目进度（已完成阶段 / 总阶段数）
+  // 使用统一的进度计算函数
   const getProjectProgress = (projectId: string): number => {
     const project = projects.find(p => p.id === projectId);
     if (!project) return 0;
-    const segments = buildProjectStageSegments(
+    return calcProjectProgress(
       project,
       projectDocs.filter(d => d.projectId === projectId),
       templates,
       versions.filter(v => v.projectId === projectId),
       allStages,
     );
-    if (segments.length === 0) return 0;
-    const completed = segments.filter(s => Boolean(s.completedAt)).length;
-    return Math.round((completed / segments.length) * 100);
   };
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
