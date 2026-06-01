@@ -74,7 +74,7 @@
   // ZIP 导入导出
   openZipFile: () => Promise<string | null>;
   importFromZip: (params: { zipPath: string; workspacePath: string }) => Promise<{ success: boolean; project?: any; error?: string }>;
-  saveZipFile: () => Promise<string | null>;
+  saveZipFile: (projectName: string) => Promise<string | null>;
   exportZip: (params: { project: any; savePath: string; projectDocs: any[] }) => Promise<{ success: boolean; error?: string }>;
 }
 

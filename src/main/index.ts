@@ -1204,10 +1204,11 @@ ipcMain.handle('dialog:openZip', async () => {
 });
 
 // 保存ZIP文件对话框
-ipcMain.handle('dialog:saveZip', async () => {
+ipcMain.handle('dialog:saveZip', async (_event: any, projectName: string) => {
+  const defaultName = projectName ? `${projectName}.zip` : 'project-export.zip';
   const result = await dialog.showSaveDialog({
     title: '导出项目为 ZIP',
-    defaultPath: 'project-export.zip',
+    defaultPath: defaultName,
     filters: [
       { name: 'ZIP 压缩包', extensions: ['zip'] },
     ],

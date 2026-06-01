@@ -85,7 +85,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openZipFile: () => ipcRenderer.invoke('dialog:openZip'),
   importFromZip: (params: { zipPath: string; workspacePath: string }) =>
     ipcRenderer.invoke('project:importFromZip', params),
-  saveZipFile: () => ipcRenderer.invoke('dialog:saveZip'),
+  saveZipFile: (projectName: string) => ipcRenderer.invoke('dialog:saveZip', projectName),
   exportZip: (params: { project: any; savePath: string; projectDocs: any[] }) =>
     ipcRenderer.invoke('project:exportZip', params),
 });

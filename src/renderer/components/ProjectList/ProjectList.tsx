@@ -43,11 +43,26 @@ const fileTypeOptions = [
 ];
 
 const ProjectList: React.FC = () => {
-  const { projects, addProject, setCurrentProject, deleteProject } =
+  const { projects, addProject, setCurrentProject, deleteProject, versions } =
     useProjectStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const { templates } = useTemplateStore();
   const { workspacePath } = useSettingsStore();
+
+  // 动态计算项目进度（已完成阶段 / 总阶段数）
+  const getProjectProgress = (projectId: string): number => {
+    const project = projects.find(p => p.id === projectId);
+    if (!project) return 0;
+    const segments = buildProjectStageSegments(
+      project,
+      projectDocs.filter(d => d.projectId === projectId),
+      templates,
+      versions.filter(v => v.projectId === projectId),
+    );
+    if (segments.length === 0) return 0;
+    const completed = segments.filter(s => Boolean(s.completedAt)).length;
+    return Math.round((completed / segments.length) * 100);
+  };
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [browsingProject, setBrowsingProject] = useState<Project | null>(null);
@@ -259,7 +274,7 @@ const ProjectList: React.FC = () => {
       return;
     }
 
-    const savePath = await window.electronAPI.saveZipFile();
+    const savePath = await window.electronAPI.saveZipFile(project.name);
     if (!savePath) return;
 
     const docs = useProjectDocStore.getState().projectDocs.filter(
@@ -389,7 +404,7 @@ const ProjectList: React.FC = () => {
                   </Tag>
                 </Space>
                 <Progress
-                  percent={project.progress}
+                  percent={getProjectProgress(project.id)}
                   size="small"
                   style={{ marginTop: 8 }}
                 />
