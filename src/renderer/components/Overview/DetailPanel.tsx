@@ -15,6 +15,7 @@ import {
   buildProjectStageSegments,
   getStageMeta,
   getAllStages,
+  getProjectProgress,
   TimelineStageSegment,
   detectTimelineStage,
 } from '../../utils/timelineStages';
@@ -69,10 +70,8 @@ const DetailPanel: React.FC = () => {
   const selectedDoc = projectDocsList.find(d => d.id === selectedDocId) || null;
   const planSegments = buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages);
 
-  // 文档平均进度
-  const avgProgress = projectDocsList.length > 0
-    ? Math.round(projectDocsList.reduce((acc, d) => acc + d.overallProgress, 0) / projectDocsList.length)
-    : 0;
+  // 使用统一的项目进度（基于已完成阶段）
+  const avgProgress = getProjectProgress(currentProject, projectDocsList, templates, projectVersions, allStages);
 
   const statusMap: Record<string, { color: string; label: string }> = {
     active: { color: 'blue', label: '进行中' },
@@ -558,12 +557,8 @@ const DetailPanel: React.FC = () => {
 
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                        <Text type="secondary" style={{ fontSize: 11 }}>开始</Text>
-                        <Text style={{ fontSize: 11 }}>{formatDateTime(segment.startAt)}</Text>
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                        <Text type="secondary" style={{ fontSize: 11 }}>完成</Text>
-                        <Text style={{ fontSize: 11 }}>{formatDateTime(segment.completedAt)}</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>文件数</Text>
+                        <Text style={{ fontSize: 11 }}>{segment.sourceDocNames.length} 个</Text>
                       </div>
                       <div>
                         <Text type="secondary" style={{ display: 'block', fontSize: 11, marginBottom: 4 }}>截止时间</Text>
@@ -576,13 +571,6 @@ const DetailPanel: React.FC = () => {
                           placeholder="设置计划截止时间"
                           onChange={(value) => handleStageDeadline(segment, value ? value.toDate().toISOString() : undefined)}
                         />
-                      </div>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
-                        {segment.sourceDocNames.map(name => (
-                          <Tag key={name} style={{ margin: 0, fontSize: 10, maxWidth: '100%' }}>
-                            {name}
-                          </Tag>
-                        ))}
                       </div>
                     </div>
                   </div>
