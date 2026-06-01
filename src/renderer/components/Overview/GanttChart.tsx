@@ -7,10 +7,12 @@ import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   buildProjectStageSegments,
-  timelineStageMeta,
+  getAllStages,
+  getStageMeta,
+  getStageOrder,
   TimelineStageSegment,
-  TimelineStageName,
 } from '../../utils/timelineStages';
+import type { StageConfig } from '../../utils/timelineStages';
 
 const { Text } = Typography;
 
@@ -25,11 +27,10 @@ const PROJECT_COL = 100;
 const STAGE_COL = 100;
 
 // 每个阶段使用不同条纹角度，重叠时形成交叉纹理便于区分
-const STRIPE_ANGLE: Record<TimelineStageName, number> = {
-  '提案': 45,
-  '指南编写': -45,
-  '可研': 0,
-  '其他': 90,
+const STRIPE_ANGLES = [45, -45, 0, 90];
+const getStripeAngle = (stageOrder: string[], stageName: string): number => {
+  const idx = stageOrder.indexOf(stageName);
+  return STRIPE_ANGLES[idx >= 0 ? idx % STRIPE_ANGLES.length : 0];
 };
 
 const stripeBg = (color: string, angle: number, alpha: string) =>
@@ -156,7 +157,11 @@ const GanttChart: React.FC = () => {
   const { projects, versions } = useProjectStore();
   const { projectDocs } = useProjectDocStore();
   const { templates } = useTemplateStore();
-  const { workspacePath } = useSettingsStore();
+  const { workspacePath, customStages } = useSettingsStore();
+
+  const allStages: StageConfig[] = useMemo(() => getAllStages(customStages), [customStages]);
+  const stageMeta = useMemo(() => getStageMeta(allStages), [allStages]);
+  const stageOrder = useMemo(() => getStageOrder(allStages), [allStages]);
   const timeAreaRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef({ start: Date.now() - MAX_SPAN / 2, span: MAX_SPAN, initialized: false });
@@ -174,11 +179,12 @@ const GanttChart: React.FC = () => {
           projectDocs.filter(doc => doc.projectId === project.id),
           templates,
           versions.filter(version => version.projectId === project.id),
+          allStages,
         ),
       );
     }
     return map;
-  }, [projectDocs, projects, templates, versions]);
+  }, [projectDocs, projects, templates, versions, allStages]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), MINUTE);
@@ -392,7 +398,7 @@ const GanttChart: React.FC = () => {
                   {/* 阶段行 */}
                   <div style={{ width: STAGE_COL, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2 }}>
                     {segments.map(segment => {
-                      const segColor = timelineStageMeta[segment.stage].color;
+                      const segColor = stageMeta[segment.stage].color;
                       const segPlanEnd = toMs(segment.deadline);
                       const segDone = Boolean(segment.completedAt);
                       const segHasTime = Number.isFinite(segPlanEnd) && (() => { const d = new Date(segPlanEnd); return d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0; })();
@@ -429,14 +435,17 @@ const GanttChart: React.FC = () => {
                   {/* 时间线彩条 */}
                   <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                     {segments.map(segment => {
-                      const baseColor = timelineStageMeta[segment.stage].color;
+                      const baseColor = stageMeta[segment.stage].color;
                       const start = toMs(segment.startAt);
                       const planEnd = toMs(segment.deadline);
                       const completedEnd = toMs(segment.completedAt);
                       const activityEnd = toMs(segment.lastActivityAt);
+                      const isCreatedProject = workspacePath && project.folderPath.startsWith(workspacePath);
                       const actualEnd = Number.isFinite(completedEnd)
                         ? completedEnd
-                        : Number.isFinite(activityEnd) ? activityEnd : now;
+                        : isCreatedProject
+                          ? now
+                          : Number.isFinite(activityEnd) ? activityEnd : now;
                       const hasPlan = Number.isFinite(planEnd);
                       const isDone = Boolean(segment.completedAt);
                       const hasTime = hasPlan && (() => { const d = new Date(planEnd); return d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0; })();
@@ -461,7 +470,7 @@ const GanttChart: React.FC = () => {
                       const barEnd = Math.max(actualEnd, hasPlan ? planEnd : actualEnd);
                       const actualVisible = visible(start, actualEnd, view.start, view.span);
                       const planVisible = hasPlan && visible(start, planEnd, view.start, view.span);
-                      const stripeAngle = STRIPE_ANGLE[segment.stage];
+                      const stripeAngle = getStripeAngle(stageOrder, segment.stage);
 
                       return (
                         <div

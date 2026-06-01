@@ -1,11 +1,12 @@
 import { create } from 'zustand';
-import { AppSettings, UserProfile } from '../../shared/types';
+import { AppSettings, StageConfig, UserProfile } from '../../shared/types';
 
 interface SettingsState {
   workspacePath: string;
   workspaceCapacity: number; // GB
   workspaceUsedBytes: number;
   userProfile: UserProfile | null;
+  customStages: StageConfig[];
   isLoading: boolean;
 
   loadSettings: () => Promise<void>;
@@ -13,13 +14,22 @@ interface SettingsState {
   updateWorkspaceCapacity: (gb: number) => Promise<void>;
   updateUserProfile: (profile: UserProfile) => Promise<void>;
   refreshWorkspaceUsed: () => Promise<void>;
+  addStage: (stage: StageConfig) => Promise<void>;
+  updateStage: (id: string, updates: Partial<StageConfig>) => Promise<void>;
+  deleteStage: (id: string) => Promise<void>;
+  saveAllStages: (stages: StageConfig[]) => Promise<void>;
 }
+
+const saveSettings = async (settings: AppSettings) => {
+  await window.electronAPI.saveSettings(settings);
+};
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   workspacePath: '',
   workspaceCapacity: 10,
   workspaceUsedBytes: 0,
   userProfile: null,
+  customStages: [],
   isLoading: false,
 
   loadSettings: async () => {
@@ -31,9 +41,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           workspacePath: settings.workspacePath,
           workspaceCapacity: settings.workspaceCapacity ?? 10,
           userProfile: settings.userProfile ?? null,
+          customStages: settings.customStages ?? [],
           isLoading: false,
         });
-        // 加载已用空间
         get().refreshWorkspaceUsed();
       } else {
         set({ isLoading: false });
@@ -45,10 +55,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   updateWorkspacePath: async (path: string) => {
-    const { workspaceCapacity, userProfile } = get();
+    const { workspaceCapacity, userProfile, customStages } = get();
     set({ workspacePath: path });
     try {
-      await window.electronAPI.saveSettings({ workspacePath: path, workspaceCapacity, userProfile });
+      await saveSettings({ workspacePath: path, workspaceCapacity, userProfile: userProfile ?? undefined, customStages });
       get().refreshWorkspaceUsed();
     } catch (error) {
       console.error('Failed to save settings:', error);
@@ -56,20 +66,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   updateWorkspaceCapacity: async (gb: number) => {
-    const { workspacePath, userProfile } = get();
+    const { workspacePath, userProfile, customStages } = get();
     set({ workspaceCapacity: gb });
     try {
-      await window.electronAPI.saveSettings({ workspacePath, workspaceCapacity: gb, userProfile });
+      await saveSettings({ workspacePath, workspaceCapacity: gb, userProfile: userProfile ?? undefined, customStages });
     } catch (error) {
       console.error('Failed to save settings:', error);
     }
   },
 
   updateUserProfile: async (profile: UserProfile) => {
-    const { workspacePath, workspaceCapacity } = get();
+    const { workspacePath, workspaceCapacity, customStages } = get();
     set({ userProfile: profile });
     try {
-      await window.electronAPI.saveSettings({ workspacePath, workspaceCapacity, userProfile: profile });
+      await saveSettings({ workspacePath, workspaceCapacity, userProfile: profile, customStages });
     } catch (error) {
       console.error('Failed to save settings:', error);
     }
@@ -86,5 +96,32 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to get workspace size:', error);
     }
+  },
+
+  addStage: async (stage: StageConfig) => {
+    const { customStages, workspacePath, workspaceCapacity, userProfile } = get();
+    const updated = [...customStages, stage];
+    set({ customStages: updated });
+    await saveSettings({ workspacePath, workspaceCapacity, userProfile: userProfile ?? undefined, customStages: updated });
+  },
+
+  updateStage: async (id: string, updates: Partial<StageConfig>) => {
+    const { customStages, workspacePath, workspaceCapacity, userProfile } = get();
+    const updated = customStages.map(s => s.id === id ? { ...s, ...updates } : s);
+    set({ customStages: updated });
+    await saveSettings({ workspacePath, workspaceCapacity, userProfile: userProfile ?? undefined, customStages: updated });
+  },
+
+  deleteStage: async (id: string) => {
+    const { customStages, workspacePath, workspaceCapacity, userProfile } = get();
+    const updated = customStages.filter(s => s.id !== id);
+    set({ customStages: updated });
+    await saveSettings({ workspacePath, workspaceCapacity, userProfile: userProfile ?? undefined, customStages: updated });
+  },
+
+  saveAllStages: async (stages: StageConfig[]) => {
+    const { workspacePath, workspaceCapacity, userProfile } = get();
+    set({ customStages: stages });
+    await saveSettings({ workspacePath, workspaceCapacity, userProfile: userProfile ?? undefined, customStages: stages });
   },
 }));

@@ -10,7 +10,8 @@ import {
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
-import { buildProjectStageSegments } from '../../utils/timelineStages';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { buildProjectStageSegments, getAllStages } from '../../utils/timelineStages';
 
 const { Text } = Typography;
 
@@ -18,6 +19,8 @@ const StatsCards: React.FC = () => {
   const { projects, versions } = useProjectStore();
   const { projectDocs } = useProjectDocStore();
   const { templates } = useTemplateStore();
+  const { customStages } = useSettingsStore();
+  const allStages = getAllStages(customStages);
 
   const totalProjects = projects.length;
   const activeProjects = projects.filter(p => p.status === 'active').length;
@@ -30,6 +33,7 @@ const StatsCards: React.FC = () => {
       projectDocs.filter(d => d.projectId === project.id),
       templates,
       versions.filter(v => v.projectId === project.id),
+      allStages,
     ),
   );
 

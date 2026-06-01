@@ -28,7 +28,7 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
-import { buildProjectStageSegments, timelineStageMeta, TimelineStageSegment } from '../../utils/timelineStages';
+import { buildProjectStageSegments, getAllStages, getStageMeta, TimelineStageSegment, StageConfig } from '../../utils/timelineStages';
 import { Project, ProjectDocument } from '../../../shared/types';
 import ProjectFileExplorer from './ProjectFileExplorer';
 
@@ -47,7 +47,9 @@ const ProjectList: React.FC = () => {
     useProjectStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const { templates } = useTemplateStore();
-  const { workspacePath } = useSettingsStore();
+  const { workspacePath, customStages } = useSettingsStore();
+  const allStages = getAllStages(customStages);
+  const stageMeta = getStageMeta(allStages);
 
   // 动态计算项目进度（已完成阶段 / 总阶段数）
   const getProjectProgress = (projectId: string): number => {
@@ -58,6 +60,7 @@ const ProjectList: React.FC = () => {
       projectDocs.filter(d => d.projectId === projectId),
       templates,
       versions.filter(v => v.projectId === projectId),
+      allStages,
     );
     if (segments.length === 0) return 0;
     const completed = segments.filter(s => Boolean(s.completedAt)).length;
@@ -138,6 +141,7 @@ const ProjectList: React.FC = () => {
       }
 
       await syncProjectStageFiles(newProject, {
+        allStages,
         projectDocs: useProjectDocStore.getState().projectDocs,
         templates,
         addProjectDoc,
@@ -182,10 +186,10 @@ const ProjectList: React.FC = () => {
     };
 
     await addProject(newProject);
-    await syncProjectStageFiles(newProject, { projectDocs, templates, addProjectDoc, updateProjectDoc });
+    await syncProjectStageFiles(newProject, { allStages, projectDocs, templates, addProjectDoc, updateProjectDoc });
 
     const latestDocs = useProjectDocStore.getState().projectDocs.filter(d => d.projectId === newProject.id);
-    const segments = buildProjectStageSegments(newProject, latestDocs, templates, []);
+    const segments = buildProjectStageSegments(newProject, latestDocs, templates, [], allStages);
 
     if (segments.length > 0) {
       setImportProject(newProject);
@@ -241,6 +245,7 @@ const ProjectList: React.FC = () => {
       const importedProject = projects.find(p => p.id === result.project.id);
       if (importedProject) {
         await syncProjectStageFiles(importedProject, {
+          allStages,
           projectDocs: useProjectDocStore.getState().projectDocs,
           templates,
           addProjectDoc,
@@ -251,7 +256,7 @@ const ProjectList: React.FC = () => {
           d => d.projectId === importedProject.id
         );
         const segments = buildProjectStageSegments(
-          importedProject, latestDocs, templates, []
+          importedProject, latestDocs, templates, [], allStages
         );
 
         if (segments.length > 0) {
@@ -473,7 +478,7 @@ const ProjectList: React.FC = () => {
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {importSegments.map(segment => {
-            const color = timelineStageMeta[segment.stage].color;
+            const color = stageMeta[segment.stage].color;
             return (
               <div
                 key={segment.stage}

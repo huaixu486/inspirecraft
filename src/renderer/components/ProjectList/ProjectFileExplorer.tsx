@@ -11,7 +11,9 @@ import {
 import { Project } from '../../../shared/types';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
+import { getAllStages } from '../../utils/timelineStages';
 
 const { Text } = Typography;
 
@@ -82,6 +84,8 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [filterType, setFilterType] = useState<string | null>(null);
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
+  const { customStages } = useSettingsStore();
+  const allStages = getAllStages(customStages);
   const highlightTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const undoStackRef = useRef<UndoEntry[]>([]);
 
@@ -114,7 +118,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       if (result.success) {
         setItems(result.items);
       }
-      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, templates, addProjectDoc, updateProjectDoc });
+      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, templates, addProjectDoc, updateProjectDoc, allStages });
     } catch (error) {
       console.error('Failed to load folder contents:', error);
     } finally {
@@ -252,7 +256,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       setAddModalOpen(false);
       setNewFileName('');
       setSelectedTemplateId('');
-      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, templates, addProjectDoc, updateProjectDoc });
+      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, templates, addProjectDoc, updateProjectDoc, allStages });
       await loadContents();
       highlightFile(createdPath);
     } else {

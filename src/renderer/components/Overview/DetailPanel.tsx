@@ -13,11 +13,12 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { ProjectDocument, WritingTemplate } from '../../../shared/types';
 import {
   buildProjectStageSegments,
-  timelineStageMeta,
+  getStageMeta,
+  getAllStages,
   TimelineStageSegment,
-  TimelineStageName,
   detectTimelineStage,
 } from '../../utils/timelineStages';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -25,6 +26,9 @@ const DetailPanel: React.FC = () => {
   const { currentProject, setCurrentProject, versions } = useProjectStore();
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc, deleteProjectDoc } = useProjectDocStore();
+  const { customStages } = useSettingsStore();
+  const allStages = getAllStages(customStages);
+  const stageMeta = getStageMeta(allStages);
 
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
@@ -63,7 +67,7 @@ const DetailPanel: React.FC = () => {
   const projectVersions = versions.filter(v => v.projectId === currentProject.id);
   const projectDocsList = projectDocs.filter(d => d.projectId === currentProject.id);
   const selectedDoc = projectDocsList.find(d => d.id === selectedDocId) || null;
-  const planSegments = buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions);
+  const planSegments = buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages);
 
   // 文档平均进度
   const avgProgress = projectDocsList.length > 0
@@ -96,9 +100,9 @@ const DetailPanel: React.FC = () => {
       let templateId = doc.templateId;
       // 未关联模板时，通过关键字自动匹配
       if (!templateId) {
-        const stage = detectTimelineStage(doc.name, doc.sourceFilePath);
+        const stage = detectTimelineStage(allStages, doc.name, doc.sourceFilePath);
         const matched = templates.find(t =>
-          t.name.includes(stage) || t.category?.includes(stage) || detectTimelineStage(t.name, t.category) === stage
+          t.name.includes(stage) || t.category?.includes(stage) || detectTimelineStage(allStages, t.name, t.category) === stage
         );
         templateId = matched?.id || '__unmatched__';
       }
@@ -307,7 +311,7 @@ const DetailPanel: React.FC = () => {
               <Title level={5} style={{ fontSize: 14, marginBottom: 10 }}>下一步计划</Title>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
                 {planSegments.filter(s => !s.completedAt).slice(0, 3).map(segment => {
-                  const color = timelineStageMeta[segment.stage].color;
+                  const color = stageMeta[segment.stage].color;
                   const segOverdue = isOverdue(segment.deadline, segment.completedAt);
                   const segAboutToExpire = isAboutToExpire(segment.deadline, segment.completedAt);
                   return (
@@ -343,12 +347,12 @@ const DetailPanel: React.FC = () => {
             const { projects: allProjects } = useProjectStore.getState();
             const allDocs = useProjectDocStore.getState().projectDocs;
             const allTemplates = useTemplateStore.getState().templates;
-            const stageOrder: TimelineStageName[] = ['提案', '指南编写', '可研', '其他'];
+            const stageOrder = allStages.map(s => s.name);
             const stageSummary = stageOrder.map(stage => {
               let total = 0;
               let completed = 0;
               for (const p of allProjects) {
-                const segs = buildProjectStageSegments(p, allDocs.filter(d => d.projectId === p.id), allTemplates, []);
+                const segs = buildProjectStageSegments(p, allDocs.filter(d => d.projectId === p.id), allTemplates, [], allStages);
                 const seg = segs.find(s => s.stage === stage);
                 if (seg) {
                   total += 1;
@@ -365,8 +369,8 @@ const DetailPanel: React.FC = () => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {stageSummary.map(({ stage, total, completed }) => (
                     <div key={stage} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: timelineStageMeta[stage].color, flexShrink: 0 }} />
-                      <Text style={{ fontSize: 12, flex: 1 }}>{timelineStageMeta[stage].label}</Text>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: stageMeta[stage].color, flexShrink: 0 }} />
+                      <Text style={{ fontSize: 12, flex: 1 }}>{stageMeta[stage].label}</Text>
                       <Text style={{ fontSize: 12, fontWeight: 600 }}>{completed}/{total}</Text>
                       <Progress
                         percent={Math.round(completed / total * 100)}
@@ -511,7 +515,7 @@ const DetailPanel: React.FC = () => {
           {planSegments.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {planSegments.map(segment => {
-                const color = timelineStageMeta[segment.stage].color;
+                const color = stageMeta[segment.stage].color;
                 const isCompleted = Boolean(segment.completedAt);
                 const segOverdue = isOverdue(segment.deadline, segment.completedAt);
                 const segAboutToExpire = isAboutToExpire(segment.deadline, segment.completedAt);

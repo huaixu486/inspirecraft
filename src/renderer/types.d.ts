@@ -51,7 +51,7 @@
   executeAITask: (params: { taskId: string; content: string; instruction: string }) => Promise<{ success: boolean; result?: string; error?: string }>;
 
   // 设置操作
-  loadSettings: () => Promise<{ workspacePath: string; workspaceCapacity: number; userProfile?: { nickname: string; email: string; avatar?: string } } | null>;
+  loadSettings: () => Promise<{ workspacePath: string; workspaceCapacity: number; userProfile?: { nickname: string; email: string; avatar?: string }; customStages?: any[] } | null>;
   saveSettings: (config: any) => Promise<void>;
   createProjectFolder: (params: { projectName: string; workspacePath: string }) => Promise<{ success: boolean; folderPath?: string; error?: string }>;
   getWorkspaceSize: (workspacePath: string) => Promise<{ success: boolean; bytes: number }>;

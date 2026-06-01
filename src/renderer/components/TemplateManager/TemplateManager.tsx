@@ -9,10 +9,13 @@ import {
   Select,
   Space,
   Typography,
+  Tag,
   message,
   Empty,
   Popconfirm,
   Spin,
+  Divider,
+  ColorPicker,
 } from 'antd';
 import {
   PlusOutlined,
@@ -20,9 +23,12 @@ import {
   DeleteOutlined,
   FileTextOutlined,
   ImportOutlined,
+  LockOutlined,
 } from '@ant-design/icons';
 import { useTemplateStore } from '../../stores/templateStore';
-import { WritingTemplate, TemplateNode } from '../../shared/types';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { WritingTemplate, TemplateNode, StageConfig } from '../../shared/types';
+import { getAllStages, DEFAULT_STAGES } from '../../utils/timelineStages';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -111,11 +117,86 @@ function extractTemplateNodes(content: string): TemplateNode[] {
 
 const TemplateManager: React.FC = () => {
   const { templates, loadTemplates, addTemplate, updateTemplate, deleteTemplate } = useTemplateStore();
+  const { customStages, addStage, updateStage, deleteStage } = useSettingsStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<WritingTemplate | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [importedFilePath, setImportedFilePath] = useState<string>('');
   const [form] = Form.useForm();
+
+  // 阶段管理状态
+  const [isStageModalOpen, setIsStageModalOpen] = useState(false);
+  const [editingStage, setEditingStage] = useState<StageConfig | null>(null);
+  const [stageForm] = Form.useForm();
+  const allStages = getAllStages(customStages);
+
+  // 已使用的颜色（排除用于颜色选择器）
+  const usedColors = allStages.map(s => s.color);
+
+  const handleCreateStage = () => {
+    setEditingStage(null);
+    stageForm.resetFields();
+    stageForm.setFieldsValue({ color: '#1890ff' });
+    setIsStageModalOpen(true);
+  };
+
+  const handleEditStage = (stage: StageConfig) => {
+    setEditingStage(stage);
+    stageForm.setFieldsValue({
+      name: stage.name,
+      keywords: stage.keywords.join(', '),
+      color: stage.color,
+    });
+    setIsStageModalOpen(true);
+  };
+
+  const handleDeleteStage = async (id: string) => {
+    await deleteStage(id);
+    message.success('阶段已删除');
+  };
+
+  const handleStageSubmit = async () => {
+    try {
+      const values = await stageForm.validateFields();
+      const keywords = values.keywords
+        ? values.keywords.split(/[,，]/).map((k: string) => k.trim()).filter(Boolean)
+        : [];
+
+      // 检查名称是否与已有阶段重复
+      const exists = allStages.some(s =>
+        s.name === values.name && s.id !== editingStage?.id
+      );
+      if (exists) {
+        message.error('阶段名称已存在');
+        return;
+      }
+
+      const color = typeof values.color === 'string' ? values.color : values.color?.toHexString?.() || '#1890ff';
+
+      if (editingStage) {
+        await updateStage(editingStage.id, {
+          name: values.name,
+          keywords,
+          color,
+        });
+        message.success('阶段已更新');
+      } else {
+        const newStage: StageConfig = {
+          id: `custom-${Date.now()}`,
+          name: values.name,
+          keywords,
+          color,
+          isSystem: false,
+        };
+        await addStage(newStage);
+        message.success('阶段已创建');
+      }
+
+      setIsStageModalOpen(false);
+    } catch (error) {
+      console.error('Stage submit error:', error);
+    }
+  };
 
   useEffect(() => {
     loadTemplates();
@@ -418,6 +499,95 @@ const TemplateManager: React.FC = () => {
               placeholder={getDefaultTemplateJson()}
               style={{ fontFamily: 'monospace' }}
             />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* ========== 项目阶段管理 ========== */}
+      <Divider />
+      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Title level={4} style={{ margin: 0 }}>
+          项目阶段管理
+        </Title>
+        <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateStage}>
+          新增阶段
+        </Button>
+      </div>
+      <Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 13 }}>
+        自定义阶段名称、识别关键词和颜色，用于自动识别文件所属阶段
+      </Text>
+
+      <List
+        dataSource={allStages}
+        renderItem={(stage) => (
+          <List.Item
+            actions={stage.isSystem ? [
+              <Button type="link" size="small" icon={<LockOutlined />} disabled>系统内置</Button>,
+            ] : [
+              <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEditStage(stage)}>编辑</Button>,
+              <Popconfirm title="确定删除此阶段？" onConfirm={() => handleDeleteStage(stage.id)}>
+                <Button type="link" danger size="small" icon={<DeleteOutlined />}>删除</Button>
+              </Popconfirm>,
+            ]}
+          >
+            <List.Item.Meta
+              avatar={
+                <div style={{
+                  width: 32, height: 32, borderRadius: 6,
+                  background: stage.color,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: '#fff', fontSize: 14, fontWeight: 'bold',
+                }}>
+                  {stage.name.charAt(0)}
+                </div>
+              }
+              title={
+                <Space>
+                  {stage.name}
+                  {stage.isSystem && <Tag color="blue">系统</Tag>}
+                </Space>
+              }
+              description={
+                <span style={{ fontSize: 12, color: '#999' }}>
+                  关键词：{stage.keywords.length > 0 ? stage.keywords.join('、') : '（无）'}
+                </span>
+              }
+            />
+          </List.Item>
+        )}
+      />
+
+      {/* 新增/编辑阶段弹窗 */}
+      <Modal
+        title={editingStage ? '编辑阶段' : '新增阶段'}
+        open={isStageModalOpen}
+        onOk={handleStageSubmit}
+        onCancel={() => setIsStageModalOpen(false)}
+        okText="保存"
+        cancelText="取消"
+        width={420}
+      >
+        <Form form={stageForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="阶段名称"
+            rules={[{ required: true, message: '请输入阶段名称' }]}
+          >
+            <Input placeholder="例如：立项、招标、验收" />
+          </Form.Item>
+          <Form.Item
+            name="keywords"
+            label="识别关键词"
+            extra="多个关键词用逗号分隔，文件名包含任一关键词即识别为该阶段"
+          >
+            <Input placeholder="例如：立项, 招标, 验收" />
+          </Form.Item>
+          <Form.Item
+            name="color"
+            label="阶段颜色"
+            rules={[{ required: true, message: '请选择颜色' }]}
+          >
+            <ColorPicker format="hex" showText />
           </Form.Item>
         </Form>
       </Modal>

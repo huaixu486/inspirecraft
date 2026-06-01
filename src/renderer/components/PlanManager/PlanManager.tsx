@@ -10,9 +10,11 @@ import dayjs from 'dayjs';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import {
   buildProjectStageSegments,
-  timelineStageMeta,
+  getAllStages,
+  getStageMeta,
   TimelineStageSegment,
 } from '../../utils/timelineStages';
 
@@ -28,6 +30,10 @@ const PlanManager: React.FC = () => {
   const { projects, versions } = useProjectStore();
   const { projectDocs, updateProjectDoc } = useProjectDocStore();
   const { templates } = useTemplateStore();
+  const { customStages } = useSettingsStore();
+
+  const allStages = useMemo(() => getAllStages(customStages), [customStages]);
+  const stageMeta = useMemo(() => getStageMeta(allStages), [allStages]);
 
   const projectSegments = useMemo(() => {
     return projects.map(project => ({
@@ -37,9 +43,10 @@ const PlanManager: React.FC = () => {
         projectDocs.filter(d => d.projectId === project.id),
         templates,
         versions.filter(v => v.projectId === project.id),
+        allStages,
       ),
     }));
-  }, [projects, projectDocs, templates, versions]);
+  }, [projects, projectDocs, templates, versions, allStages]);
 
   const totalStages = projectSegments.reduce((acc, p) => acc + p.segments.length, 0);
   const completedStages = projectSegments.reduce(
@@ -89,7 +96,7 @@ const PlanManager: React.FC = () => {
   };
 
   const renderSegment = (segment: TimelineStageSegment) => {
-    const color = timelineStageMeta[segment.stage].color;
+    const color = stageMeta[segment.stage].color;
     const isCompleted = Boolean(segment.completedAt);
     const segmentOverdue = isOverdue(segment.deadline, segment.completedAt);
     const segmentAboutToExpire = isAboutToExpire(segment.deadline, segment.completedAt);

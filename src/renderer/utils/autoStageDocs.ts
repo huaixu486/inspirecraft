@@ -1,4 +1,4 @@
-﻿import { Project, ProjectDocument, WritingTemplate } from '../../shared/types';
+﻿import { Project, ProjectDocument, StageConfig, WritingTemplate } from '../../shared/types';
 import { detectTimelineStage } from './timelineStages';
 
 interface ScannedStageFile {
@@ -11,6 +11,7 @@ interface ScannedStageFile {
 }
 
 interface SyncDeps {
+  allStages: StageConfig[];
   projectDocs: ProjectDocument[];
   templates: WritingTemplate[];
   addProjectDoc: (doc: ProjectDocument) => Promise<void>;
@@ -33,8 +34,8 @@ const hashPath = (value: string) => {
   return Math.abs(hash).toString(36);
 };
 
-const hasStageKeyword = (file: ScannedStageFile) =>
-  detectTimelineStage(file.name, file.path) !== '其他';
+const hasStageKeyword = (allStages: StageConfig[], file: ScannedStageFile) =>
+  detectTimelineStage(allStages, file.name, file.path) !== '其他';
 
 export const syncProjectStageFiles = async (
   project: Project,
@@ -45,7 +46,7 @@ export const syncProjectStageFiles = async (
   const result = await window.electronAPI.scanStageFiles(project.folderPath);
   if (!result.success) return { matched: 0, created: 0, updated: 0 };
 
-  const files = result.files.filter(hasStageKeyword);
+  const files = result.files.filter(f => hasStageKeyword(deps.allStages, f));
   let created = 0;
   let updated = 0;
 
@@ -77,9 +78,9 @@ export const syncProjectStageFiles = async (
     }
 
     // 通过关键字自动匹配模板
-    const stage = detectTimelineStage(file.name, file.path);
+    const stage = detectTimelineStage(deps.allStages, file.name, file.path);
     const matchedTemplate = deps.templates.find(t =>
-      t.name.includes(stage) || t.category?.includes(stage) || detectTimelineStage(t.name, t.category) === stage
+      t.name.includes(stage) || t.category?.includes(stage) || detectTimelineStage(deps.allStages, t.name, t.category) === stage
     );
 
     await deps.addProjectDoc({

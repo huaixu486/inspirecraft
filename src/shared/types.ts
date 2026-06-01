@@ -178,10 +178,20 @@ export interface UserProfile {
   avatar?: string; // base64 或文件路径
 }
 
+// 自定义阶段配置
+export interface StageConfig {
+  id: string;
+  name: string;        // 阶段名称（如 "立项"）
+  keywords: string[];  // 文件名识别关键词（如 ["立项", "投标"]）
+  color: string;       // 颜色（hex）
+  isSystem?: boolean;  // 系统内置阶段不可删除
+}
+
 // 应用设置
 export interface AppSettings {
   workspacePath: string; // 项目工作区路径
   workspaceCapacity: number; // 工作区容量上限（GB）
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
+  customStages?: StageConfig[]; // 自定义阶段配置
 }
 

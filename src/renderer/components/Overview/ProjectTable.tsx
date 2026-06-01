@@ -3,28 +3,19 @@ import { Card, Table, Tag, Progress, Typography, Space } from 'antd';
 import { FolderOutlined, CalendarOutlined, WarningOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { getAllStages, getStageMeta, detectTimelineStage } from '../../utils/timelineStages';
+import type { StageConfig } from '../../utils/timelineStages';
 import { Project } from '../../../shared/types';
 
 const { Text } = Typography;
 
-const stageMap: Record<string, { color: string; label: string }> = {
-  '提案': { color: 'blue', label: '提案阶段' },
-  '中标': { color: 'green', label: '中标阶段' },
-  '指南编写': { color: 'orange', label: '指南编写' },
-  '指南投标': { color: 'purple', label: '指南投标' },
-  '其他': { color: 'default', label: '进行中' },
-};
-
-const getStage = (docNames: string[]) => {
-  const joined = docNames.join(' ');
-  if (joined.includes('指南')) return '指南编写';
-  if (joined.includes('提案')) return '提案';
-  return '其他';
-};
-
 const ProjectTable: React.FC = () => {
   const { projects, setCurrentProject } = useProjectStore();
   const { projectDocs } = useProjectDocStore();
+  const customStages = useSettingsStore((s) => s.customStages);
+  const allStages = getAllStages(customStages);
+  const stageMeta = getStageMeta(allStages);
 
   const columns = [
     {
@@ -44,9 +35,9 @@ const ProjectTable: React.FC = () => {
       width: 110,
       render: (_: any, record: Project) => {
         const docs = projectDocs.filter(d => d.projectId === record.id);
-        const stage = getStage(docs.map(d => d.name));
-        const info = stageMap[stage] || stageMap['其他'];
-        return <Tag color={info.color}>{info.label}</Tag>;
+        const stage = detectTimelineStage(allStages, ...docs.map(d => d.name));
+        const meta = stageMeta[stage];
+        return <Tag color={meta?.color || '#8c8c8c'}>{meta?.label || stage}</Tag>;
       },
     },
     {
