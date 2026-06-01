@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode } from './types';
 import * as mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
-import * as JSZip from 'jszip';
+const JSZip = require('jszip');
 import * as https from 'https';
 import * as http from 'http';
 
@@ -1174,7 +1174,7 @@ ipcMain.handle('file:createFromTemplate', async (_event: any, params: { folderPa
 // ========== ZIP 导入导出 ==========
 
 // 递归添加文件夹到zip
-function addFolderToZip(zip: JSZip, folderPath: string, basePath: string) {
+function addFolderToZip(zip: any, folderPath: string, basePath: string) {
   const entries = fs.readdirSync(folderPath, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = path.join(folderPath, entry.name);
@@ -1236,7 +1236,7 @@ ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: s
 
     // 检查是否只有一个顶级目录
     const rootEntries: string[] = [];
-    zip.forEach((relativePath) => {
+    zip.forEach((relativePath: string) => {
       const parts = relativePath.split('/');
       if (parts.length > 1 && parts[0]) {
         rootEntries.push(parts[0]);
@@ -1272,7 +1272,7 @@ ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: s
     // 解压文件到项目文件夹（跳过project.json）
     let hasFiles = false;
     const filesToExtract: { path: string; data: any }[] = [];
-    zip.forEach((relativePath, zipEntry) => {
+    zip.forEach((relativePath: string, zipEntry: any) => {
       if (zipEntry.dir || relativePath === 'project.json') return;
 
       // 去掉顶级目录前缀（如果有）
