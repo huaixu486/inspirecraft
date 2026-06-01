@@ -434,12 +434,9 @@ const GanttChart: React.FC = () => {
                       const planEnd = toMs(segment.deadline);
                       const completedEnd = toMs(segment.completedAt);
                       const activityEnd = toMs(segment.lastActivityAt);
-                      const isCreatedProject = workspacePath && project.folderPath.startsWith(workspacePath);
                       const actualEnd = Number.isFinite(completedEnd)
                         ? completedEnd
-                        : isCreatedProject
-                          ? now
-                          : Number.isFinite(activityEnd) ? activityEnd : now;
+                        : Number.isFinite(activityEnd) ? activityEnd : now;
                       const hasPlan = Number.isFinite(planEnd);
                       const isDone = Boolean(segment.completedAt);
                       const hasTime = hasPlan && (() => { const d = new Date(planEnd); return d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0; })();
