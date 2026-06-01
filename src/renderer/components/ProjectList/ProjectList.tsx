@@ -9,13 +9,18 @@ import {
   Form,
   Input,
   Select,
+  Checkbox,
+  Dropdown,
   message,
   Space,
   Typography,
 } from 'antd';
 import {
   PlusOutlined,
+  ImportOutlined,
+  ExportOutlined,
   FolderOpenOutlined,
+  FileZipOutlined,
   DeleteOutlined,
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
@@ -23,6 +28,7 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
+import { buildProjectStageSegments, timelineStageMeta, TimelineStageSegment } from '../../utils/timelineStages';
 import { Project, ProjectDocument } from '../../../shared/types';
 import ProjectFileExplorer from './ProjectFileExplorer';
 
@@ -46,6 +52,12 @@ const ProjectList: React.FC = () => {
   const [isCreating, setIsCreating] = useState(false);
   const [browsingProject, setBrowsingProject] = useState<Project | null>(null);
   const [form] = Form.useForm();
+
+  // 导入项目相关
+  const [importCompleteOpen, setImportCompleteOpen] = useState(false);
+  const [importProject, setImportProject] = useState<Project | null>(null);
+  const [importSegments, setImportSegments] = useState<TimelineStageSegment[]>([]);
+  const [selectedCompletedStages, setSelectedCompletedStages] = useState<string[]>([]);
 
   const projectName = Form.useWatch('name', form);
   const folderPreview = workspacePath && projectName
@@ -132,6 +144,141 @@ const ProjectList: React.FC = () => {
     }
   };
 
+  const handleImportFromFolder = async () => {
+    const folderPath = await window.electronAPI.openFolder();
+    if (!folderPath) return;
+
+    const { projects } = useProjectStore.getState();
+    if (projects.some(p => p.folderPath === folderPath)) {
+      message.warning('该文件夹已导入为项目');
+      return;
+    }
+
+    const folderName = folderPath.split(/[/\\]/).pop() || '未命名项目';
+    const newProject: Project = {
+      id: Date.now().toString(),
+      name: folderName,
+      description: '',
+      folderPath,
+      status: 'active',
+      progress: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await addProject(newProject);
+    await syncProjectStageFiles(newProject, { projectDocs, templates, addProjectDoc, updateProjectDoc });
+
+    const latestDocs = useProjectDocStore.getState().projectDocs.filter(d => d.projectId === newProject.id);
+    const segments = buildProjectStageSegments(newProject, latestDocs, templates, []);
+
+    if (segments.length > 0) {
+      setImportProject(newProject);
+      setImportSegments(segments);
+      setSelectedCompletedStages([]);
+      setImportCompleteOpen(true);
+    } else {
+      message.success(`已导入项目：${folderName}`);
+    }
+  };
+
+  const handleImportCompleteOk = async () => {
+    if (!importProject) return;
+    const now = new Date().toISOString();
+
+    for (const segment of importSegments) {
+      if (selectedCompletedStages.includes(segment.stage)) {
+        await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt: now })));
+      }
+    }
+
+    const completedCount = selectedCompletedStages.length;
+    setImportCompleteOpen(false);
+    setImportProject(null);
+    setImportSegments([]);
+    setSelectedCompletedStages([]);
+
+    message.success(
+      completedCount > 0
+        ? `已导入项目，${completedCount} 个阶段标记为已完成`
+        : '已导入项目',
+    );
+  };
+
+  const handleImportFromZip = async () => {
+    const zipPath = await window.electronAPI.openZipFile();
+    if (!zipPath) return;
+
+    const result = await window.electronAPI.importFromZip({
+      zipPath,
+      workspacePath,
+    });
+
+    if (!result.success) {
+      message.error(`导入失败: ${result.error}`);
+      return;
+    }
+
+    if (result.project) {
+      await useProjectStore.getState().loadProjects();
+
+      const projects = useProjectStore.getState().projects;
+      const importedProject = projects.find(p => p.id === result.project.id);
+      if (importedProject) {
+        await syncProjectStageFiles(importedProject, {
+          projectDocs: useProjectDocStore.getState().projectDocs,
+          templates,
+          addProjectDoc,
+          updateProjectDoc,
+        });
+
+        const latestDocs = useProjectDocStore.getState().projectDocs.filter(
+          d => d.projectId === importedProject.id
+        );
+        const segments = buildProjectStageSegments(
+          importedProject, latestDocs, templates, []
+        );
+
+        if (segments.length > 0) {
+          setImportProject(importedProject);
+          setImportSegments(segments);
+          setSelectedCompletedStages([]);
+          setImportCompleteOpen(true);
+        } else {
+          message.success(`已导入项目：${importedProject.name}`);
+        }
+      } else {
+        message.success('项目已导入');
+      }
+    }
+  };
+
+  const handleExportZip = async (project: Project) => {
+    if (!project.folderPath) {
+      message.warning('该项目未关联文件夹，无法导出');
+      return;
+    }
+
+    const savePath = await window.electronAPI.saveZipFile();
+    if (!savePath) return;
+
+    const docs = useProjectDocStore.getState().projectDocs.filter(
+      d => d.projectId === project.id
+    );
+
+    const result = await window.electronAPI.exportZip({
+      project,
+      savePath,
+      projectDocs: docs,
+    });
+
+    if (result.success) {
+      message.success(`项目已导出到: ${savePath}`);
+    } else {
+      message.error(`导出失败: ${result.error}`);
+    }
+  };
+
   const statusColors = {
     active: 'green',
     completed: 'blue',
@@ -160,13 +307,29 @@ const ProjectList: React.FC = () => {
         <Text strong style={{ fontSize: 18 }}>
           我的项目
         </Text>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => setIsModalOpen(true)}
-        >
-          新建项目
-        </Button>
+        <Space>
+          <Dropdown
+            menu={{
+              items: [
+                { key: 'folder', icon: <FolderOpenOutlined />, label: '从文件夹导入' },
+                { key: 'zip', icon: <FileZipOutlined />, label: '从 ZIP 导入' },
+              ],
+              onClick: ({ key }) => {
+                if (key === 'folder') handleImportFromFolder();
+                else if (key === 'zip') handleImportFromZip();
+              },
+            }}
+          >
+            <Button icon={<ImportOutlined />}>导入项目</Button>
+          </Dropdown>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => setIsModalOpen(true)}
+          >
+            新建项目
+          </Button>
+        </Space>
       </div>
 
       <List
@@ -191,6 +354,16 @@ const ProjectList: React.FC = () => {
                   }}
                 >
                   打开
+                </Button>,
+                <Button
+                  type="link"
+                  icon={<ExportOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleExportZip(project);
+                  }}
+                >
+                  导出
                 </Button>,
                 <Button
                   type="link"
@@ -266,6 +439,65 @@ const ProjectList: React.FC = () => {
             </Form.Item>
           )}
         </Form>
+      </Modal>
+
+      {/* 导入完成阶段选择弹窗 */}
+      <Modal
+        title="选择已完成的阶段"
+        open={importCompleteOpen}
+        onOk={handleImportCompleteOk}
+        onCancel={() => { setImportCompleteOpen(false); setImportProject(null); setImportSegments([]); setSelectedCompletedStages([]); }}
+        okText="确认"
+        cancelText="跳过"
+        width={420}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            已识别到以下阶段文件，请选择已经完成的阶段：
+          </Text>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {importSegments.map(segment => {
+            const color = timelineStageMeta[segment.stage].color;
+            return (
+              <div
+                key={segment.stage}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '8px 12px',
+                  border: '1px solid #f0f0f0',
+                  borderRadius: 8,
+                  background: selectedCompletedStages.includes(segment.stage) ? '#f6ffed' : '#fff',
+                }}
+              >
+                <Checkbox
+                  checked={selectedCompletedStages.includes(segment.stage)}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedCompletedStages(prev => [...prev, segment.stage]);
+                    } else {
+                      setSelectedCompletedStages(prev => prev.filter(s => s !== segment.stage));
+                    }
+                  }}
+                />
+                <span style={{ width: 10, height: 10, borderRadius: 3, background: color, flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 13 }}>{segment.label}</Text>
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {segment.sourceDocNames.join(', ')}
+                    </Text>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {importSegments.length === 0 && (
+          <Text type="secondary" style={{ fontSize: 12 }}>未识别到阶段文件</Text>
+        )}
       </Modal>
     </div>
   );

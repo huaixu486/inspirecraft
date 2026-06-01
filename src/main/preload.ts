@@ -80,5 +80,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scanStageFiles: (folderPath: string) => ipcRenderer.invoke('folder:scanStageFiles', folderPath),
   createFromTemplate: (params: { folderPath: string; fileName: string; template: any }) =>
     ipcRenderer.invoke('file:createFromTemplate', params),
+
+  // ZIP 导入导出
+  openZipFile: () => ipcRenderer.invoke('dialog:openZip'),
+  importFromZip: (params: { zipPath: string; workspacePath: string }) =>
+    ipcRenderer.invoke('project:importFromZip', params),
+  saveZipFile: () => ipcRenderer.invoke('dialog:saveZip'),
+  exportZip: (params: { project: any; savePath: string; projectDocs: any[] }) =>
+    ipcRenderer.invoke('project:exportZip', params),
 });
 

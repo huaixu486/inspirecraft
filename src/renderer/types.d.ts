@@ -70,6 +70,12 @@
   getFolderContents: (folderPath: string) => Promise<{ success: boolean; items: { name: string; isDirectory: boolean; ext: string; size: number; modifiedAt: string; path: string }[]; error?: string }>;
   scanStageFiles: (folderPath: string) => Promise<{ success: boolean; files: { name: string; path: string; ext: string; size: number; createdAt: string; modifiedAt: string }[]; error?: string }>;
   createFromTemplate: (params: { folderPath: string; fileName: string; template: any }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+
+  // ZIP 导入导出
+  openZipFile: () => Promise<string | null>;
+  importFromZip: (params: { zipPath: string; workspacePath: string }) => Promise<{ success: boolean; project?: any; error?: string }>;
+  saveZipFile: () => Promise<string | null>;
+  exportZip: (params: { project: any; savePath: string; projectDocs: any[] }) => Promise<{ success: boolean; error?: string }>;
 }
 
 interface Window {

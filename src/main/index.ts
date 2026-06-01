@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode } from './types';
 import * as mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
+import * as JSZip from 'jszip';
 import * as https from 'https';
 import * as http from 'http';
 
@@ -1165,6 +1166,214 @@ ipcMain.handle('file:createFromTemplate', async (_event: any, params: { folderPa
     fs.copyFileSync(template.filePath, destPath);
 
     return { success: true, filePath: destPath };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ========== ZIP 导入导出 ==========
+
+// 递归添加文件夹到zip
+function addFolderToZip(zip: JSZip, folderPath: string, basePath: string) {
+  const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(folderPath, entry.name);
+    const relativePath = path.relative(basePath, fullPath).replace(/\\/g, '/');
+    if (entry.isDirectory()) {
+      addFolderToZip(zip, fullPath, basePath);
+    } else {
+      const content = fs.readFileSync(fullPath);
+      zip.file(relativePath, content);
+    }
+  }
+}
+
+// 打开ZIP文件对话框
+ipcMain.handle('dialog:openZip', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    title: '选择 ZIP 文件',
+    filters: [
+      { name: 'ZIP 压缩包', extensions: ['zip'] },
+    ],
+  });
+  if (result.canceled) {
+    return null;
+  }
+  return result.filePaths[0];
+});
+
+// 保存ZIP文件对话框
+ipcMain.handle('dialog:saveZip', async () => {
+  const result = await dialog.showSaveDialog({
+    title: '导出项目为 ZIP',
+    defaultPath: 'project-export.zip',
+    filters: [
+      { name: 'ZIP 压缩包', extensions: ['zip'] },
+    ],
+  });
+  if (result.canceled) {
+    return null;
+  }
+  return result.filePath;
+});
+
+// 从ZIP导入项目
+ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: string; workspacePath: string }) => {
+  try {
+    const { zipPath, workspacePath } = params;
+
+    if (!fs.existsSync(zipPath)) {
+      return { success: false, error: 'ZIP 文件不存在' };
+    }
+
+    const buffer = fs.readFileSync(zipPath);
+    const zip = await JSZip.loadAsync(buffer);
+
+    // 确定项目文件夹名（取ZIP文件名，去掉.zip后缀）
+    const zipBaseName = path.basename(zipPath, '.zip');
+    let projectFolderName = zipBaseName;
+
+    // 检查是否只有一个顶级目录
+    const rootEntries: string[] = [];
+    zip.forEach((relativePath) => {
+      const parts = relativePath.split('/');
+      if (parts.length > 1 && parts[0]) {
+        rootEntries.push(parts[0]);
+      }
+    });
+    const uniqueRoots = [...new Set(rootEntries)];
+    if (uniqueRoots.length === 1) {
+      // 只有一个顶级目录，用它作为文件夹名
+      projectFolderName = uniqueRoots[0];
+    }
+
+    // 在workspace中创建项目文件夹
+    let folderPath = path.join(workspacePath, projectFolderName);
+    if (fs.existsSync(folderPath)) {
+      // 文件夹已存在，加后缀
+      let i = 1;
+      while (fs.existsSync(path.join(workspacePath, `${projectFolderName}-${i}`))) {
+        i++;
+      }
+      projectFolderName = `${projectFolderName}-${i}`;
+      folderPath = path.join(workspacePath, projectFolderName);
+    }
+    fs.mkdirSync(folderPath, { recursive: true });
+
+    // 提取project.json（如果存在）
+    let metadata: any = null;
+    const projectJsonEntry = zip.file('project.json');
+    if (projectJsonEntry) {
+      const content = await projectJsonEntry.async('string');
+      metadata = JSON.parse(content);
+    }
+
+    // 解压文件到项目文件夹（跳过project.json）
+    let hasFiles = false;
+    const filesToExtract: { path: string; data: any }[] = [];
+    zip.forEach((relativePath, zipEntry) => {
+      if (zipEntry.dir || relativePath === 'project.json') return;
+
+      // 去掉顶级目录前缀（如果有）
+      let cleanPath = relativePath;
+      if (uniqueRoots.length === 1 && cleanPath.startsWith(uniqueRoots[0] + '/')) {
+        cleanPath = cleanPath.substring(uniqueRoots[0].length + 1);
+      }
+      if (!cleanPath) return;
+
+      filesToExtract.push({ path: cleanPath, data: zipEntry });
+    });
+
+    for (const file of filesToExtract) {
+      const fullPath = path.join(folderPath, file.path);
+      const dir = path.dirname(fullPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const content = await file.data.async('nodebuffer');
+      fs.writeFileSync(fullPath, content);
+      hasFiles = true;
+    }
+
+    if (!hasFiles && !metadata) {
+      return { success: false, error: 'ZIP 文件为空，未找到任何项目文件' };
+    }
+
+    // 构建项目记录
+    let project: any;
+    if (metadata && metadata.project) {
+      project = {
+        ...metadata.project,
+        id: Date.now().toString(),
+        folderPath,
+        updatedAt: new Date().toISOString(),
+      };
+    } else {
+      project = {
+        id: Date.now().toString(),
+        name: projectFolderName,
+        description: '',
+        folderPath,
+        status: 'active',
+        progress: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    // 保存项目
+    const projects = JSON.parse(fs.readFileSync(projectsFile, 'utf-8')) as any[];
+    projects.push(project);
+    fs.writeFileSync(projectsFile, JSON.stringify(projects, null, 2));
+
+    // 如果有文档记录，也保存
+    if (metadata && metadata.documents && Array.isArray(metadata.documents)) {
+      const docs = JSON.parse(fs.readFileSync(projectDocsFile, 'utf-8')) as any[];
+      for (const doc of metadata.documents) {
+        docs.push({
+          ...doc,
+          id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
+          projectId: project.id,
+          sourceFilePath: '', // 路径在不同机器上可能不同
+        });
+      }
+      fs.writeFileSync(projectDocsFile, JSON.stringify(docs, null, 2));
+    }
+
+    return { success: true, project };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 导出项目为ZIP
+ipcMain.handle('project:exportZip', async (_event: any, params: { project: any; savePath: string; projectDocs: any[] }) => {
+  try {
+    const { project, savePath, projectDocs } = params;
+
+    if (!project.folderPath || !fs.existsSync(project.folderPath)) {
+      return { success: false, error: '项目文件夹不存在' };
+    }
+
+    const zip = new JSZip();
+
+    // 添加项目文件
+    addFolderToZip(zip, project.folderPath, project.folderPath);
+
+    // 添加project.json元数据
+    const metadata = {
+      version: 1,
+      project,
+      documents: projectDocs,
+    };
+    zip.file('project.json', JSON.stringify(metadata, null, 2));
+
+    // 生成ZIP并写入文件
+    const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    fs.writeFileSync(savePath, buffer);
+
+    return { success: true };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
