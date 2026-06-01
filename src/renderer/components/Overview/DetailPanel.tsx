@@ -593,7 +593,10 @@ const DetailPanel: React.FC = () => {
       children: selectedDoc ? (
         <div>
           <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Text strong style={{ fontSize: 13 }}>{selectedDoc.name}</Text>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Button size="small" icon={<CloseOutlined />} onClick={() => setSelectedDocId(null)} style={{ padding: '0 6px' }} />
+              <Text strong style={{ fontSize: 13 }} ellipsis={{ tooltip: selectedDoc.name }}>{selectedDoc.name}</Text>
+            </div>
             <Space size={4}>
               <Button size="small" icon={<ReloadOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(selectedDoc, false)}>
                 基础分析
@@ -660,15 +663,57 @@ const DetailPanel: React.FC = () => {
           )}
         </div>
       ) : (
-        <div style={{ textAlign: 'center', padding: '40px 0' }}>
-          <ExclamationCircleOutlined style={{ fontSize: 32, color: '#d9d9d9', marginBottom: 12 }} />
-          <div>
-            <Text type="secondary" style={{ fontSize: 13 }}>请先在"文件"标签中选择一个文档</Text>
+        <div>
+          <div style={{ marginBottom: 12 }}>
+            <Text strong style={{ fontSize: 13 }}>文档进度 ({projectDocsList.length})</Text>
           </div>
-          {projectDocsList.length === 0 && (
-            <Button type="link" size="small" onClick={() => setAddModalOpen(true)} style={{ marginTop: 8 }}>
-              关联文件
-            </Button>
+          {projectDocsList.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {projectDocsList.map(doc => (
+                <div
+                  key={doc.id}
+                  onClick={() => setSelectedDocId(doc.id)}
+                  style={{
+                    padding: '10px 12px',
+                    border: '1px solid #f0f0f0',
+                    borderRadius: 8,
+                    background: '#fff',
+                    cursor: 'pointer',
+                    transition: 'border-color 0.2s',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.borderColor = '#1890ff')}
+                  onMouseLeave={e => (e.currentTarget.style.borderColor = '#f0f0f0')}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: doc.name, style: { maxWidth: 180 } }}>{doc.name}</Text>
+                    <Text style={{ fontSize: 11, color: doc.overallProgress >= 80 ? '#52c41a' : '#1890ff', fontWeight: 600 }}>
+                      {doc.overallProgress}%
+                    </Text>
+                  </div>
+                  <Progress
+                    percent={doc.overallProgress}
+                    size="small"
+                    strokeColor={doc.overallProgress >= 80 ? '#52c41a' : '#1890ff'}
+                    showInfo={false}
+                  />
+                  {doc.analyzedAt && (
+                    <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 4 }}>
+                      已分析 · {formatDate(doc.analyzedAt)}
+                    </Text>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ textAlign: 'center', padding: '40px 0' }}>
+              <ExclamationCircleOutlined style={{ fontSize: 32, color: '#d9d9d9', marginBottom: 12 }} />
+              <div>
+                <Text type="secondary" style={{ fontSize: 13 }}>暂无关联文档</Text>
+              </div>
+              <Button type="link" size="small" onClick={() => setAddModalOpen(true)} style={{ marginTop: 8 }}>
+                关联文件
+              </Button>
+            </div>
           )}
         </div>
       ),
