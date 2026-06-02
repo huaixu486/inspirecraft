@@ -27,17 +27,36 @@ const { Title, Text, Paragraph } = Typography;
 const AnimatedExpand: React.FC<{ open: boolean; children: React.ReactNode }> = ({ open, children }) => {
   const contentRef = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState<number>(0);
+  const [animating, setAnimating] = useState(false);
 
   useEffect(() => {
-    if (contentRef.current) {
-      setHeight(open ? contentRef.current.scrollHeight : 0);
-    }
-  }, [open]);
+    if (!contentRef.current) return;
 
-  // 展开后高度设为 auto，避免内容变化时高度不跟手
-  useEffect(() => {
-    if (open && contentRef.current) {
-      const timer = setTimeout(() => setHeight(contentRef.current?.scrollHeight || 0), 200);
+    if (open) {
+      // 展开：先设为当前高度，再设为目标高度触发过渡
+      const scrollH = contentRef.current.scrollHeight;
+      setHeight(0);
+      requestAnimationFrame(() => {
+        setHeight(scrollH);
+        setAnimating(true);
+      });
+      // 过渡结束后设为 auto，适应内容变化
+      const timer = setTimeout(() => {
+        setHeight(contentRef.current?.scrollHeight || 0);
+        setAnimating(false);
+      }, 260);
+      return () => clearTimeout(timer);
+    } else {
+      // 折叠：先设为当前像素高度，再设为0
+      const scrollH = contentRef.current.scrollHeight;
+      setHeight(scrollH);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setHeight(0);
+          setAnimating(true);
+        });
+      });
+      const timer = setTimeout(() => setAnimating(false), 260);
       return () => clearTimeout(timer);
     }
   }, [open]);
@@ -46,7 +65,7 @@ const AnimatedExpand: React.FC<{ open: boolean; children: React.ReactNode }> = (
     <div style={{
       height,
       overflow: 'hidden',
-      transition: 'height 0.25s ease-in-out',
+      transition: animating ? 'height 0.25s ease-in-out' : 'none',
     }}>
       <div ref={contentRef}>
         {children}
