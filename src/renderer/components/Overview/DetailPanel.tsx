@@ -24,30 +24,37 @@ import { useSettingsStore } from '../../stores/settingsStore';
 const { Title, Text, Paragraph } = Typography;
 
 // 折叠展开动画组件
-const AnimatedExpand: React.FC<{ open: boolean; children: React.ReactNode }> = ({ open, children }) => {
+const AnimatedExpand: React.FC<{
+  open: boolean;
+  children: React.ReactNode;
+  borderColor?: string;
+  onExpandEnd?: () => void;
+  onCollapseEnd?: () => void;
+}> = ({ open, children, borderColor = '#f0f0f0', onExpandEnd, onCollapseEnd }) => {
   const contentRef = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState<number>(0);
   const [animating, setAnimating] = useState(false);
+  const [showExpandedBorder, setShowExpandedBorder] = useState(false);
 
   useEffect(() => {
     if (!contentRef.current) return;
 
     if (open) {
-      // 展开：先设为当前高度，再设为目标高度触发过渡
+      setShowExpandedBorder(true);
       const scrollH = contentRef.current.scrollHeight;
       setHeight(0);
       requestAnimationFrame(() => {
         setHeight(scrollH);
         setAnimating(true);
       });
-      // 过渡结束后设为 auto，适应内容变化
       const timer = setTimeout(() => {
         setHeight(contentRef.current?.scrollHeight || 0);
         setAnimating(false);
+        onExpandEnd?.();
       }, 260);
       return () => clearTimeout(timer);
     } else {
-      // 折叠：先设为当前像素高度，再设为0
+      // 折叠时保持蓝色边框，动画结束后再渐隐
       const scrollH = contentRef.current.scrollHeight;
       setHeight(scrollH);
       requestAnimationFrame(() => {
@@ -56,7 +63,14 @@ const AnimatedExpand: React.FC<{ open: boolean; children: React.ReactNode }> = (
           setAnimating(true);
         });
       });
-      const timer = setTimeout(() => setAnimating(false), 260);
+      const timer = setTimeout(() => {
+        setAnimating(false);
+        // 动画结束后，再用0.3s渐隐蓝色边框
+        setTimeout(() => {
+          setShowExpandedBorder(false);
+          onCollapseEnd?.();
+        }, 300);
+      }, 260);
       return () => clearTimeout(timer);
     }
   }, [open]);
@@ -67,7 +81,7 @@ const AnimatedExpand: React.FC<{ open: boolean; children: React.ReactNode }> = (
       overflow: 'hidden',
       transition: animating ? 'height 0.25s ease-in-out' : 'none',
     }}>
-      <div ref={contentRef}>
+      <div ref={contentRef} style={{ borderTop: `1px solid ${showExpandedBorder ? borderColor : 'transparent'}`, transition: 'border-color 0.3s ease-in-out' }}>
         {children}
       </div>
     </div>
@@ -89,6 +103,9 @@ const DetailPanel: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [expandedStage, setExpandedStage] = useState<string | null>(null);
   const [expandedTemplate, setExpandedTemplate] = useState<string | null>(null);
+  // 延迟收起边框状态，让边框在动画结束后再渐隐
+  const [stageBorderVisible, setStageBorderVisible] = useState<Record<string, boolean>>({});
+  const [templateBorderVisible, setTemplateBorderVisible] = useState<Record<string, boolean>>({});
 
   const isOverdue = (deadline?: string, completedAt?: string) => {
     if (!deadline || completedAt) return false;
@@ -458,18 +475,28 @@ const DetailPanel: React.FC = () => {
                   ? Math.round(group.docs.reduce((acc, d) => acc + d.overallProgress, 0) / group.docs.length)
                   : 0;
                 const isExpanded = expandedTemplate === group.templateId;
+                const borderVisible = templateBorderVisible[group.templateId] || isExpanded;
                 return (
                   <div key={group.templateId}>
                     {/* 模板标题行 */}
                     <div
-                      onClick={() => setExpandedTemplate(isExpanded ? null : group.templateId)}
+                      onClick={() => {
+                        if (isExpanded) {
+                          setExpandedTemplate(null);
+                          // 延迟移除蓝色边框，等动画结束后再渐隐
+                          setTimeout(() => setTemplateBorderVisible(prev => ({ ...prev, [group.templateId]: false })), 550);
+                        } else {
+                          setExpandedTemplate(group.templateId);
+                          setTemplateBorderVisible(prev => ({ ...prev, [group.templateId]: true }));
+                        }
+                      }}
                       style={{
                         padding: '8px 10px',
-                        border: `1px solid ${isExpanded ? '#1890ff' : '#f0f0f0'}`,
+                        border: `1px solid ${borderVisible ? '#1890ff' : '#f0f0f0'}`,
                         borderRadius: isExpanded ? '8px 8px 0 0' : 8,
                         background: isExpanded ? '#fafafa' : '#fff',
                         cursor: 'pointer',
-                        borderBottom: isExpanded ? '1px solid #1890ff' : undefined,
+                        transition: 'border-color 0.3s ease-in-out',
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -486,10 +513,8 @@ const DetailPanel: React.FC = () => {
                       </div>
                     </div>
                     {/* 展开的文档列表 */}
-                    <AnimatedExpand open={isExpanded}>
+                    <AnimatedExpand open={isExpanded} borderColor="#1890ff">
                       <div style={{
-                        border: '1px solid #1890ff',
-                        borderTop: 'none',
                         borderRadius: '0 0 8px 8px',
                         padding: '8px 10px',
                         background: '#fff',
@@ -693,18 +718,27 @@ const DetailPanel: React.FC = () => {
                 const docsInStage = projectDocsList.filter(d => segment.sourceDocIds.includes(d.id));
                 const latestDoc = docsInStage[docsInStage.length - 1];
 
+                const borderVisible = stageBorderVisible[segment.stage] || isExpanded;
                 return (
                   <div key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}>
                     {/* 阶段标题行 */}
                     <div
-                      onClick={() => setExpandedStage(isExpanded ? null : segment.stage)}
+                      onClick={() => {
+                        if (isExpanded) {
+                          setExpandedStage(null);
+                          setTimeout(() => setStageBorderVisible(prev => ({ ...prev, [segment.stage]: false })), 550);
+                        } else {
+                          setExpandedStage(segment.stage);
+                          setStageBorderVisible(prev => ({ ...prev, [segment.stage]: true }));
+                        }
+                      }}
                       style={{
                         padding: '8px 10px',
-                        border: `1px solid ${isExpanded ? color : '#f0f0f0'}`,
+                        border: `1px solid ${borderVisible ? color : '#f0f0f0'}`,
                         borderRadius: isExpanded ? '8px 8px 0 0' : 8,
                         background: isExpanded ? '#fafafa' : '#fff',
                         cursor: 'pointer',
-                        borderBottom: isExpanded ? `1px solid ${color}` : undefined,
+                        transition: 'border-color 0.3s ease-in-out',
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -731,10 +765,8 @@ const DetailPanel: React.FC = () => {
                       )}
                     </div>
                     {/* 展开的文档列表 */}
-                    <AnimatedExpand open={isExpanded}>
+                    <AnimatedExpand open={isExpanded} borderColor={color}>
                       <div style={{
-                        border: `1px solid ${color}`,
-                        borderTop: 'none',
                         borderRadius: '0 0 8px 8px',
                         padding: '8px 10px',
                         background: '#fff',
