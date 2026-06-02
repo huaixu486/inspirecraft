@@ -6,6 +6,10 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background:
+    radial-gradient(circle at 8% 0%, rgba(22, 119, 255, 0.14), transparent 28%),
+    radial-gradient(circle at 88% 10%, rgba(82, 196, 26, 0.08), transparent 26%),
+    #eef5fb;
 }
 
 #root {
@@ -26,16 +30,20 @@ body {
 }
 
 .ant-menu-item-selected {
-  background-color: #e6f7ff !important;
+  background-color: rgba(22, 119, 255, 0.1) !important;
+  color: #1677ff !important;
+  font-weight: 600;
 }
 
 .ant-menu-item:hover {
-  background-color: #f0f5ff !important;
+  background-color: rgba(22, 119, 255, 0.07) !important;
 }
 
 .ant-menu-item {
-  border-radius: 8px;
-  margin: 4px 8px !important;
+  border-radius: 9px;
+  margin: 5px 0 !important;
+  height: 40px !important;
+  line-height: 40px !important;
 }
 
 /* Card styles */
@@ -45,27 +53,295 @@ body {
 
 /* Table styles */
 .ant-table-row:hover td {
-  background-color: #fafafa !important;
+  background-color: #f8fbff !important;
+}
+
+.app-shell {
+  background:
+    linear-gradient(135deg, rgba(248, 251, 255, 0.98), rgba(238, 246, 253, 0.94)),
+    #eef5fb;
+}
+
+.app-sidebar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(244, 249, 255, 0.72)) !important;
+  backdrop-filter: blur(18px);
+  box-shadow: 12px 0 40px rgba(15, 23, 42, 0.035);
+}
+
+.app-brand {
+  background: rgba(255, 255, 255, 0.36);
+}
+
+.app-nav.ant-menu {
+  background: transparent;
+}
+
+.app-nav .ant-menu-item {
+  color: #475569;
+  padding-left: 16px !important;
+}
+
+.app-nav .ant-menu-item .anticon {
+  color: #64748b;
+  font-size: 15px;
+}
+
+.app-nav .ant-menu-item-selected .anticon {
+  color: #1677ff;
+}
+
+.app-workspace {
+  background:
+    linear-gradient(90deg, rgba(250, 253, 255, 0.9), rgba(244, 249, 254, 0.82)),
+    transparent;
+}
+
+.app-topbar {
+  backdrop-filter: blur(18px);
+}
+
+.overview-shell {
+  background:
+    linear-gradient(90deg, rgba(249, 252, 255, 0.96), rgba(244, 250, 255, 0.88));
+}
+
+.overview-main {
+  scrollbar-gutter: stable;
+  min-width: 0;
+}
+
+.overview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.overview-detail-rail {
+  box-shadow: -18px 0 46px rgba(15, 23, 42, 0.06);
+  backdrop-filter: blur(14px);
+}
+
+.dashboard-card.ant-card {
+  border: 1px solid rgba(219, 228, 238, 0.92);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.045);
+  overflow: hidden;
+}
+
+.dashboard-card .ant-card-head {
+  min-height: 48px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.76);
+  padding: 0 18px;
+}
+
+.dashboard-card .ant-card-head-title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.dashboard-card .ant-card-body {
+  padding: 14px 16px;
+}
+
+.stat-card.ant-card {
+  min-height: 106px;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+}
+
+.stat-card:hover,
+.dashboard-card:hover {
+  border-color: rgba(22, 119, 255, 0.22);
+}
+
+.gantt-card .ant-card-body {
+  padding: 0;
+}
+
+.gantt-card .ant-card-head {
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.gantt-card .ant-card-body > div {
+  padding: 0 0 10px;
+}
+
+.gantt-card .gantt-scroll-area {
+  border-top: 1px solid rgba(226, 232, 240, 0.72);
+}
+
+.gantt-project-cell,
+.gantt-stage-cell {
+  border-right: 1px solid rgba(226, 232, 240, 0.66);
+  box-shadow: 8px 0 14px rgba(255, 255, 255, 0.78);
+}
+
+.gantt-project-cell {
+  padding: 0 10px;
+}
+
+.gantt-stage-cell {
+  padding-left: 10px;
+}
+
+.project-table-card .ant-card-body {
+  padding: 0;
+}
+
+.overview-project-table .ant-table {
+  background: transparent;
+}
+
+.overview-project-table .ant-table-thead > tr > th {
+  background: rgba(248, 250, 252, 0.86) !important;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.82) !important;
+  padding: 11px 16px !important;
+}
+
+.overview-project-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid rgba(226, 232, 240, 0.62) !important;
+  color: #334155;
+  padding: 13px 16px !important;
+}
+
+.overview-project-table .ant-table-tbody > tr:last-child > td {
+  border-bottom: 0 !important;
+}
+
+.overview-project-table .ant-table-row-selected > td {
+  background: rgba(22, 119, 255, 0.06) !important;
+}
+
+.detail-panel {
+  box-sizing: border-box;
+  margin: 16px 16px 16px 12px;
+  height: calc(100% - 32px) !important;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(226, 232, 240, 0.86);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.075);
+}
+
+.detail-panel .ant-tabs-nav {
+  margin-bottom: 14px;
+}
+
+.detail-panel .ant-tabs-tab {
+  padding: 10px 0;
+}
+
+.detail-panel .ant-tabs-ink-bar {
+  height: 3px;
+  border-radius: 999px;
+}
+
+.template-manager-page {
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 26px 28px 34px;
+  background:
+    linear-gradient(90deg, rgba(249, 252, 255, 0.96), rgba(244, 250, 255, 0.88));
+}
+
+.template-section {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(219, 228, 238, 0.9);
+  border-radius: 14px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.045);
+  padding: 22px 24px 24px;
+}
+
+.template-section-header {
+  min-height: 42px;
+}
+
+.template-section-header .ant-typography {
+  color: #0f172a;
+  font-weight: 700;
+}
+
+.template-card-list .ant-list-item {
+  margin-bottom: 0;
+}
+
+.template-card-list .ant-card {
+  border: 1px solid rgba(226, 232, 240, 0.86);
+  border-radius: 12px;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.035);
+  overflow: hidden;
+}
+
+.template-card-list .ant-card-body {
+  padding: 20px;
+}
+
+.template-card-list .ant-card-actions {
+  border-top: 1px solid rgba(226, 232, 240, 0.72);
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.template-page-divider {
+  margin: 24px 0;
+  border-color: transparent;
+}
+
+.stage-section {
+  padding-bottom: 10px;
+}
+
+.stage-list .ant-list-item {
+  padding: 18px 0;
+  border-block-end: 1px solid rgba(226, 232, 240, 0.72) !important;
+}
+
+.stage-list .ant-list-item:first-child {
+  padding-top: 8px;
+}
+
+.stage-list .ant-list-item:last-child {
+  border-block-end: 0 !important;
 }
 
 /* Scrollbar styles */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.26) transparent;
+}
+
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f1f1;
-  border-radius: 3px;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
-  border-radius: 3px;
+  background: rgba(100, 116, 139, 0.22);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  min-height: 40px;
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+*:hover {
+  scrollbar-color: rgba(24, 144, 255, 0.36) transparent;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  background: rgba(24, 144, 255, 0.32);
+  border-color: transparent;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #a8a8a8;
+  background: rgba(24, 144, 255, 0.5);
 }
 
 /* Progress bar styles */
@@ -111,6 +387,47 @@ body {
 .ant-tabs-tabpane {
   height: 100%;
   overflow-y: auto;
+}
+
+.detail-panel-tabs .ant-tabs-content-holder {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.detail-panel-tabs .ant-tabs-content,
+.detail-panel-tabs .ant-tabs-tabpane {
+  min-height: 0;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane {
+  padding-right: 3px;
+  scrollbar-width: none;
+  scrollbar-color: transparent transparent;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar-thumb {
+  background: transparent;
+  background-clip: padding-box;
+  border: 0;
+  border-radius: 999px;
+  min-height: 36px;
+}
+
+.detail-panel-tabs:hover .ant-tabs-tabpane {
+  scrollbar-color: transparent transparent;
+}
+
+.detail-panel-tabs:hover .ant-tabs-tabpane::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar-thumb:hover {
+  background: transparent;
 }
 
 /* List item styles */

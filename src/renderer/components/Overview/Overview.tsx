@@ -12,35 +12,37 @@ const Overview: React.FC = () => {
   const { currentProject } = useProjectStore();
 
   return (
-    <div style={{ display: 'flex', height: '100%' }}>
+    <div className="overview-shell" style={{ display: 'flex', height: '100%' }}>
       {/* Left main content */}
-      <div style={{ flex: 1, padding: '20px', overflow: 'auto' }}>
+      <div className="overview-main" style={{ flex: 1, padding: '22px 24px', overflow: 'auto' }}>
         {/* Top title bar */}
-        <div style={{ marginBottom: 20 }}>
-          <div style={{ fontSize: 20, fontWeight: 600, color: '#1a1a1a' }}>项目总览</div>
-          <Text type="secondary" style={{ fontSize: 13 }}>掌控全局，推进每个项目的成功</Text>
+        <div className="overview-header" style={{ marginBottom: 22 }}>
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: '#0f172a', letterSpacing: 0 }}>项目总览</div>
+            <Text type="secondary" style={{ fontSize: 13 }}>掌控全局，推进每个项目的成功</Text>
+          </div>
         </div>
 
         {/* Stats cards */}
         <StatsCards />
 
         {/* Gantt chart timeline */}
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 18 }}>
           <GanttChart />
         </div>
 
         {/* Project table */}
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 18 }}>
           <ProjectTable />
         </div>
       </div>
 
       {/* Right detail panel */}
-      <div style={{
-        width: currentProject ? 340 : 0,
-        borderLeft: currentProject ? '1px solid #f0f0f0' : 'none',
+      <div className="overview-detail-rail" style={{
+        width: currentProject ? 360 : 0,
+        borderLeft: currentProject ? '1px solid rgba(226, 232, 240, 0.82)' : 'none',
         overflow: 'hidden',
-        background: '#fff',
+        background: currentProject ? 'rgba(255, 255, 255, 0.72)' : 'transparent',
         transition: 'width 0.2s',
         height: '100%',
         display: 'flex',
@@ -54,4 +56,3 @@ const Overview: React.FC = () => {
 };
 
 export default Overview;
-

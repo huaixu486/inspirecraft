@@ -127,47 +127,50 @@ const App: React.FC = () => {
   };
 
   return (
-    <Layout style={{ height: '100vh', overflow: 'hidden' }}>
-      <Sider width={200} theme="light" style={{ borderRight: '1px solid #f0f0f0', height: '100vh', overflow: 'hidden' }}>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid #f0f0f0' }}>
+    <Layout className="app-shell" style={{ height: '100vh', overflow: 'hidden' }}>
+      <Sider className="app-sidebar" width={210} theme="light" style={{ borderRight: '1px solid rgba(226, 232, 240, 0.72)', height: '100vh', overflow: 'hidden' }}>
+        <div className="app-brand" style={{ padding: '18px 20px 20px', borderBottom: '1px solid rgba(226, 232, 240, 0.45)' }}>
           <Space>
             <div style={{
               width: 32,
               height: 32,
-              background: '#fff',
+              background: 'linear-gradient(135deg, #1677ff 0%, #5bb7ff 100%)',
               borderRadius: 8,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              color: '#1890ff',
+              color: '#fff',
               fontWeight: 'bold',
               fontSize: 14,
-              boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+              boxShadow: '0 8px 18px rgba(22, 119, 255, 0.24)',
             }}>
               P
             </div>
-            <Title level={5} style={{ margin: 0, color: '#1890ff' }}>
+            <Title level={5} style={{ margin: 0, color: '#0f172a' }}>
               ProjectHub
             </Title>
           </Space>
         </div>
         <Menu
+          className="app-nav"
           mode="inline"
           selectedKeys={[selectedKey]}
           items={menuItems}
           onClick={({ key }) => setSelectedKey(key)}
-          style={{ borderRight: 0, padding: '8px 0' }}
+          style={{ borderRight: 0, padding: '10px 12px' }}
         />
 
         {/* Storage info */}
         <div style={{
           position: 'absolute',
-          bottom: 56,
-          left: 12,
-          right: 12,
-          background: '#f6f8fa',
-          borderRadius: 8,
-          padding: '12px',
+          bottom: 88,
+          left: 16,
+          right: 16,
+          background: 'rgba(255, 255, 255, 0.72)',
+          border: '1px solid rgba(226, 232, 240, 0.86)',
+          borderRadius: 12,
+          padding: '14px',
+          boxShadow: '0 8px 24px rgba(15, 23, 42, 0.04)',
         }}>
           <Text style={{ color: '#999', fontSize: 11 }}>存储空间</Text>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
@@ -187,16 +190,18 @@ const App: React.FC = () => {
         <div
           style={{
             position: 'absolute',
-            bottom: 0,
-            left: 0,
-            right: 0,
-            padding: '12px 16px',
-            borderTop: '1px solid #f0f0f0',
-            background: '#fff',
+            bottom: 14,
+            left: 16,
+            right: 16,
+            padding: '12px',
+            border: '1px solid rgba(226, 232, 240, 0.78)',
+            borderRadius: 12,
+            background: 'rgba(255, 255, 255, 0.8)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
             cursor: 'pointer',
+            boxShadow: '0 10px 26px rgba(15, 23, 42, 0.05)',
           }}
           onClick={() => setSelectedKey('ai-settings')}
         >
@@ -233,21 +238,22 @@ const App: React.FC = () => {
           <RightOutlined style={{ color: '#ccc', fontSize: 10, flexShrink: 0 }} />
         </div>
       </Sider>
-      <Layout style={{ height: '100vh', overflow: 'hidden' }}>
+      <Layout className="app-workspace" style={{ height: '100vh', overflow: 'hidden' }}>
         {/* Top bar with notification bell */}
-        <div style={{
+        <div className="app-topbar" style={{
           display: 'flex',
           justifyContent: 'flex-end',
-          padding: '12px 24px',
-          borderBottom: '1px solid #f0f0f0',
-          background: '#fff',
+          padding: '8px 22px',
+          borderBottom: '1px solid rgba(226, 232, 240, 0.55)',
+          background: 'rgba(255, 255, 255, 0.58)',
           flexShrink: 0,
         }}>
           <div style={{
-            width: 32,
-            height: 32,
+            width: 30,
+            height: 30,
             borderRadius: '50%',
-            background: '#f5f5f5',
+            background: 'rgba(255, 255, 255, 0.78)',
+            border: '1px solid rgba(226, 232, 240, 0.9)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -258,9 +264,9 @@ const App: React.FC = () => {
         </div>
         <Content
           style={{
-            margin: '16px',
+            margin: 0,
             padding: 0,
-            background: '#f5f5f5',
+            background: 'transparent',
             borderRadius: borderRadiusLG,
             flex: 1,
             overflow: 'auto',

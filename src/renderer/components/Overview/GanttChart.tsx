@@ -9,7 +9,6 @@ import {
   buildProjectStageSegments,
   getAllStages,
   getStageMeta,
-  getStageOrder,
   TimelineStageSegment,
 } from '../../utils/timelineStages';
 import type { StageConfig } from '../../utils/timelineStages';
@@ -26,12 +25,9 @@ const MAX_SPAN = 2 * YEAR;
 const PROJECT_COL = 100;
 const STAGE_COL = 100;
 
-// 每个阶段使用不同条纹角度，重叠时形成交叉纹理便于区分
-const STRIPE_ANGLES = [45, -45, 0, 90];
-const getStripeAngle = (stageOrder: string[], stageName: string): number => {
-  const idx = stageOrder.indexOf(stageName);
-  return STRIPE_ANGLES[idx >= 0 ? idx % STRIPE_ANGLES.length : 0];
-};
+// 彩条斜线按行列交替：第一行第一列左斜，第二行第一列/第一行第二列右斜。
+const getStripeAngle = (rowIndex: number, columnIndex: number): number =>
+  (rowIndex + columnIndex) % 2 === 0 ? -45 : 45;
 
 const stripeBg = (color: string, angle: number, alpha: string) =>
   `repeating-linear-gradient(${angle}deg, ${color}${alpha} 0, ${color}${alpha} 3px, transparent 3px, transparent 6px)`;
@@ -161,7 +157,6 @@ const GanttChart: React.FC = () => {
 
   const allStages: StageConfig[] = useMemo(() => getAllStages(customStages), [customStages]);
   const stageMeta = useMemo(() => getStageMeta(allStages), [allStages]);
-  const stageOrder = useMemo(() => getStageOrder(allStages), [allStages]);
   const timeAreaRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef({ start: Date.now() - MAX_SPAN / 2, span: MAX_SPAN, initialized: false });
@@ -270,7 +265,7 @@ const GanttChart: React.FC = () => {
   const needsScroll = totalContentHeight > visibleHeight;
 
   return (
-    <Card title="整体计划时间线" bordered={false} style={{ borderRadius: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.09)' }}>
+    <Card className="dashboard-card gantt-card" title="整体计划时间线" bordered={false} style={{}}>
       <div style={{ overflow: 'hidden' }}>
         <div style={{ display: 'grid', gridTemplateColumns: `${PROJECT_COL + STAGE_COL}px minmax(0, 1fr)`, height: 30 }}>
           <div />
@@ -315,7 +310,7 @@ const GanttChart: React.FC = () => {
           </div>
         </div>
 
-        <div ref={scrollRef} style={{ position: 'relative', ...(needsScroll ? { maxHeight: visibleHeight, overflowY: 'auto' } : {}) }}>
+        <div className="gantt-scroll-area" ref={scrollRef} style={{ position: 'relative', ...(needsScroll ? { maxHeight: visibleHeight, overflowY: 'auto' } : {}) }}>
           {/* 网格线随滚动内容一起滚动 */}
           <div
             style={{
@@ -338,7 +333,7 @@ const GanttChart: React.FC = () => {
                   top: 0,
                   bottom: 0,
                   width: 1,
-                  background: '#f0f0f0',
+                  background: '#edf2f7',
                 }}
               />
             ))}
@@ -348,7 +343,7 @@ const GanttChart: React.FC = () => {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, position: 'relative', zIndex: 1 }}>
-            {[...projects].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).map(project => {
+            {[...projects].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).map((project, projectIndex) => {
               const segments = segmentsByProject.get(project.id) || [];
 
               if (segments.length === 0) {
@@ -357,14 +352,14 @@ const GanttChart: React.FC = () => {
                     key={project.id}
                     style={{ display: 'flex' }}
                   >
-                    <div style={{
+                    <div className="gantt-project-cell" style={{
                       width: PROJECT_COL, flexShrink: 0,
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       position: 'sticky', left: 0, background: '#fff', zIndex: 2,
                     }}>
                       <Text ellipsis strong style={{ fontSize: 11, textAlign: 'center' }}>{project.name}</Text>
                     </div>
-                    <div style={{
+                    <div className="gantt-stage-cell" style={{
                       width: STAGE_COL, flexShrink: 0,
                       position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2,
                     }}>
@@ -386,7 +381,7 @@ const GanttChart: React.FC = () => {
                   }}
                 >
                   {/* 项目名称：垂直居中跨所有阶段行 */}
-                  <div style={{
+                  <div className="gantt-project-cell" style={{
                     width: PROJECT_COL, flexShrink: 0,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     minHeight: segments.length * 28,
@@ -396,8 +391,8 @@ const GanttChart: React.FC = () => {
                   </div>
 
                   {/* 阶段行 */}
-                  <div style={{ width: STAGE_COL, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2 }}>
-                    {segments.map(segment => {
+                  <div className="gantt-stage-cell" style={{ width: STAGE_COL, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2 }}>
+                    {segments.map((segment, segmentIndex) => {
                       const segColor = stageMeta[segment.stage].color;
                       const segPlanEnd = toMs(segment.deadline);
                       const segDone = Boolean(segment.completedAt);
@@ -434,7 +429,7 @@ const GanttChart: React.FC = () => {
 
                   {/* 时间线彩条 */}
                   <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                    {segments.map(segment => {
+                    {segments.map((segment, segmentIndex) => {
                       const baseColor = stageMeta[segment.stage].color;
                       const start = toMs(segment.startAt);
                       const planEnd = toMs(segment.deadline);
@@ -470,7 +465,7 @@ const GanttChart: React.FC = () => {
                       const barEnd = Math.max(actualEnd, hasPlan ? planEnd : actualEnd);
                       const actualVisible = visible(start, actualEnd, view.start, view.span);
                       const planVisible = hasPlan && visible(start, planEnd, view.start, view.span);
-                      const stripeAngle = getStripeAngle(stageOrder, segment.stage);
+                      const stripeAngle = getStripeAngle(projectIndex, segmentIndex);
 
                       return (
                         <div
@@ -546,4 +541,3 @@ const GanttChart: React.FC = () => {
 };
 
 export default GanttChart;
-

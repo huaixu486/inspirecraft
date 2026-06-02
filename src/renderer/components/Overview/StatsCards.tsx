@@ -100,33 +100,32 @@ const StatsCards: React.FC = () => {
   ];
 
   return (
-    <Row gutter={[16, 16]}>
+    <Row className="stats-grid" gutter={[16, 16]}>
       {stats.map((stat, index) => (
         <Col xs={12} sm={12} md={6} key={index}>
           <Card
+            className="dashboard-card stat-card"
             variant="borderless"
             style={{
-              background: '#fff',
-              borderRadius: 12,
-              boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
               height: '100%',
             }}
-            styles={{ body: { padding: '16px 20px' } }}
+            styles={{ body: { padding: '18px 18px 16px' } }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <Text type="secondary" style={{ fontSize: 12 }}>{stat.title}</Text>
-                <div style={{ fontSize: 28, fontWeight: 'bold', marginTop: 8, lineHeight: 1, color: '#1a1a1a' }}>
+                <Text type="secondary" style={{ fontSize: 12, fontWeight: 500 }}>{stat.title}</Text>
+                <div style={{ fontSize: 28, fontWeight: 700, marginTop: 9, lineHeight: 1, color: '#0f172a' }}>
                   {stat.value}
                 </div>
-                <Text type="secondary" style={{ fontSize: 11, marginTop: 8, display: 'block' }} ellipsis>
+                <Text type="secondary" style={{ fontSize: 11, marginTop: 10, display: 'block' }} ellipsis>
                   {stat.subtitle}
                 </Text>
               </div>
               <div style={{
-                width: 40, height: 40, borderRadius: 10,
+                width: 42, height: 42, borderRadius: 12,
                 background: `${stat.iconBg}15`,
                 display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                boxShadow: `0 10px 24px ${stat.iconBg}18`,
               }}>
                 {React.cloneElement(stat.icon as React.ReactElement, { style: { fontSize: 20, color: stat.iconBg } })}
               </div>

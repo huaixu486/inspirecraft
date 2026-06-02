@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { AppSettings, StageConfig, UserProfile } from '../../shared/types';
+import { DEFAULT_STAGES } from '../utils/timelineStages';
 
 interface SettingsState {
   workspacePath: string;
@@ -107,7 +108,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   updateStage: async (id: string, updates: Partial<StageConfig>) => {
     const { customStages, workspacePath, workspaceCapacity, userProfile } = get();
-    const updated = customStages.map(s => s.id === id ? { ...s, ...updates } : s);
+    const existing = customStages.find(s => s.id === id);
+    let updated: StageConfig[];
+    if (existing) {
+      updated = customStages.map(s => s.id === id ? { ...s, ...updates } : s);
+    } else {
+      // 系统阶段编辑时，添加覆盖到customStages
+      const sysStage = DEFAULT_STAGES.find(s => s.id === id);
+      if (sysStage) {
+        updated = [...customStages, { ...sysStage, ...updates }];
+      } else {
+        updated = customStages;
+      }
+    }
     set({ customStages: updated });
     await saveSettings({ workspacePath, workspaceCapacity, userProfile: userProfile ?? undefined, customStages: updated });
   },

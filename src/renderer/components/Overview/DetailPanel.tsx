@@ -105,7 +105,6 @@ const DetailPanel: React.FC = () => {
   const [expandedTemplate, setExpandedTemplate] = useState<string | null>(null);
   // 延迟收起边框状态，让边框在动画结束后再渐隐
   const [stageBorderVisible, setStageBorderVisible] = useState<Record<string, boolean>>({});
-  const [templateBorderVisible, setTemplateBorderVisible] = useState<Record<string, boolean>>({});
 
   const isOverdue = (deadline?: string, completedAt?: string) => {
     if (!deadline || completedAt) return false;
@@ -461,7 +460,7 @@ const DetailPanel: React.FC = () => {
       key: 'files',
       label: '文件',
       children: (
-        <div style={{ height: '100%', overflowY: 'auto' }}>
+        <div style={{ height: '100%' }}>
           <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Text strong style={{ fontSize: 13 }}>关联文档 ({projectDocsList.length})</Text>
             <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
@@ -475,28 +474,33 @@ const DetailPanel: React.FC = () => {
                   ? Math.round(group.docs.reduce((acc, d) => acc + d.overallProgress, 0) / group.docs.length)
                   : 0;
                 const isExpanded = expandedTemplate === group.templateId;
-                const borderVisible = templateBorderVisible[group.templateId] || isExpanded;
                 return (
-                  <div key={group.templateId}>
+                  <div
+                    key={group.templateId}
+                    style={{
+                      border: `1px solid ${isExpanded ? '#1890ff' : '#f0f0f0'}`,
+                      borderRadius: 8,
+                      background: '#fff',
+                      overflow: 'hidden',
+                      transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
+                      boxShadow: isExpanded ? '0 2px 8px rgba(24, 144, 255, 0.08)' : 'none',
+                    }}
+                  >
                     {/* 模板标题行 */}
                     <div
                       onClick={() => {
                         if (isExpanded) {
                           setExpandedTemplate(null);
-                          // 延迟移除蓝色边框，等动画结束后再渐隐
-                          setTimeout(() => setTemplateBorderVisible(prev => ({ ...prev, [group.templateId]: false })), 550);
                         } else {
                           setExpandedTemplate(group.templateId);
-                          setTemplateBorderVisible(prev => ({ ...prev, [group.templateId]: true }));
                         }
                       }}
                       style={{
                         padding: '8px 10px',
-                        border: `1px solid ${borderVisible ? '#1890ff' : '#f0f0f0'}`,
-                        borderRadius: isExpanded ? '8px 8px 0 0' : 8,
                         background: isExpanded ? '#fafafa' : '#fff',
                         cursor: 'pointer',
-                        transition: 'border-color 0.3s ease-in-out',
+                        borderBottom: isExpanded ? '1px solid #e6f4ff' : '1px solid transparent',
+                        transition: 'background 0.2s ease, border-color 0.2s ease',
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -513,7 +517,7 @@ const DetailPanel: React.FC = () => {
                       </div>
                     </div>
                     {/* 展开的文档列表 */}
-                    <AnimatedExpand open={isExpanded} borderColor="#1890ff">
+                    <AnimatedExpand open={isExpanded} borderColor="transparent">
                       <div style={{
                         borderRadius: '0 0 8px 8px',
                         padding: '8px 10px',
@@ -828,7 +832,7 @@ const DetailPanel: React.FC = () => {
   ];
 
   return (
-    <div style={{ padding: '16px 20px', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div className="detail-panel" style={{ padding: '18px 20px', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -858,7 +862,7 @@ const DetailPanel: React.FC = () => {
         />
       </div>
 
-      <Tabs items={tabItems} size="small" style={{ flex: 1, overflow: 'hidden' }} />
+      <Tabs className="detail-panel-tabs" items={tabItems} size="small" style={{ flex: 1, overflow: 'hidden' }} />
     </div>
   );
 };

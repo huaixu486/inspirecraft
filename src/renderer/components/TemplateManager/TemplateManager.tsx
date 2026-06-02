@@ -27,8 +27,11 @@ import {
 } from '@ant-design/icons';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useProjectStore } from '../../stores/projectStore';
+import { useProjectDocStore } from '../../stores/projectDocStore';
 import { WritingTemplate, TemplateNode, StageConfig } from '../../shared/types';
 import { getAllStages, DEFAULT_STAGES } from '../../utils/timelineStages';
+import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -118,6 +121,8 @@ function extractTemplateNodes(content: string): TemplateNode[] {
 const TemplateManager: React.FC = () => {
   const { templates, loadTemplates, addTemplate, updateTemplate, deleteTemplate } = useTemplateStore();
   const { customStages, addStage, updateStage, deleteStage } = useSettingsStore();
+  const { projects } = useProjectStore();
+  const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<WritingTemplate | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
@@ -132,6 +137,25 @@ const TemplateManager: React.FC = () => {
 
   // 已使用的颜色（排除用于颜色选择器）
   const usedColors = allStages.map(s => s.color);
+
+  // 重新扫描所有项目的阶段文件
+  const resyncAllProjects = async (stages: StageConfig[]) => {
+    let totalMatched = 0;
+    for (const project of projects) {
+      if (!project.folderPath) continue;
+      const result = await syncProjectStageFiles(project, {
+        projectDocs: useProjectDocStore.getState().projectDocs,
+        templates,
+        addProjectDoc,
+        updateProjectDoc,
+        allStages: stages,
+      });
+      totalMatched += result.matched;
+    }
+    if (totalMatched > 0) {
+      message.info(`已重新扫描，匹配到 ${totalMatched} 个阶段文件`);
+    }
+  };
 
   const handleCreateStage = () => {
     setEditingStage(null);
@@ -153,6 +177,9 @@ const TemplateManager: React.FC = () => {
   const handleDeleteStage = async (id: string) => {
     await deleteStage(id);
     message.success('阶段已删除');
+    // 阶段删除后重新扫描
+    const updatedStages = getAllStages(customStages.filter(s => s.id !== id));
+    await resyncAllProjects(updatedStages);
   };
 
   const handleStageSubmit = async () => {
@@ -193,6 +220,14 @@ const TemplateManager: React.FC = () => {
       }
 
       setIsStageModalOpen(false);
+
+      // 阶段变更后重新扫描所有项目
+      const updatedStages = getAllStages(
+        editingStage
+          ? customStages.map(s => s.id === editingStage.id ? { ...s, name: values.name, keywords, color } : s)
+          : [...customStages, { id: `custom-${Date.now()}`, name: values.name, keywords, color, isSystem: false }]
+      );
+      await resyncAllProjects(updatedStages);
     } catch (error) {
       console.error('Stage submit error:', error);
     }
@@ -319,13 +354,15 @@ const TemplateManager: React.FC = () => {
         form.setFieldsValue({ name: fileName });
       }
 
-      // 推断分类
+      // 推断分类：用阶段关键词匹配
       const currentCategory = form.getFieldValue('category');
       if (!currentCategory) {
-        if (fileName.includes('提案')) form.setFieldsValue({ category: '提案表' });
-        else if (fileName.includes('可研') || fileName.includes('可行性')) form.setFieldsValue({ category: '可研报告' });
-        else if (fileName.includes('技术')) form.setFieldsValue({ category: '技术方案' });
-        else if (fileName.includes('报告')) form.setFieldsValue({ category: '项目报告' });
+        for (const stage of allStages) {
+          if (stage.keywords.some(kw => fileName.includes(kw))) {
+            form.setFieldsValue({ category: stage.name });
+            break;
+          }
+        }
       }
 
       form.setFieldsValue({ nodesJson: JSON.stringify(nodes, null, 2) });
@@ -383,8 +420,9 @@ const TemplateManager: React.FC = () => {
   };
 
   return (
-    <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <div className="template-manager-page">
+      <section className="template-section">
+      <div className="template-section-header" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Title level={4} style={{ margin: 0 }}>
           模板管理
         </Title>
@@ -397,6 +435,7 @@ const TemplateManager: React.FC = () => {
         <Empty description="暂无模板，请创建" />
       ) : (
         <List
+          className="template-card-list"
           grid={{ gutter: 16, xs: 1, sm: 2, md: 2, lg: 3, xl: 3, xxl: 4 }}
           dataSource={templates}
           renderItem={(template) => (
@@ -433,6 +472,7 @@ const TemplateManager: React.FC = () => {
           )}
         />
       )}
+      </section>
 
       <Modal
         title={editingTemplate ? '编辑模板' : '创建模板'}
@@ -457,13 +497,7 @@ const TemplateManager: React.FC = () => {
           >
             <Select
               placeholder="选择分类"
-              options={[
-                { value: '可研报告', label: '可研报告' },
-                { value: '提案表', label: '提案表' },
-                { value: '技术方案', label: '技术方案' },
-                { value: '项目报告', label: '项目报告' },
-                { value: '其他', label: '其他' },
-              ]}
+              options={allStages.map(s => ({ value: s.name, label: s.name }))}
             />
           </Form.Item>
 
@@ -504,8 +538,9 @@ const TemplateManager: React.FC = () => {
       </Modal>
 
       {/* ========== 项目阶段管理 ========== */}
-      <Divider />
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <Divider className="template-page-divider" />
+      <section className="template-section stage-section">
+      <div className="template-section-header" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Title level={4} style={{ margin: 0 }}>
           项目阶段管理
         </Title>
@@ -518,16 +553,17 @@ const TemplateManager: React.FC = () => {
       </Text>
 
       <List
+        className="stage-list"
         dataSource={allStages}
         renderItem={(stage) => (
           <List.Item
-            actions={stage.isSystem ? [
-              <Button type="link" size="small" icon={<LockOutlined />} disabled>系统内置</Button>,
-            ] : [
+            actions={[
               <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEditStage(stage)}>编辑</Button>,
-              <Popconfirm title="确定删除此阶段？" onConfirm={() => handleDeleteStage(stage.id)}>
-                <Button type="link" danger size="small" icon={<DeleteOutlined />}>删除</Button>
-              </Popconfirm>,
+              ...(!stage.isSystem ? [
+                <Popconfirm title="确定删除此阶段？" onConfirm={() => handleDeleteStage(stage.id)}>
+                  <Button type="link" danger size="small" icon={<DeleteOutlined />}>删除</Button>
+                </Popconfirm>,
+              ] : []),
             ]}
           >
             <List.Item.Meta
@@ -541,12 +577,7 @@ const TemplateManager: React.FC = () => {
                   {stage.name.charAt(0)}
                 </div>
               }
-              title={
-                <Space>
-                  {stage.name}
-                  {stage.isSystem && <Tag color="blue">系统</Tag>}
-                </Space>
-              }
+              title={stage.name}
               description={
                 <span style={{ fontSize: 12, color: '#999' }}>
                   关键词：{stage.keywords.length > 0 ? stage.keywords.join('、') : '（无）'}
@@ -556,6 +587,7 @@ const TemplateManager: React.FC = () => {
           </List.Item>
         )}
       />
+      </section>
 
       {/* 新增/编辑阶段弹窗 */}
       <Modal

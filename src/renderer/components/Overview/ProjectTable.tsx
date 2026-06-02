@@ -120,11 +120,13 @@ const ProjectTable: React.FC = () => {
 
   return (
     <Card
+      className="dashboard-card project-table-card"
       title="项目列表"
       bordered={false}
-      style={{ borderRadius: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.09)' }}
+      style={{}}
     >
       <Table
+        className="overview-project-table"
         columns={columns}
         dataSource={projects}
         rowKey="id"

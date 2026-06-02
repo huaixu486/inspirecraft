@@ -10,9 +10,11 @@ export const DEFAULT_STAGES: StageConfig[] = [
   { id: 'system-4', name: '其他', keywords: [], color: '#8c8c8c', isSystem: true },
 ];
 
-// 获取所有阶段（系统 + 自定义）
+// 获取所有阶段（系统 + 自定义，自定义可覆盖同id的系统阶段）
 export const getAllStages = (customStages: StageConfig[]): StageConfig[] => {
-  return [...DEFAULT_STAGES, ...customStages];
+  const overrideIds = new Set(customStages.map(s => s.id));
+  const base = DEFAULT_STAGES.filter(s => !overrideIds.has(s.id));
+  return [...base, ...customStages];
 };
 
 // 获取阶段元数据（名称 → 颜色/标签）
