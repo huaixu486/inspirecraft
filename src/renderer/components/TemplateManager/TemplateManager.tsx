@@ -135,8 +135,60 @@ const TemplateManager: React.FC = () => {
   const [stageForm] = Form.useForm();
   const allStages = getAllStages(customStages);
 
+  // 模板结构编辑器状态
+  const [templateNodes, setTemplateNodes] = useState<TemplateNode[]>([]);
+
   // 已使用的颜色（排除用于颜色选择器）
   const usedColors = allStages.map(s => s.color);
+
+  // 模板结构编辑器操作
+  const addTemplateNode = () => {
+    const newNode: TemplateNode = {
+      id: Date.now().toString(),
+      title: '',
+      level: 1,
+      isRequired: true,
+    };
+    setTemplateNodes([...templateNodes, newNode]);
+  };
+
+  const removeTemplateNode = (id: string) => {
+    setTemplateNodes(templateNodes.filter(n => n.id !== id));
+  };
+
+  const updateTemplateNode = (id: string, updates: Partial<TemplateNode>) => {
+    setTemplateNodes(templateNodes.map(n => n.id === id ? { ...n, ...updates } : n));
+  };
+
+  const moveTemplateNode = (index: number, direction: 'up' | 'down') => {
+    const newIndex = direction === 'up' ? index - 1 : index + 1;
+    if (newIndex < 0 || newIndex >= templateNodes.length) return;
+    const newNodes = [...templateNodes];
+    [newNodes[index], newNodes[newIndex]] = [newNodes[newIndex], newNodes[index]];
+    setTemplateNodes(newNodes);
+  };
+
+  // 从 JSON 字符串解析节点
+  const parseNodesFromJson = (json: string): TemplateNode[] => {
+    try {
+      return JSON.parse(json);
+    } catch {
+      return [];
+    }
+  };
+
+  // 打开弹窗时初始化节点
+  const initTemplateNodes = (template: WritingTemplate | null) => {
+    if (template?.nodes) {
+      setTemplateNodes(template.nodes);
+    } else {
+      setTemplateNodes([
+        { id: '1', title: '一、项目概述', level: 1, isRequired: true },
+        { id: '2', title: '二、需求分析', level: 1, isRequired: true },
+        { id: '3', title: '三、方案设计', level: 1, isRequired: true },
+      ]);
+    }
+  };
 
   // 重新扫描所有项目的阶段文件
   const resyncAllProjects = async (stages: StageConfig[]) => {
@@ -241,6 +293,7 @@ const TemplateManager: React.FC = () => {
     setEditingTemplate(null);
     setImportedFilePath('');
     form.resetFields();
+    initTemplateNodes(null);
     setIsModalOpen(true);
   };
 
@@ -250,8 +303,8 @@ const TemplateManager: React.FC = () => {
       name: template.name,
       description: template.description,
       category: template.category,
-      nodesJson: JSON.stringify(template.nodes, null, 2),
     });
+    initTemplateNodes(template);
     setIsModalOpen(true);
   };
 
@@ -263,14 +316,20 @@ const TemplateManager: React.FC = () => {
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields();
-      let nodes: TemplateNode[] = [];
 
-      try {
-        nodes = JSON.parse(values.nodesJson);
-      } catch {
-        message.error('模板结构 JSON 格式错误');
+      if (templateNodes.length === 0) {
+        message.error('请至少添加一个章节');
         return;
       }
+
+      // 验证每个节点都有标题
+      const emptyTitle = templateNodes.find(n => !n.title.trim());
+      if (emptyTitle) {
+        message.error('请填写所有章节的标题');
+        return;
+      }
+
+      const nodes = templateNodes;
 
       const templateId = editingTemplate?.id || Date.now().toString();
       const templateData: WritingTemplate = {
@@ -365,7 +424,7 @@ const TemplateManager: React.FC = () => {
         }
       }
 
-      form.setFieldsValue({ nodesJson: JSON.stringify(nodes, null, 2) });
+      setTemplateNodes(nodes);
       setImportedFilePath(filePath);
       message.success(`已提取 ${nodes.length} 个章节，请检查并调整`);
     } catch (error) {
@@ -508,11 +567,11 @@ const TemplateManager: React.FC = () => {
             <TextArea rows={2} placeholder="简要说明模板用途" />
           </Form.Item>
 
-          <Form.Item
-            name="nodesJson"
-            label={
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                <span>模板结构（JSON）</span>
+          {/* 模板结构编辑器 */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <Text strong>模板章节结构</Text>
+              <Space>
                 <Button
                   type="link"
                   size="small"
@@ -523,17 +582,96 @@ const TemplateManager: React.FC = () => {
                 >
                   从文档提取
                 </Button>
+                <Button
+                  type="dashed"
+                  size="small"
+                  icon={<PlusOutlined />}
+                  onClick={addTemplateNode}
+                >
+                  添加章节
+                </Button>
+              </Space>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 320, overflowY: 'auto', padding: '2px 0' }}>
+              {templateNodes.map((node, index) => (
+                <div
+                  key={node.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '6px 8px',
+                    background: '#fafafa',
+                    borderRadius: 6,
+                    border: '1px solid #f0f0f0',
+                  }}
+                >
+                  {/* 层级指示 */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flexShrink: 0 }}>
+                    <Button
+                      type="text"
+                      size="small"
+                      disabled={index === 0}
+                      onClick={() => moveTemplateNode(index, 'up')}
+                      style={{ padding: 0, height: 14, minWidth: 14, fontSize: 10, lineHeight: '14px' }}
+                    >
+                      ▲
+                    </Button>
+                    <Button
+                      type="text"
+                      size="small"
+                      disabled={index === templateNodes.length - 1}
+                      onClick={() => moveTemplateNode(index, 'down')}
+                      style={{ padding: 0, height: 14, minWidth: 14, fontSize: 10, lineHeight: '14px' }}
+                    >
+                      ▼
+                    </Button>
+                  </div>
+                  {/* 章节标题 */}
+                  <Input
+                    value={node.title}
+                    onChange={(e) => updateTemplateNode(node.id, { title: e.target.value })}
+                    placeholder="例如：一、项目概述"
+                    style={{ flex: 1 }}
+                    size="small"
+                  />
+                  {/* 必需标记 */}
+                  <div
+                    onClick={() => updateTemplateNode(node.id, { isRequired: !node.isRequired })}
+                    style={{
+                      cursor: 'pointer',
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                      background: node.isRequired ? '#e6f7ff' : '#f5f5f5',
+                      border: `1px solid ${node.isRequired ? '#91d5ff' : '#d9d9d9'}`,
+                      fontSize: 10,
+                      color: node.isRequired ? '#1890ff' : '#999',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {node.isRequired ? '必需' : '可选'}
+                  </div>
+                  {/* 删除 */}
+                  <Button
+                    type="text"
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() => removeTemplateNode(node.id)}
+                    style={{ padding: '0 4px', flexShrink: 0 }}
+                  />
+                </div>
+              ))}
+            </div>
+            {templateNodes.length === 0 && (
+              <div style={{ textAlign: 'center', padding: 16, color: '#999', fontSize: 12 }}>
+                点击"添加章节"或"从文档提取"开始构建模板结构
               </div>
-            }
-            rules={[{ required: true, message: '请输入模板结构' }]}
-            extra="支持 .docx/.pdf/.txt，自动提取章节标题生成结构"
-          >
-            <TextArea
-              rows={12}
-              placeholder={getDefaultTemplateJson()}
-              style={{ fontFamily: 'monospace' }}
-            />
-          </Form.Item>
+            )}
+            <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 6 }}>
+              支持 .docx/.pdf/.txt，自动提取章节标题
+            </Text>
+          </div>
         </Form>
       </Modal>
 
