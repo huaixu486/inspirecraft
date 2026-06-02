@@ -347,6 +347,10 @@ body {
   overflow: hidden;
 }
 
+.template-editor-modal .ant-modal {
+  max-width: min(95vw, 1400px) !important;
+}
+
 .template-editor-modal .ant-modal-header,
 .template-editor-modal .ant-modal-footer {
   flex-shrink: 0;
