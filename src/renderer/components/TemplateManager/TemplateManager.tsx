@@ -992,7 +992,7 @@ ${content.slice(0, 24000)}`;
         open={isModalOpen}
         onOk={handleSubmit}
         onCancel={() => setIsModalOpen(false)}
-        width="min(92vw, 1200px)"
+        width="min(95vw, 1400px)"
         okText="保存模板"
         cancelText="取消"
         style={{ top: 16, maxHeight: 'calc(100vh - 32px)' }}
