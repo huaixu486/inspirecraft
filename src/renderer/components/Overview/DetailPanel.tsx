@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, Collapse, message, Popconfirm, DatePicker } from 'antd';
 import {
   CheckCircleOutlined, ClockCircleOutlined, CloseOutlined,
@@ -22,6 +22,38 @@ import {
 import { useSettingsStore } from '../../stores/settingsStore';
 
 const { Title, Text, Paragraph } = Typography;
+
+// 折叠展开动画组件
+const AnimatedExpand: React.FC<{ open: boolean; children: React.ReactNode }> = ({ open, children }) => {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState<number>(0);
+
+  useEffect(() => {
+    if (contentRef.current) {
+      setHeight(open ? contentRef.current.scrollHeight : 0);
+    }
+  }, [open]);
+
+  // 展开后高度设为 auto，避免内容变化时高度不跟手
+  useEffect(() => {
+    if (open && contentRef.current) {
+      const timer = setTimeout(() => setHeight(contentRef.current?.scrollHeight || 0), 200);
+      return () => clearTimeout(timer);
+    }
+  }, [open]);
+
+  return (
+    <div style={{
+      height,
+      overflow: 'hidden',
+      transition: 'height 0.25s ease-in-out',
+    }}>
+      <div ref={contentRef}>
+        {children}
+      </div>
+    </div>
+  );
+};
 
 const DetailPanel: React.FC = () => {
   const { currentProject, setCurrentProject, versions } = useProjectStore();
@@ -437,12 +469,12 @@ const DetailPanel: React.FC = () => {
                       )}
                     </div>
                     {/* 展开的文档列表 */}
-                    {isExpanded && (
+                    <AnimatedExpand open={isExpanded}>
                       <div style={{
                         border: '1px solid #1890ff',
                         borderTop: 'none',
                         borderRadius: '0 0 8px 8px',
-                        padding: '8px 10px',
+                        padding: isExpanded ? '8px 10px' : '0 10px',
                         background: '#fff',
                       }}>
                         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
@@ -486,7 +518,7 @@ const DetailPanel: React.FC = () => {
                           );
                         })}
                       </div>
-                    )}
+                    </AnimatedExpand>
                   </div>
                 );
               })}
@@ -682,12 +714,12 @@ const DetailPanel: React.FC = () => {
                       )}
                     </div>
                     {/* 展开的文档列表 */}
-                    {isExpanded && (
+                    <AnimatedExpand open={isExpanded}>
                       <div style={{
                         border: `1px solid ${color}`,
                         borderTop: 'none',
                         borderRadius: '0 0 8px 8px',
-                        padding: '8px 10px',
+                        padding: isExpanded ? '8px 10px' : '0 10px',
                         background: '#fff',
                       }}>
                         {docsInStage.length > 0 ? docsInStage.map((doc, idx) => {
@@ -718,7 +750,7 @@ const DetailPanel: React.FC = () => {
                           <Text type="secondary" style={{ fontSize: 11, display: 'block', textAlign: 'center', padding: 8 }}>暂无文档</Text>
                         )}
                       </div>
-                    )}
+                    </AnimatedExpand>
                   </div>
                 );
               })}
