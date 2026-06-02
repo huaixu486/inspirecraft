@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, message, Popconfirm, DatePicker } from 'antd';
+import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, Drawer, message, Popconfirm, DatePicker } from 'antd';
 import {
   CheckCircleOutlined, ClockCircleOutlined, CloseOutlined,
   FolderOutlined, FileOutlined, ExclamationCircleOutlined,
@@ -36,6 +36,8 @@ const DetailPanel: React.FC = () => {
   const [selectedVersionId, setSelectedVersionId] = useState<string>('');
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerStage, setDrawerStage] = useState<string>('');
 
   const isOverdue = (deadline?: string, completedAt?: string) => {
     if (!deadline || completedAt) return false;
@@ -590,131 +592,196 @@ const DetailPanel: React.FC = () => {
     {
       key: 'tasks',
       label: '进度',
-      children: selectedDoc ? (
-        <div>
-          <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <Button size="small" icon={<CloseOutlined />} onClick={() => setSelectedDocId(null)} style={{ padding: '0 6px' }} />
-              <Text strong style={{ fontSize: 13 }} ellipsis={{ tooltip: selectedDoc.name }}>{selectedDoc.name}</Text>
-            </div>
-            <Space size={4}>
-              <Button size="small" icon={<ReloadOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(selectedDoc, false)}>
-                基础分析
-              </Button>
-              <Button size="small" type="primary" icon={<ExperimentOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(selectedDoc, true)}>
-                AI 分析
-              </Button>
-            </Space>
-          </div>
-
-          {/* 整体进度 */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16, padding: '10px 12px', background: '#f6f8fa', borderRadius: 8 }}>
-            <Progress
-              type="circle"
-              percent={selectedDoc.overallProgress}
-              size={60}
-              strokeColor={selectedDoc.overallProgress >= 80 ? '#52c41a' : '#1890ff'}
-            />
-            <div>
-              <Text style={{ fontSize: 12 }}>整体完成度</Text>
-              <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
-                <Text style={{ fontSize: 11, color: '#52c41a' }}>
-                  完成 {selectedDoc.sections.filter(s => s.status === 'completed').length}
-                </Text>
-                <Text style={{ fontSize: 11, color: '#faad14' }}>
-                  部分 {selectedDoc.sections.filter(s => s.status === 'partial').length}
-                </Text>
-                <Text style={{ fontSize: 11, color: '#d9d9d9' }}>
-                  缺失 {selectedDoc.sections.filter(s => s.status === 'missing').length}
-                </Text>
-              </div>
-            </div>
-          </div>
-
-          {/* 各章节列表 */}
-          <List
-            size="small"
-            dataSource={selectedDoc.sections}
-            renderItem={section => (
-              <List.Item style={{ padding: '8px 0', border: 'none' }}>
-                <div style={{ width: '100%' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    {statusIcon(section.status)}
-                    <Text strong style={{ fontSize: 12, flex: 1 }}>{section.title}</Text>
-                    <Text type="secondary" style={{ fontSize: 10 }}>{section.wordCount} 字</Text>
-                  </div>
-                  {section.aiComment && (
-                    <div style={{ marginLeft: 22, marginTop: 4, padding: '4px 8px', background: '#f6f8fa', borderRadius: 4 }}>
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        <ExperimentOutlined style={{ fontSize: 10, marginRight: 4 }} />
-                        {section.aiComment}
-                      </Text>
-                    </div>
-                  )}
-                </div>
-              </List.Item>
-            )}
-          />
-
-          {selectedDoc.analyzedAt && (
-            <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 8 }}>
-              上次分析：{formatDate(selectedDoc.analyzedAt)}
-            </Text>
-          )}
-        </div>
-      ) : (
+      children: (
         <div>
           <div style={{ marginBottom: 12 }}>
-            <Text strong style={{ fontSize: 13 }}>文档进度 ({projectDocsList.length})</Text>
+            <Text strong style={{ fontSize: 13 }}>阶段进度</Text>
           </div>
-          {projectDocsList.length > 0 ? (
+          {planSegments.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {projectDocsList.map(doc => (
-                <div
-                  key={doc.id}
-                  onClick={() => setSelectedDocId(doc.id)}
-                  style={{
-                    padding: '10px 12px',
-                    border: '1px solid #f0f0f0',
-                    borderRadius: 8,
-                    background: '#fff',
-                    cursor: 'pointer',
-                    transition: 'border-color 0.2s',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.borderColor = '#1890ff')}
-                  onMouseLeave={e => (e.currentTarget.style.borderColor = '#f0f0f0')}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                    <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: doc.name, style: { maxWidth: 180 } }}>{doc.name}</Text>
-                    <Text style={{ fontSize: 11, color: doc.overallProgress >= 80 ? '#52c41a' : '#1890ff', fontWeight: 600 }}>
-                      {doc.overallProgress}%
-                    </Text>
+              {planSegments.map(segment => {
+                const color = stageMeta[segment.stage]?.color || '#8c8c8c';
+                const isCompleted = Boolean(segment.completedAt);
+                const latestDocName = segment.sourceDocNames[segment.sourceDocNames.length - 1] || '';
+                const docsInStage = projectDocsList.filter(d =>
+                  segment.sourceDocIds.includes(d.id)
+                );
+                const latestDoc = docsInStage[docsInStage.length - 1];
+
+                return (
+                  <div
+                    key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}
+                    onClick={() => {
+                      setDrawerStage(segment.stage);
+                      setDrawerOpen(true);
+                    }}
+                    style={{
+                      padding: '10px 12px',
+                      border: '1px solid #f0f0f0',
+                      borderRadius: 8,
+                      background: '#fff',
+                      cursor: 'pointer',
+                      transition: 'border-color 0.2s',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.borderColor = color)}
+                    onMouseLeave={e => (e.currentTarget.style.borderColor = '#f0f0f0')}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                      <Space size={6}>
+                        <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block' }} />
+                        <Text strong style={{ fontSize: 12 }}>{segment.label}</Text>
+                        {isCompleted ? (
+                          <Tag color="green" style={{ margin: 0, fontSize: 10 }}>已完成</Tag>
+                        ) : (
+                          <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>{segment.sourceDocNames.length} 个文件</Tag>
+                        )}
+                      </Space>
+                      <RightOutlined style={{ fontSize: 10, color: '#999' }} />
+                    </div>
+                    {latestDoc ? (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: latestDocName, style: { maxWidth: 160 } }}>
+                          最新：{latestDocName}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: latestDoc.overallProgress >= 80 ? '#52c41a' : '#1890ff', fontWeight: 600 }}>
+                          {latestDoc.overallProgress}%
+                        </Text>
+                      </div>
+                    ) : (
+                      <Text type="secondary" style={{ fontSize: 11 }}>暂无文档</Text>
+                    )}
                   </div>
-                  <Progress
-                    percent={doc.overallProgress}
-                    size="small"
-                    strokeColor={doc.overallProgress >= 80 ? '#52c41a' : '#1890ff'}
-                    showInfo={false}
-                  />
-                  {doc.analyzedAt && (
-                    <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 4 }}>
-                      已分析 · {formatDate(doc.analyzedAt)}
-                    </Text>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div style={{ textAlign: 'center', padding: '40px 0' }}>
               <ExclamationCircleOutlined style={{ fontSize: 32, color: '#d9d9d9', marginBottom: 12 }} />
               <div>
-                <Text type="secondary" style={{ fontSize: 13 }}>暂无关联文档</Text>
+                <Text type="secondary" style={{ fontSize: 13 }}>暂无阶段数据</Text>
               </div>
               <Button type="link" size="small" onClick={() => setAddModalOpen(true)} style={{ marginTop: 8 }}>
                 关联文件
               </Button>
             </div>
           )}
+
+          {/* 阶段文档抽屉 */}
+          <Drawer
+            title={
+              <Space>
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: stageMeta[drawerStage]?.color || '#8c8c8c', display: 'inline-block' }} />
+                {stageMeta[drawerStage]?.label || drawerStage}
+              </Space>
+            }
+            open={drawerOpen}
+            onClose={() => { setDrawerOpen(false); setSelectedDocId(null); }}
+            width={340}
+          >
+            {(() => {
+              const segment = planSegments.find(s => s.stage === drawerStage);
+              if (!segment) return <Empty description="暂无数据" />;
+              const docsInStage = projectDocsList.filter(d => segment.sourceDocIds.includes(d.id));
+
+              // 如果选中了文档，显示详情
+              if (selectedDoc && segment.sourceDocIds.includes(selectedDoc.id)) {
+                return (
+                  <div>
+                    <Button size="small" icon={<CloseOutlined />} onClick={() => setSelectedDocId(null)} style={{ marginBottom: 12 }}>
+                      返回列表
+                    </Button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, padding: '10px 12px', background: '#f6f8fa', borderRadius: 8 }}>
+                      <Progress
+                        type="circle"
+                        percent={selectedDoc.overallProgress}
+                        size={56}
+                        strokeColor={selectedDoc.overallProgress >= 80 ? '#52c41a' : '#1890ff'}
+                      />
+                      <div>
+                        <Text style={{ fontSize: 12 }}>整体完成度</Text>
+                        <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+                          <Text style={{ fontSize: 11, color: '#52c41a' }}>完成 {selectedDoc.sections.filter(s => s.status === 'completed').length}</Text>
+                          <Text style={{ fontSize: 11, color: '#faad14' }}>部分 {selectedDoc.sections.filter(s => s.status === 'partial').length}</Text>
+                          <Text style={{ fontSize: 11, color: '#d9d9d9' }}>缺失 {selectedDoc.sections.filter(s => s.status === 'missing').length}</Text>
+                        </div>
+                      </div>
+                    </div>
+                    <Space size={4} style={{ marginBottom: 12 }}>
+                      <Button size="small" icon={<ReloadOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(selectedDoc, false)}>基础分析</Button>
+                      <Button size="small" type="primary" icon={<ExperimentOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(selectedDoc, true)}>AI 分析</Button>
+                    </Space>
+                    <List
+                      size="small"
+                      dataSource={selectedDoc.sections}
+                      renderItem={section => (
+                        <List.Item style={{ padding: '6px 0', border: 'none' }}>
+                          <div style={{ width: '100%' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              {statusIcon(section.status)}
+                              <Text strong style={{ fontSize: 11, flex: 1 }}>{section.title}</Text>
+                              <Text type="secondary" style={{ fontSize: 10 }}>{section.wordCount} 字</Text>
+                            </div>
+                            {section.aiComment && (
+                              <div style={{ marginLeft: 18, marginTop: 3, padding: '3px 6px', background: '#f6f8fa', borderRadius: 4 }}>
+                                <Text type="secondary" style={{ fontSize: 10 }}>
+                                  <ExperimentOutlined style={{ fontSize: 9, marginRight: 3 }} />
+                                  {section.aiComment}
+                                </Text>
+                              </div>
+                            )}
+                          </div>
+                        </List.Item>
+                      )}
+                    />
+                  </div>
+                );
+              }
+
+              // 默认显示文档列表
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {docsInStage.map((doc, idx) => {
+                    const isLatest = idx === docsInStage.length - 1;
+                    return (
+                      <div
+                        key={doc.id}
+                        onClick={() => setSelectedDocId(doc.id)}
+                        style={{
+                          padding: '10px 12px',
+                          border: '1px solid #f0f0f0',
+                          borderRadius: 8,
+                          background: '#fff',
+                          cursor: 'pointer',
+                          transition: 'border-color 0.2s',
+                        }}
+                        onMouseEnter={e => (e.currentTarget.style.borderColor = '#1890ff')}
+                        onMouseLeave={e => (e.currentTarget.style.borderColor = '#f0f0f0')}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <Space size={4}>
+                            <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: doc.name, style: { maxWidth: 150 } }}>{doc.name}</Text>
+                            {isLatest && <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>最新</Tag>}
+                          </Space>
+                          <Text style={{ fontSize: 11, fontWeight: 600 }}>{doc.overallProgress}%</Text>
+                        </div>
+                        <Progress
+                          percent={doc.overallProgress}
+                          size="small"
+                          strokeColor={doc.overallProgress >= 80 ? '#52c41a' : '#1890ff'}
+                          showInfo={false}
+                        />
+                        {doc.analyzedAt && (
+                          <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 4 }}>
+                            {formatDate(doc.analyzedAt)}
+                          </Text>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </Drawer>
         </div>
       ),
     },
