@@ -38,6 +38,8 @@ const DetailPanel: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerStage, setDrawerStage] = useState<string>('');
+  const [filesDrawerOpen, setFilesDrawerOpen] = useState(false);
+  const [filesDrawerGroup, setFilesDrawerGroup] = useState<{ templateId: string; templateName: string; docs: ProjectDocument[] } | null>(null);
 
   const isOverdue = (deadline?: string, completedAt?: string) => {
     if (!deadline || completedAt) return false;
@@ -401,59 +403,48 @@ const DetailPanel: React.FC = () => {
             </Button>
           </div>
           {projectDocsList.length > 0 ? (
-            groupedByTemplate().map(group => (
-              <div key={group.templateId} style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <Text strong style={{ fontSize: 12, color: '#1890ff' }}>{group.templateName}</Text>
-                  <Button
-                    type="link" size="small" icon={<PlusOutlined />}
-                    onClick={() => { setSelectedTemplateId(group.templateId); setAddModalOpen(true); }}
-                    style={{ padding: 0, fontSize: 11 }}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {groupedByTemplate().map(group => {
+                const avgProgress = group.docs.length > 0
+                  ? Math.round(group.docs.reduce((acc, d) => acc + d.overallProgress, 0) / group.docs.length)
+                  : 0;
+                return (
+                  <div
+                    key={group.templateId}
+                    onClick={() => { setFilesDrawerGroup(group); setFilesDrawerOpen(true); }}
+                    style={{
+                      padding: '10px 12px',
+                      border: '1px solid #f0f0f0',
+                      borderRadius: 8,
+                      background: '#fff',
+                      cursor: 'pointer',
+                      transition: 'border-color 0.2s',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.borderColor = '#1890ff')}
+                    onMouseLeave={e => (e.currentTarget.style.borderColor = '#f0f0f0')}
                   >
-                    添加文件
-                  </Button>
-                </div>
-                {group.docs.map(doc => {
-                  const version = versions.find(v => v.id === doc.versionId);
-                  return (
-                    <div
-                      key={doc.id}
-                      style={{
-                        padding: '8px 10px', border: '1px solid #f0f0f0', borderRadius: 8,
-                        marginBottom: 4, cursor: 'pointer',
-                        background: selectedDocId === doc.id ? '#e6f7ff' : '#fff',
-                      }}
-                      onClick={() => setSelectedDocId(doc.id === selectedDocId ? null : doc.id)}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                        <Text style={{ fontSize: 12 }}>{version?.fileName || doc.name}</Text>
-                        <Space size={4}>
-                          <Button
-                            type="text" size="small" icon={<ReloadOutlined />}
-                            loading={isAnalyzing}
-                            onClick={(e) => { e.stopPropagation(); handleAnalyze(doc, false); }}
-                            title="基础分析"
-                          />
-                          <Button
-                            type="text" size="small" icon={<ExperimentOutlined />}
-                            loading={isAnalyzing}
-                            onClick={(e) => { e.stopPropagation(); handleAnalyze(doc, true); }}
-                            title="AI 深度分析"
-                          />
-                          <Popconfirm title="确定删除？" onConfirm={() => deleteProjectDoc(doc.id)}>
-                            <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={e => e.stopPropagation()} />
-                          </Popconfirm>
-                        </Space>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <Progress percent={doc.overallProgress} size="small" showInfo={false} style={{ flex: 1, marginBottom: 0 }} />
-                        <Text style={{ fontSize: 11, minWidth: 32 }}>{doc.overallProgress}%</Text>
-                      </div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                      <Space size={6}>
+                        <FileOutlined style={{ color: '#1890ff', fontSize: 14 }} />
+                        <Text strong style={{ fontSize: 12 }}>{group.templateName}</Text>
+                        <Tag style={{ margin: 0, fontSize: 10 }}>{group.docs.length} 份</Tag>
+                      </Space>
+                      <RightOutlined style={{ fontSize: 10, color: '#999' }} />
                     </div>
-                  );
-                })}
-              </div>
-            ))
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <Progress
+                        percent={avgProgress}
+                        size="small"
+                        showInfo={false}
+                        style={{ flex: 1, marginBottom: 0 }}
+                        strokeColor={avgProgress >= 80 ? '#52c41a' : '#1890ff'}
+                      />
+                      <Text style={{ fontSize: 11, minWidth: 32 }}>{avgProgress}%</Text>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           ) : (
             <Empty description="暂未关联文档" image={Empty.PRESENTED_IMAGE_SIMPLE}>
               <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
@@ -461,6 +452,91 @@ const DetailPanel: React.FC = () => {
               </Button>
             </Empty>
           )}
+
+          {/* 文件分组抽屉 */}
+          <Drawer
+            title={
+              <Space>
+                <FileOutlined style={{ color: '#1890ff' }} />
+                {filesDrawerGroup?.templateName || '文档'}
+              </Space>
+            }
+            open={filesDrawerOpen}
+            onClose={() => setFilesDrawerOpen(false)}
+            width={340}
+            extra={
+              <Button
+                type="primary" size="small" icon={<PlusOutlined />}
+                onClick={() => {
+                  if (filesDrawerGroup) {
+                    setSelectedTemplateId(filesDrawerGroup.templateId);
+                    setAddModalOpen(true);
+                  }
+                }}
+              >
+                添加文件
+              </Button>
+            }
+          >
+            {filesDrawerGroup && filesDrawerGroup.docs.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {filesDrawerGroup.docs.map(doc => {
+                  const version = versions.find(v => v.id === doc.versionId);
+                  return (
+                    <div
+                      key={doc.id}
+                      style={{
+                        padding: '10px 12px',
+                        border: '1px solid #f0f0f0',
+                        borderRadius: 8,
+                        background: '#fff',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: version?.fileName || doc.name, style: { maxWidth: 160 } }}>
+                          {version?.fileName || doc.name}
+                        </Text>
+                        <Space size={4}>
+                          <Button
+                            type="text" size="small" icon={<ReloadOutlined />}
+                            loading={isAnalyzing}
+                            onClick={() => handleAnalyze(doc, false)}
+                            title="基础分析"
+                          />
+                          <Button
+                            type="text" size="small" icon={<ExperimentOutlined />}
+                            loading={isAnalyzing}
+                            onClick={() => handleAnalyze(doc, true)}
+                            title="AI 深度分析"
+                          />
+                          <Popconfirm title="确定删除？" onConfirm={() => deleteProjectDoc(doc.id)}>
+                            <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+                          </Popconfirm>
+                        </Space>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Progress
+                          percent={doc.overallProgress}
+                          size="small"
+                          showInfo={false}
+                          style={{ flex: 1, marginBottom: 0 }}
+                          strokeColor={doc.overallProgress >= 80 ? '#52c41a' : '#1890ff'}
+                        />
+                        <Text style={{ fontSize: 11, minWidth: 32 }}>{doc.overallProgress}%</Text>
+                      </div>
+                      {doc.analyzedAt && (
+                        <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 4 }}>
+                          已分析 · {formatDate(doc.analyzedAt)}
+                        </Text>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <Empty description="该分类暂无文档" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            )}
+          </Drawer>
 
           {/* 关联文件弹窗 */}
           <Modal
