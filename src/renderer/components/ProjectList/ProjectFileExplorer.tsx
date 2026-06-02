@@ -352,7 +352,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   ];
 
   return (
-    <div style={{ padding: 20, height: '100%', overflow: 'auto' }}>
+    <div style={{ height: '100%', overflow: 'auto' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
         <Button type="text" icon={<ArrowLeftOutlined />} onClick={isInRoot ? onBack : handleBack} title={isInRoot ? '返回项目列表' : '返回上级'} />

@@ -265,7 +265,7 @@ const App: React.FC = () => {
         <Content
           style={{
             margin: 0,
-            padding: 0,
+            padding: '20px',
             background: 'transparent',
             borderRadius: borderRadiusLG,
             flex: 1,

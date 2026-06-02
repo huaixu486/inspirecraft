@@ -185,7 +185,7 @@ const PlanManager: React.FC = () => {
   };
 
   return (
-    <div style={{ padding: 24 }}>
+    <div>
       {/* Header */}
       <div style={{ marginBottom: 24 }}>
         <Title level={4} style={{ margin: 0 }}>计划管理</Title>
