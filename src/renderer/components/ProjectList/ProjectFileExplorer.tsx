@@ -70,6 +70,12 @@ const extColorMap: Record<string, string> = {
   '.txt': 'default',
 };
 
+const getTemplateOutputType = (template: any): string =>
+  template.outputFileType || template.filePath?.split('.').pop()?.toLowerCase() || 'docx';
+
+const getFileNameFromPath = (filePath: string): string =>
+  filePath.split(/[/\\]/).pop() || filePath;
+
 const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [items, setItems] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -163,13 +169,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       if (template) {
         // 默认文件名：项目名称-模板名称
         setNewFileName(`${project.name}-${template.name}`);
-        // 使用模板源文件的实际扩展名
-        if (template.filePath) {
-          const ext = template.filePath.split('.').pop()?.toLowerCase() || 'docx';
-          setNewFileType(ext);
-        } else {
-          setNewFileType('docx');
-        }
+        setNewFileType(getTemplateOutputType(template));
       }
     } else {
       setNewFileName('');
@@ -206,7 +206,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     const template = selectedTemplateId ? templates.find(t => t.id === selectedTemplateId) : null;
 
     // 自动处理同名文件
-    const ext = template ? (template.filePath?.split('.').pop()?.toLowerCase() || 'docx') : newFileType;
+    const ext = template ? getTemplateOutputType(template) : newFileType;
     const finalName = getUniqueFileName(newFileName.trim(), ext);
 
     if (template) {
@@ -215,6 +215,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
         folderPath: currentPath,
         fileName: finalName,
         template,
+        fileType: ext,
       });
     } else {
       // 创建空白文件
@@ -243,8 +244,8 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
         };
         await addProjectDoc(doc);
       }
-      const createdPath = `${currentPath}\\${finalName}.${ext}`;
-      const createdName = `${finalName}.${ext}`;
+      const createdPath = result.filePath || `${currentPath}\\${finalName}.${ext}`;
+      const createdName = getFileNameFromPath(createdPath);
       pushUndo({
         label: `创建 ${createdName}`,
         undo: async () => {
@@ -345,10 +346,13 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
 
   const fileTypeOptions = [
     { value: 'docx', label: 'Word 文档 (.docx)' },
+    { value: 'doc', label: 'Word 97-2003 (.doc)' },
     { value: 'pptx', label: 'PowerPoint (.pptx)' },
     { value: 'xlsx', label: 'Excel (.xlsx)' },
     { value: 'pdf', label: 'PDF (.pdf)' },
     { value: 'txt', label: '纯文本 (.txt)' },
+    { value: 'md', label: 'Markdown (.md)' },
+    { value: 'rtf', label: 'RTF 富文本 (.rtf)' },
   ];
 
   return (
@@ -543,8 +547,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
               onChange={(v) => handleTemplateChange(v || '')}
               options={templates.map(t => ({
                 value: t.id,
-                label: `${t.name} (${t.category})${t.filePath ? '' : ' [无源文件]'}`,
-                disabled: !t.filePath,
+                label: `${t.name} (${t.category} · ${(t.outputFileType || 'docx').toUpperCase()})`,
               }))}
             />
           </div>
@@ -560,7 +563,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
           />
           {selectedTemplateId && (
             <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>
-              选择模板后文件类型固定为 Word 文档
+              选择模板后文件类型使用该模板的创建类型
             </Text>
           )}
         </div>
@@ -593,5 +596,3 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
 };
 
 export default ProjectFileExplorer;
-
-

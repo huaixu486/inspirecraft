@@ -350,6 +350,7 @@ const GanttChart: React.FC = () => {
                 return (
                   <div
                     key={project.id}
+                    className="gantt-project-row"
                     style={{ display: 'flex' }}
                   >
                     <div className="gantt-project-cell" style={{
@@ -376,6 +377,7 @@ const GanttChart: React.FC = () => {
               return (
                 <div
                   key={project.id}
+                  className="gantt-project-row"
                   style={{
                     display: 'flex',
                   }}

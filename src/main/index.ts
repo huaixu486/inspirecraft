@@ -1,7 +1,8 @@
 ﻿import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode } from './types';
+import { execFileSync } from 'child_process';
+import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, AIModelConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode } from './types';
 import * as mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
 const JSZip = require('jszip');
@@ -121,7 +122,7 @@ function loadAIConfigFromDisk(): AIConfig | null {
   }
   try {
     const data = fs.readFileSync(aiConfigFile, 'utf-8');
-    return JSON.parse(data);
+    return normalizeAIConfig(JSON.parse(data));
   } catch {
     return null;
   }
@@ -130,7 +131,62 @@ function loadAIConfigFromDisk(): AIConfig | null {
 // 保存 AI 配置到磁盘
 function saveAIConfigToDisk(config: AIConfig) {
   ensureDataDir();
-  fs.writeFileSync(aiConfigFile, JSON.stringify(config, null, 2), 'utf-8');
+  fs.writeFileSync(aiConfigFile, JSON.stringify(normalizeAIConfig(config), null, 2), 'utf-8');
+}
+
+function normalizeAIConfig(config: AIConfig | null): AIConfig | null {
+  if (!config) return null;
+  if (Array.isArray(config.models) && config.models.length > 0) {
+    const models = config.models.map((model, index) => ({
+      ...model,
+      id: model.id || `model-${Date.now()}-${index}`,
+      name: model.name || model.model || `模型 ${index + 1}`,
+      enabled: model.enabled !== false,
+    }));
+    const activeModelId = config.activeModelId && models.some(model => model.id === config.activeModelId)
+      ? config.activeModelId
+      : models[0].id;
+    const parallelModelIds = (config.parallelModelIds || [activeModelId]).filter(id => models.some(model => model.id === id));
+    return {
+      models,
+      activeModelId,
+      parallelModelIds: parallelModelIds.length > 0 ? parallelModelIds : [activeModelId],
+      multiModelMode: config.multiModelMode || 'single',
+    };
+  }
+
+  if (config.provider && config.apiKey && config.model) {
+    const legacyModel: AIModelConfig = {
+      id: 'default',
+      name: config.model,
+      provider: config.provider,
+      apiKey: config.apiKey,
+      model: config.model,
+      endpoint: config.endpoint,
+      enabled: true,
+    };
+    return {
+      models: [legacyModel],
+      activeModelId: legacyModel.id,
+      parallelModelIds: [legacyModel.id],
+      multiModelMode: 'single',
+    };
+  }
+
+  return { models: [], multiModelMode: 'single' };
+}
+
+function getEnabledAIModels(config: AIConfig | null): AIModelConfig[] {
+  return normalizeAIConfig(config)?.models?.filter(model => model.enabled !== false && model.apiKey && model.model) || [];
+}
+
+function getActiveAIModel(config: AIConfig | null, modelId?: string): AIModelConfig | null {
+  const normalized = normalizeAIConfig(config);
+  const models = getEnabledAIModels(normalized);
+  if (models.length === 0) return null;
+  return models.find(model => model.id === modelId)
+    || models.find(model => model.id === normalized?.activeModelId)
+    || models[0];
 }
 
 // 读取所有任务
@@ -325,7 +381,7 @@ function makeRequest(url: string, options: any, body?: string): Promise<any> {
 }
 
 // 调用 Claude API
-async function callClaudeAPI(config: AIConfig, prompt: string): Promise<string> {
+async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<string> {
   const url = config.endpoint || 'https://api.anthropic.com/v1/messages';
   const body = JSON.stringify({
     model: config.model || 'claude-3-sonnet-20240229',
@@ -350,7 +406,7 @@ async function callClaudeAPI(config: AIConfig, prompt: string): Promise<string> 
 }
 
 // 调用 OpenAI API
-async function callOpenAIAPI(config: AIConfig, prompt: string): Promise<string> {
+async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<string> {
   const url = config.endpoint || 'https://api.openai.com/v1/chat/completions';
   const body = JSON.stringify({
     model: config.model || 'gpt-3.5-turbo',
@@ -371,6 +427,44 @@ async function callOpenAIAPI(config: AIConfig, prompt: string): Promise<string> 
     return result.choices[0].message.content;
   }
   throw new Error(result.error?.message || 'OpenAI API 调用失败');
+}
+
+async function callAIModel(config: AIModelConfig, prompt: string): Promise<string> {
+  if (config.provider === 'claude') return callClaudeAPI(config, prompt);
+  if (config.provider === 'openai' || config.provider === 'custom') return callOpenAIAPI(config, prompt);
+  throw new Error('不支持的 AI 提供商');
+}
+
+async function callDefaultAI(prompt: string, modelId?: string): Promise<string> {
+  const model = getActiveAIModel(loadAIConfigFromDisk(), modelId);
+  if (!model) throw new Error('请先配置至少一个可用 AI 模型');
+  return callAIModel(model, prompt);
+}
+
+async function callParallelAI(prompt: string, modelIds?: string[]): Promise<string> {
+  const config = normalizeAIConfig(loadAIConfigFromDisk());
+  const enabledModels = getEnabledAIModels(config);
+  const selectedIds = modelIds?.length ? modelIds : config?.parallelModelIds || [];
+  const selectedModels = enabledModels.filter(model => selectedIds.includes(model.id));
+  const models = selectedModels.length > 0 ? selectedModels : enabledModels.slice(0, 1);
+  if (models.length === 0) throw new Error('请先配置至少一个可用 AI 模型');
+
+  const results = await Promise.all(models.map(async model => {
+    try {
+      const output = await callAIModel(model, prompt);
+      return `【${model.name}】\n${output}`;
+    } catch (error: any) {
+      return `【${model.name}】调用失败：${error.message}`;
+    }
+  }));
+  return results.join('\n\n');
+}
+
+async function callConfiguredAI(prompt: string): Promise<string> {
+  const config = normalizeAIConfig(loadAIConfigFromDisk());
+  return config?.multiModelMode === 'parallel'
+    ? callParallelAI(prompt, config.parallelModelIds)
+    : callDefaultAI(prompt, config?.activeModelId);
 }
 
 function createWindow() {
@@ -446,6 +540,51 @@ ipcMain.handle('file:readDir', async (_event: any, dirPath: string) => {
   return fs.readdirSync(dirPath);
 });
 
+const fallbackFontNames = [
+  '宋体',
+  '黑体',
+  '微软雅黑',
+  '仿宋',
+  '楷体',
+  '等线',
+  'Arial',
+  'Calibri',
+  'Cambria',
+  'Times New Roman',
+];
+
+function normalizeFontName(name: string): string {
+  return name
+    .replace(/\s*\((TrueType|OpenType|Type 1|Collection)\)\s*/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function listInstalledFonts(): string[] {
+  const fontNames = new Set<string>(fallbackFontNames);
+
+  if (process.platform === 'win32') {
+    try {
+      const command = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Drawing; (New-Object System.Drawing.Text.InstalledFontCollection).Families | ForEach-Object { $_.Name }";
+      const output = execFileSync('powershell.exe', ['-NoProfile', '-Command', command], {
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+      output.split(/\r?\n/).map(normalizeFontName).filter(Boolean).forEach(name => fontNames.add(name));
+    } catch {}
+  }
+
+  return Array.from(fontNames).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+}
+
+ipcMain.handle('system:listFonts', async () => {
+  try {
+    return { success: true, fonts: listInstalledFonts() };
+  } catch (error: any) {
+    return { success: false, fonts: fallbackFontNames, error: error.message };
+  }
+});
+
 // 项目持久化
 ipcMain.handle('project:save', async (_event: any, project: Project) => {
   const projects = loadProjectsFromDisk();
@@ -474,7 +613,7 @@ ipcMain.handle('dialog:openFile', async (_event: any, filters?: Electron.FileFil
     properties: ['openFile'],
     title: '选择文件',
     filters: filters || [
-      { name: '文档文件', extensions: ['docx', 'pdf', 'txt'] },
+      { name: '文档文件', extensions: ['doc', 'docx', 'pdf', 'txt', 'md', 'rtf'] },
       { name: '所有文件', extensions: ['*'] },
     ],
   });
@@ -484,10 +623,199 @@ ipcMain.handle('dialog:openFile', async (_event: any, filters?: Electron.FileFil
   return result.filePaths[0];
 });
 
+function normalizeExtractedText(value: string): string {
+  return value
+    .replace(/\r/g, '\n')
+    .replace(/\u0000/g, '')
+    .replace(/[\u0001-\u0008\u000b\u000c\u000e-\u001f]+/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function decodeXmlText(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+function getXmlAttr(fragment: string, attrName: string): string {
+  const match = fragment.match(new RegExp(`${attrName}="([^"]*)"`));
+  return match?.[1] || '';
+}
+
+function getWordVal(fragment: string, tagName: string): string {
+  const match = fragment.match(new RegExp(`<w:${tagName}\\b[^>]*w:val="([^"]*)"`, 'i'));
+  return match?.[1] || '';
+}
+
+function chineseCounter(value: number): string {
+  const digits = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+  if (value <= 10) return value === 10 ? '十' : digits[value];
+  if (value < 20) return `十${digits[value - 10]}`;
+  if (value < 100) {
+    const ten = Math.floor(value / 10);
+    const one = value % 10;
+    return `${digits[ten]}十${one ? digits[one] : ''}`;
+  }
+  return String(value);
+}
+
+function romanCounter(value: number): string {
+  const map: Array<[number, string]> = [[1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'], [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i']];
+  let rest = value;
+  let result = '';
+  for (const [num, token] of map) {
+    while (rest >= num) {
+      result += token;
+      rest -= num;
+    }
+  }
+  return result || String(value);
+}
+
+function formatNumberByType(format: string, value: number): string {
+  if (/chinese|japanese/i.test(format)) return chineseCounter(value);
+  if (/lowerLetter/i.test(format)) return String.fromCharCode(96 + Math.max(1, Math.min(value, 26)));
+  if (/upperLetter/i.test(format)) return String.fromCharCode(64 + Math.max(1, Math.min(value, 26)));
+  if (/lowerRoman/i.test(format)) return romanCounter(value);
+  if (/upperRoman/i.test(format)) return romanCounter(value).toUpperCase();
+  return String(value);
+}
+
+async function extractDocxTextWithNumbering(buffer: Buffer): Promise<string> {
+  try {
+    const zip = await JSZip.loadAsync(buffer);
+    const documentXml = await zip.file('word/document.xml')?.async('string');
+    if (!documentXml) return '';
+    const numberingXml = await zip.file('word/numbering.xml')?.async('string');
+
+    const numToAbstract = new Map<string, string>();
+    const levels = new Map<string, { format: string; text: string }>();
+    if (numberingXml) {
+      for (const numMatch of numberingXml.matchAll(/<w:num\b[\s\S]*?<\/w:num>/g)) {
+        const block = numMatch[0];
+        const numId = getXmlAttr(block.match(/<w:num\b[^>]*>/)?.[0] || '', 'w:numId');
+        const abstractNumId = getWordVal(block, 'abstractNumId');
+        if (numId && abstractNumId) numToAbstract.set(numId, abstractNumId);
+      }
+
+      for (const abstractMatch of numberingXml.matchAll(/<w:abstractNum\b[\s\S]*?<\/w:abstractNum>/g)) {
+        const block = abstractMatch[0];
+        const abstractId = getXmlAttr(block.match(/<w:abstractNum\b[^>]*>/)?.[0] || '', 'w:abstractNumId');
+        if (!abstractId) continue;
+        for (const levelMatch of block.matchAll(/<w:lvl\b[\s\S]*?<\/w:lvl>/g)) {
+          const levelBlock = levelMatch[0];
+          const ilvl = getXmlAttr(levelBlock.match(/<w:lvl\b[^>]*>/)?.[0] || '', 'w:ilvl') || '0';
+          levels.set(`${abstractId}:${ilvl}`, {
+            format: getWordVal(levelBlock, 'numFmt'),
+            text: decodeXmlText(getWordVal(levelBlock, 'lvlText')),
+          });
+        }
+      }
+    }
+
+    const counters = new Map<string, number[]>();
+    const lines: string[] = [];
+    for (const paraMatch of documentXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
+      const paragraph = paraMatch[0];
+      const text = normalizeExtractedText(
+        Array.from(paragraph.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g) as Iterable<RegExpMatchArray>)
+          .map(match => decodeXmlText(match[1]))
+          .join('')
+      );
+      if (!text) continue;
+
+      const pPr = paragraph.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] || '';
+      const numPr = pPr.match(/<w:numPr\b[\s\S]*?<\/w:numPr>/)?.[0] || '';
+      const numId = getWordVal(numPr, 'numId');
+      const ilvl = Number(getWordVal(numPr, 'ilvl') || '0');
+      const sizes = Array.from(paragraph.matchAll(/<w:sz\b[^>]*w:val="(\d+)"/g) as Iterable<RegExpMatchArray>).map(match => Number(match[1]));
+      const maxSize = sizes.length ? Math.max(...sizes) : 0;
+      const isBold = /<w:b\b/.test(paragraph);
+      const shouldRestoreNumber = Boolean(numId) && text.length <= 90 && (maxSize >= 28 || (isBold && maxSize >= 24));
+
+      if (!shouldRestoreNumber) {
+        lines.push(text);
+        continue;
+      }
+
+      const abstractId = numToAbstract.get(numId);
+      const level = abstractId ? levels.get(`${abstractId}:${ilvl}`) : undefined;
+      const numCounters = counters.get(numId) || [];
+      numCounters[ilvl] = (numCounters[ilvl] || 0) + 1;
+      numCounters.length = ilvl + 1;
+      counters.set(numId, numCounters);
+
+      let label = '';
+      if (level) {
+        label = level.text || `%${ilvl + 1}`;
+        label = label.replace(/%(\d+)/g, (_all, indexText) => {
+          const refLevel = Number(indexText) - 1;
+          const refValue = numCounters[refLevel] || 1;
+          const refRule = abstractId ? levels.get(`${abstractId}:${refLevel}`) : undefined;
+          return formatNumberByType(refRule?.format || level.format, refValue);
+        });
+        if (/chinese|japanese/i.test(level.format) && !/[、.．)）]/.test(label)) {
+          label = `${formatNumberByType(level.format, numCounters[ilvl])}、`;
+        }
+      }
+
+      lines.push(label && !text.startsWith(label) ? `${label} ${text}` : text);
+    }
+
+    return normalizeExtractedText(lines.join('\n'));
+  } catch {
+    return '';
+  }
+}
+
+function stripRtf(value: string): string {
+  return normalizeExtractedText(
+    value
+      .replace(/\\par[d]?/g, '\n')
+      .replace(/\\'[0-9a-fA-F]{2}/g, ' ')
+      .replace(/\\[a-zA-Z]+\d* ?/g, '')
+      .replace(/[{}]/g, ' ')
+  );
+}
+
+function extractLegacyDocText(buffer: Buffer): string {
+  const utf16 = normalizeExtractedText(buffer.toString('utf16le'));
+  const utf8 = normalizeExtractedText(buffer.toString('utf8'));
+  const best = utf16.length > utf8.length ? utf16 : utf8;
+  return best
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0 && /[\u4e00-\u9fa5A-Za-z0-9]/.test(line))
+    .join('\n');
+}
+
+function isReadableExtractedText(value: string): boolean {
+  const compact = value.replace(/\s/g, '');
+  if (compact.length < 20) return false;
+  const readable = compact.match(/[\u4e00-\u9fa5A-Za-z0-9，。、；：！？（）()《》.\-_/]/g)?.length || 0;
+  const replacement = compact.match(/�/g)?.length || 0;
+  return readable / compact.length > 0.68 && replacement / compact.length < 0.05;
+}
+
 // 解析 Word 文档
 ipcMain.handle('file:parseWord', async (_event: any, filePath: string) => {
   try {
     const buffer = fs.readFileSync(filePath);
+    if (path.extname(filePath).toLowerCase() === '.docx') {
+      const docxContent = await extractDocxTextWithNumbering(buffer);
+      if (docxContent) {
+        return {
+          success: true,
+          content: docxContent,
+          fileName: path.basename(filePath),
+        };
+      }
+    }
     const result = await mammoth.extractRawText({ buffer });
     return {
       success: true,
@@ -499,6 +827,98 @@ ipcMain.handle('file:parseWord', async (_event: any, filePath: string) => {
       success: false,
       error: error.message,
     };
+  }
+});
+
+ipcMain.handle('file:parseDocument', async (_event: any, filePath: string) => {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    const fileName = path.basename(filePath);
+    const buffer = fs.readFileSync(filePath);
+
+    if (ext === '.docx') {
+      const docxContent = await extractDocxTextWithNumbering(buffer);
+      if (docxContent) return { success: true, content: docxContent, fileName };
+      const result = await mammoth.extractRawText({ buffer });
+      return { success: true, content: normalizeExtractedText(result.value), fileName };
+    }
+
+    if (ext === '.doc') {
+      try {
+        const result = await mammoth.extractRawText({ buffer });
+        const content = normalizeExtractedText(result.value);
+        if (content) return { success: true, content, fileName };
+      } catch {}
+
+      const content = extractLegacyDocText(buffer);
+      if (!content || !isReadableExtractedText(content)) {
+        return { success: false, error: '旧版 .doc 已关联；为避免打开 Word，未自动解析内容。请将文件另存为 .docx 后导入章节' };
+      }
+      return { success: true, content, fileName };
+    }
+
+    if (ext === '.pdf') {
+      const data = await pdfParse(buffer);
+      return { success: true, content: normalizeExtractedText(data.text), fileName, pages: data.numpages };
+    }
+
+    if (ext === '.rtf') {
+      return { success: true, content: stripRtf(buffer.toString('utf8')), fileName };
+    }
+
+    if (ext === '.txt' || ext === '.md') {
+      return { success: true, content: normalizeExtractedText(fs.readFileSync(filePath, 'utf-8')), fileName };
+    }
+
+    return { success: false, error: '不支持的文件格式' };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('file:parseDocumentSilent', async (_event: any, filePath: string) => {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    const fileName = path.basename(filePath);
+    const buffer = fs.readFileSync(filePath);
+
+    if (ext === '.docx') {
+      const docxContent = await extractDocxTextWithNumbering(buffer);
+      if (docxContent) return { success: true, content: docxContent, fileName };
+      const result = await mammoth.extractRawText({ buffer });
+      return { success: true, content: normalizeExtractedText(result.value), fileName };
+    }
+
+    if (ext === '.doc') {
+      try {
+        const result = await mammoth.extractRawText({ buffer });
+        const content = normalizeExtractedText(result.value);
+        if (content) return { success: true, content, fileName };
+      } catch {}
+
+      const content = extractLegacyDocText(buffer);
+      if (content && isReadableExtractedText(content)) {
+        return { success: true, content, fileName };
+      }
+      return { success: false, error: '旧版 .doc 已关联；为避免打开 Word，未自动解析内容。请将文件另存为 .docx 后导入章节' };
+    }
+
+    if (ext === '.pdf') {
+      const data = await pdfParse(buffer);
+      return { success: true, content: normalizeExtractedText(data.text), fileName, pages: data.numpages };
+    }
+
+    if (ext === '.rtf') {
+      return { success: true, content: stripRtf(buffer.toString('utf8')), fileName };
+    }
+
+    if (ext === '.txt' || ext === '.md') {
+      return { success: true, content: normalizeExtractedText(fs.readFileSync(filePath, 'utf-8')), fileName };
+    }
+
+    return { success: false, error: '不支持的文件格式' };
+  } catch (error: any) {
+    return { success: false, error: error.message };
   }
 });
 
@@ -598,10 +1018,11 @@ ipcMain.handle('review:execute', async (_event: any, params: {
 
   const issues: ReviewIssue[] = [];
   const content = version.content;
+  const allTemplateNodes = flattenNodes(template.nodes);
 
   // 检查缺失章节
   if (params.config.checkMissingSections) {
-    for (const node of template.nodes) {
+    for (const node of allTemplateNodes) {
       const found = content.includes(node.title);
       if (node.isRequired && !found) {
         issues.push({
@@ -618,7 +1039,7 @@ ipcMain.handle('review:execute', async (_event: any, params: {
   }
 
   // 计算得分
-  const requiredNodes = template.nodes.filter(n => n.isRequired);
+  const requiredNodes = allTemplateNodes.filter(n => n.isRequired);
   const missingCount = issues.filter(i => i.type === 'missing_section').length;
   const score = requiredNodes.length > 0
     ? Math.round(((requiredNodes.length - missingCount) / requiredNodes.length) * 100)
@@ -671,20 +1092,12 @@ ipcMain.handle('ai:saveConfig', async (_event: any, config: AIConfig) => {
 });
 
 // AI 调用
-ipcMain.handle('ai:call', async (_event: any, prompt: string) => {
-  const config = loadAIConfigFromDisk();
-  if (!config || !config.apiKey) {
-    throw new Error('请先配置 AI API 密钥');
-  }
-
+ipcMain.handle('ai:call', async (_event: any, prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel' }) => {
   try {
-    if (config.provider === 'claude') {
-      return await callClaudeAPI(config, prompt);
-    } else if (config.provider === 'openai') {
-      return await callOpenAIAPI(config, prompt);
-    } else {
-      throw new Error('不支持的 AI 提供商');
-    }
+    if (typeof prompt === 'string') return await callConfiguredAI(prompt);
+    return prompt.mode === 'parallel'
+      ? await callParallelAI(prompt.prompt, prompt.modelIds)
+      : await callDefaultAI(prompt.prompt, prompt.modelId);
   } catch (error: any) {
     throw new Error(`AI 调用失败: ${error.message}`);
   }
@@ -692,20 +1105,10 @@ ipcMain.handle('ai:call', async (_event: any, prompt: string) => {
 
 // AI 生成摘要
 ipcMain.handle('ai:generateSummary', async (_event: any, content: string) => {
-  const config = loadAIConfigFromDisk();
-  if (!config || !config.apiKey) {
-    return { success: false, error: '请先配置 AI API 密钥' };
-  }
-
   const prompt = `请为以下文档内容生成一个简短的摘要（100-200字）：\n\n${content.substring(0, 3000)}`;
 
   try {
-    let summary = '';
-    if (config.provider === 'claude') {
-      summary = await callClaudeAPI(config, prompt);
-    } else if (config.provider === 'openai') {
-      summary = await callOpenAIAPI(config, prompt);
-    }
+    const summary = await callConfiguredAI(prompt);
     return { success: true, summary };
   } catch (error: any) {
     return { success: false, error: error.message };
@@ -714,11 +1117,6 @@ ipcMain.handle('ai:generateSummary', async (_event: any, content: string) => {
 
 // AI 审查建议
 ipcMain.handle('ai:reviewSuggestion', async (_event: any, params: { content: string; template: string }) => {
-  const config = loadAIConfigFromDisk();
-  if (!config || !config.apiKey) {
-    return { success: false, error: '请先配置 AI API 密钥' };
-  }
-
   const prompt = `你是一个文档审查专家。请根据以下模板要求，审查文档内容并给出修改建议。
 
 模板要求：
@@ -734,12 +1132,7 @@ ${params.content.substring(0, 3000)}
 4. 具体的修改建议`;
 
   try {
-    let suggestions = '';
-    if (config.provider === 'claude') {
-      suggestions = await callClaudeAPI(config, prompt);
-    } else if (config.provider === 'openai') {
-      suggestions = await callOpenAIAPI(config, prompt);
-    }
+    const suggestions = await callConfiguredAI(prompt);
     return { success: true, suggestions };
   } catch (error: any) {
     return { success: false, error: error.message };
@@ -918,11 +1311,6 @@ ipcMain.handle('task:delete', async (_event: any, taskId: string) => {
 
 // AI 执行任务
 ipcMain.handle('task:executeAI', async (_event: any, params: { taskId: string; content: string; instruction: string }) => {
-  const config = loadAIConfigFromDisk();
-  if (!config || !config.apiKey) {
-    return { success: false, error: '请先配置 AI API 密钥' };
-  }
-
   const prompt = `你是一个文档处理助手。请根据以下指令处理文档内容：
 
 指令：${params.instruction}
@@ -933,12 +1321,7 @@ ${params.content.substring(0, 3000)}
 请直接输出处理后的内容，不要添加额外说明。`;
 
   try {
-    let result = '';
-    if (config.provider === 'claude') {
-      result = await callClaudeAPI(config, prompt);
-    } else if (config.provider === 'openai') {
-      result = await callOpenAIAPI(config, prompt);
-    }
+    const result = await callConfiguredAI(prompt);
 
     // 更新任务状态
     const tasks = loadTasksFromDisk();
@@ -1010,33 +1393,31 @@ ipcMain.handle('projectDoc:analyze', async (_event: any, params: {
 
     // AI 深度分析
     if (useAI) {
-      const config = loadAIConfigFromDisk();
-      if (config && config.apiKey) {
+      if (getActiveAIModel(loadAIConfigFromDisk())) {
         const extracted = extractSections(content);
+        const allTemplateNodes = flattenNodes(template.nodes);
         for (const section of sections) {
           if (section.status === 'missing') continue;
           const matched = extracted.find(e => matchHeading(e.title, section.title));
           if (!matched || matched.content.length < 10) continue;
+          const templateNode = allTemplateNodes.find(node => node.id === section.nodeId);
+          const requirement = templateNode?.description?.trim();
 
           const prompt = `你是一个文档审查专家。请分析以下章节内容的完成度。
 
 章节标题：${section.title}
+${requirement ? `模板要求：\n${requirement}\n` : ''}
 章节内容（前1000字）：
 ${matched.content.substring(0, 1000)}
 
 请评估：
-1. 内容是否完整（completed/partial/missing）
+1. 内容是否满足模板要求，状态为 completed/partial/missing
 2. 简短评语（30字以内）
 
 请用 JSON 格式回复：{"status":"completed","comment":"评语"}`;
 
           try {
-            let response = '';
-            if (config.provider === 'claude') {
-              response = await callClaudeAPI(config, prompt);
-            } else if (config.provider === 'openai') {
-              response = await callOpenAIAPI(config, prompt);
-            }
+            const response = await callConfiguredAI(prompt);
             // 尝试解析 AI 回复
             const jsonMatch = response.match(/\{[^}]+\}/);
             if (jsonMatch) {
@@ -1139,9 +1520,10 @@ ipcMain.handle('file:createBlank', async (_event: any, params: { folderPath: str
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
-    const filePath = path.join(folderPath, `${fileName}.${fileType}`);
+    const normalizedType = normalizeFileType(fileType);
+    const filePath = path.join(folderPath, `${fileName}.${normalizedType}`);
     if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(filePath, '', 'utf-8');
+      await createFileByType(filePath, normalizedType);
     }
     return { success: true, filePath };
   } catch (error: any) {
@@ -1150,20 +1532,31 @@ ipcMain.handle('file:createBlank', async (_event: any, params: { folderPath: str
 });
 
 // 从模板创建文件（直接复制模板源文件并重命名）
-ipcMain.handle('file:createFromTemplate', async (_event: any, params: { folderPath: string; fileName: string; template: WritingTemplate }) => {
+ipcMain.handle('file:createFromTemplate', async (_event: any, params: { folderPath: string; fileName: string; template: WritingTemplate; fileType?: string }) => {
   try {
     const { folderPath, fileName, template } = params;
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
 
+    const outputFileType = normalizeFileType(params.fileType || template.outputFileType || 'docx');
+    const outputExt = `.${outputFileType}`;
+
     if (!template.filePath || !fs.existsSync(template.filePath)) {
-      return { success: false, error: '模板源文件不存在，请重新导入模板' };
+      const destPath = path.join(folderPath, `${fileName}${outputExt}`);
+      if (!fs.existsSync(destPath)) {
+        await createFileByType(destPath, outputFileType, template);
+      }
+      return { success: true, filePath: destPath };
     }
 
-    const ext = path.extname(template.filePath);
-    const destPath = path.join(folderPath, `${fileName}${ext}`);
-    fs.copyFileSync(template.filePath, destPath);
+    const sourceExt = path.extname(template.filePath).toLowerCase();
+    const destPath = path.join(folderPath, `${fileName}${outputExt}`);
+    if (sourceExt === outputExt.toLowerCase() && outputFileType !== 'docx') {
+      fs.copyFileSync(template.filePath, destPath);
+    } else {
+      await createFileByType(destPath, outputFileType, template);
+    }
 
     return { success: true, filePath: destPath };
   } catch (error: any) {
@@ -1186,6 +1579,248 @@ function addFolderToZip(zip: any, folderPath: string, basePath: string) {
       zip.file(relativePath, content);
     }
   }
+}
+
+function escapeXml(value: string = ''): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function normalizeFileType(fileType?: string): string {
+  return (fileType || 'docx').replace(/^\./, '').toLowerCase();
+}
+
+function styleRuleFromTemplate(template?: WritingTemplate, key: 'heading1' | 'heading2' | 'heading3' | 'heading4' | 'body' = 'body') {
+  const fallbackTitle = template?.titleFontRequirement || {};
+  const fallbackBody = template?.bodyFontRequirement || {};
+  const isHeading = key.startsWith('heading');
+  return template?.formatRules?.[key] || {
+    fontRequirement: isHeading ? fallbackTitle : fallbackBody,
+    paragraphRequirement: {},
+  };
+}
+
+function fontSizeToHalfPoints(size?: number, fallback = 12): number {
+  return Math.round((size || fallback) * 2);
+}
+
+function pointsToTwips(value?: number): number {
+  return Math.round((value || 0) * 20);
+}
+
+function lineHeightToWordLine(value?: number): number {
+  return Math.round((value || 1.5) * 240);
+}
+
+function flattenTemplateNodes(nodes: TemplateNode[], output: TemplateNode[] = []): TemplateNode[] {
+  for (const node of nodes || []) {
+    output.push(node);
+    if (node.children?.length) flattenTemplateNodes(node.children, output);
+  }
+  return output;
+}
+
+function buildWordStyle(styleId: string, name: string, rule: ReturnType<typeof styleRuleFromTemplate>, defaults: { font: string; size: number; bold?: boolean }) {
+  const font = rule.fontRequirement || {};
+  const paragraph = rule.paragraphRequirement || {};
+  const fontFamily = escapeXml(font.fontFamily || defaults.font);
+  const size = fontSizeToHalfPoints(font.fontSize, defaults.size);
+  const color = (font.color || '#000000').replace('#', '');
+  const bold = font.fontWeight === 'bold' || defaults.bold;
+  const italic = font.fontStyle === 'italic';
+  const spacing = font.letterSpacing ? `<w:spacing w:val="${pointsToTwips(font.letterSpacing)}"/>` : '';
+  const align = paragraph.alignment ? `<w:jc w:val="${paragraph.alignment}"/>` : '';
+  const firstLine = paragraph.indentFirstLine ? `<w:ind w:firstLineChars="${Math.round(paragraph.indentFirstLine * 100)}"/>` : '';
+
+  return `
+    <w:style w:type="paragraph" w:styleId="${styleId}">
+      <w:name w:val="${escapeXml(name)}"/>
+      <w:qFormat/>
+      <w:pPr>
+        ${align}
+        ${firstLine}
+        <w:spacing w:before="${pointsToTwips(paragraph.spaceBefore)}" w:after="${pointsToTwips(paragraph.spaceAfter)}" w:line="${lineHeightToWordLine(font.lineHeight)}" w:lineRule="auto"/>
+      </w:pPr>
+      <w:rPr>
+        <w:rFonts w:ascii="${fontFamily}" w:hAnsi="${fontFamily}" w:eastAsia="${fontFamily}"/>
+        ${bold ? '<w:b/><w:bCs/>' : ''}
+        ${italic ? '<w:i/><w:iCs/>' : ''}
+        ${spacing}
+        <w:color w:val="${color}"/>
+        <w:sz w:val="${size}"/>
+        <w:szCs w:val="${size}"/>
+      </w:rPr>
+    </w:style>`;
+}
+
+function buildWordStylesXml(template?: WritingTemplate): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr><w:rFonts w:ascii="宋体" w:hAnsi="宋体" w:eastAsia="宋体"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>
+    </w:rPrDefault>
+  </w:docDefaults>
+  ${buildWordStyle('Normal', '正文', styleRuleFromTemplate(template, 'body'), { font: '宋体', size: 12 })}
+  ${buildWordStyle('Heading1', '标题 1', styleRuleFromTemplate(template, 'heading1'), { font: '黑体', size: 16, bold: true })}
+  ${buildWordStyle('Heading2', '标题 2', styleRuleFromTemplate(template, 'heading2'), { font: '黑体', size: 15, bold: true })}
+  ${buildWordStyle('Heading3', '标题 3', styleRuleFromTemplate(template, 'heading3'), { font: '黑体', size: 14, bold: true })}
+  ${buildWordStyle('Heading4', '标题 4', styleRuleFromTemplate(template, 'heading4'), { font: '黑体', size: 12, bold: true })}
+</w:styles>`;
+}
+
+function buildWordDocumentXml(template?: WritingTemplate): string {
+  const nodes = flattenTemplateNodes(template?.nodes || []);
+  const paragraphs = nodes.length > 0
+    ? nodes.map(node => {
+      const level = Math.min(Math.max(node.level || 1, 1), 4);
+      return `<w:p><w:pPr><w:pStyle w:val="Heading${level}"/></w:pPr><w:r><w:t>${escapeXml(node.title)}</w:t></w:r></w:p>`;
+    }).join('')
+    : '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>新建文档</w:t></w:r></w:p>';
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${paragraphs}
+    <w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t></w:t></w:r></w:p>
+    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+  </w:body>
+</w:document>`;
+}
+
+async function writeDocxFile(filePath: string, template?: WritingTemplate) {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`);
+  zip.folder('_rels')?.file('.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`);
+  zip.folder('word')?.file('document.xml', buildWordDocumentXml(template));
+  zip.folder('word')?.file('styles.xml', buildWordStylesXml(template));
+  const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  fs.writeFileSync(filePath, buffer);
+}
+
+async function writePptxFile(filePath: string, template?: WritingTemplate) {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+</Types>`);
+  zip.folder('_rels')?.file('.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+</Relationships>`);
+  zip.folder('ppt')?.file('presentation.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>
+  <p:sldSz cx="12192000" cy="6858000" type="screen16x9"/>
+</p:presentation>`);
+  zip.folder('ppt')?.folder('_rels')?.file('presentation.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+</Relationships>`);
+  const title = escapeXml(template?.name || '新建演示文稿');
+  zip.folder('ppt')?.folder('slides')?.file('slide1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+    <p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="3200" b="1"/><a:t>${title}</a:t></a:r></a:p></p:txBody></p:sp>
+  </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>`);
+  const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  fs.writeFileSync(filePath, buffer);
+}
+
+async function writeXlsxFile(filePath: string) {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>`);
+  zip.folder('_rels')?.file('.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`);
+  zip.folder('xl')?.file('workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`);
+  zip.folder('xl')?.folder('_rels')?.file('workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>`);
+  zip.folder('xl')?.folder('worksheets')?.file('sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>`);
+  const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  fs.writeFileSync(filePath, buffer);
+}
+
+function writeRtfCompatibleFile(filePath: string) {
+  fs.writeFileSync(filePath, '{\\rtf1\\ansi\\ansicpg936\\deff0{\\fonttbl{\\f0 SimSun;}}\\f0\\fs24\\par}', 'utf-8');
+}
+
+function writePdfFile(filePath: string) {
+  const pdf = `%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R>>endobj
+4 0 obj<</Length 0>>stream
+endstream
+endobj
+xref
+0 5
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000208 00000 n 
+trailer<</Size 5/Root 1 0 R>>
+startxref
+257
+%%EOF`;
+  fs.writeFileSync(filePath, pdf, 'utf-8');
+}
+
+async function createFileByType(filePath: string, fileType: string, template?: WritingTemplate) {
+  const normalized = normalizeFileType(fileType);
+  if (normalized === 'docx') {
+    await writeDocxFile(filePath, template);
+    return;
+  }
+  if (normalized === 'pptx') {
+    await writePptxFile(filePath, template);
+    return;
+  }
+  if (normalized === 'xlsx') {
+    await writeXlsxFile(filePath);
+    return;
+  }
+  if (normalized === 'doc' || normalized === 'rtf') {
+    writeRtfCompatibleFile(filePath);
+    return;
+  }
+  if (normalized === 'pdf') {
+    writePdfFile(filePath);
+    return;
+  }
+  fs.writeFileSync(filePath, '', 'utf-8');
 }
 
 // 打开ZIP文件对话框
@@ -1393,4 +2028,3 @@ app.on('activate', () => {
     createWindow();
   }
 });
-

@@ -10,7 +10,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteFile: (filePath: string) => ipcRenderer.invoke('file:delete', filePath),
   readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
   readDir: (dirPath: string) => ipcRenderer.invoke('file:readDir', dirPath),
+  listSystemFonts: () => ipcRenderer.invoke('system:listFonts'),
   parseWordDocument: (filePath: string) => ipcRenderer.invoke('file:parseWord', filePath),
+  parseDocument: (filePath: string) => ipcRenderer.invoke('file:parseDocument', filePath),
+  parseDocumentSilent: (filePath: string) => ipcRenderer.invoke('file:parseDocumentSilent', filePath),
   parsePdfDocument: (filePath: string) => ipcRenderer.invoke('file:parsePdf', filePath),
 
   // 项目操作
@@ -78,7 +81,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('file:createBlank', params),
   getFolderContents: (folderPath: string) => ipcRenderer.invoke('folder:getContents', folderPath),
   scanStageFiles: (folderPath: string) => ipcRenderer.invoke('folder:scanStageFiles', folderPath),
-  createFromTemplate: (params: { folderPath: string; fileName: string; template: any }) =>
+  createFromTemplate: (params: { folderPath: string; fileName: string; template: any; fileType?: string }) =>
     ipcRenderer.invoke('file:createFromTemplate', params),
 
   // ZIP 导入导出
@@ -89,4 +92,3 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exportZip: (params: { project: any; savePath: string; projectDocs: any[] }) =>
     ipcRenderer.invoke('project:exportZip', params),
 });
-

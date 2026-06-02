@@ -49,14 +49,32 @@ export interface TaskItem {
 }
 
 // AI配置
-export interface AIConfig {
-  provider: 'claude' | 'openai' | 'custom';
+export type AIProvider = 'claude' | 'openai' | 'custom';
+
+export interface AIModelConfig {
+  id: string;
+  name: string;
+  provider: AIProvider;
   apiKey: string;
   model: string;
   endpoint?: string;
+  enabled?: boolean;
+}
+
+export interface AIConfig {
+  provider?: AIProvider; // 兼容旧版单模型配置
+  apiKey?: string;       // 兼容旧版单模型配置
+  model?: string;        // 兼容旧版单模型配置
+  endpoint?: string;
+  models?: AIModelConfig[];
+  activeModelId?: string;
+  parallelModelIds?: string[];
+  multiModelMode?: 'single' | 'parallel';
 }
 
 // ==================== 模板相关类型 ====================
+
+export type TemplateOutputFileType = 'docx' | 'doc' | 'pptx' | 'xlsx' | 'pdf' | 'txt' | 'md' | 'rtf';
 
 // 字体格式要求
 export interface FontRequirement {
@@ -65,6 +83,7 @@ export interface FontRequirement {
   fontWeight?: 'normal' | 'bold';
   fontStyle?: 'normal' | 'italic';
   lineHeight?: number; // 行距，如 1.5、2.0
+  letterSpacing?: number; // 字间距（磅）
   color?: string; // 颜色，如 "#000000"
 }
 
@@ -74,6 +93,19 @@ export interface ParagraphRequirement {
   indentFirstLine?: number; // 首行缩进（字符数）
   spaceBefore?: number; // 段前间距（磅）
   spaceAfter?: number; // 段后间距（磅）
+}
+
+export interface TemplateStyleRule {
+  fontRequirement?: FontRequirement;
+  paragraphRequirement?: ParagraphRequirement;
+}
+
+export interface TemplateFormatRules {
+  heading1?: TemplateStyleRule;
+  heading2?: TemplateStyleRule;
+  heading3?: TemplateStyleRule;
+  heading4?: TemplateStyleRule;
+  body?: TemplateStyleRule;
 }
 
 // 模板节点（支持层级结构）
@@ -94,6 +126,10 @@ export interface WritingTemplate {
   name: string; // 模板名称，如 "可研报告模板"
   description: string; // 模板说明
   category: string; // 分类，如 "可研报告"、"提案表"
+  outputFileType?: TemplateOutputFileType; // 使用模板创建文件时的默认文件类型
+  titleFontRequirement?: FontRequirement; // 标题字体规则
+  bodyFontRequirement?: FontRequirement; // 正文字体规则
+  formatRules?: TemplateFormatRules; // 创建办公文档时注入的默认格式规则
   nodes: TemplateNode[]; // 模板结构节点
   filePath?: string; // 模板源文件路径（导入时保存）
   createdAt: string;

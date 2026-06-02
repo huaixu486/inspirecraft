@@ -7,7 +7,10 @@
   deleteFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   readFile: (filePath: string) => Promise<string>;
   readDir: (dirPath: string) => Promise<string[]>;
+  listSystemFonts: () => Promise<{ success: boolean; fonts: string[]; error?: string }>;
   parseWordDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; error?: string }>;
+  parseDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; error?: string }>;
+  parseDocumentSilent?: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; error?: string }>;
   parsePdfDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; error?: string }>;
 
   // 项目操作
@@ -34,7 +37,7 @@
   // AI操作
   loadAIConfig: () => Promise<any>;
   saveAIConfig: (config: any) => Promise<void>;
-  callAI: (prompt: string) => Promise<string>;
+  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel' }) => Promise<string>;
   generateSummary: (content: string) => Promise<{ success: boolean; summary?: string; error?: string }>;
   reviewSuggestion: (params: any) => Promise<{ success: boolean; suggestions?: string; error?: string }>;
 
@@ -69,7 +72,7 @@
   createBlankFile: (params: { folderPath: string; fileName: string; fileType: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
   getFolderContents: (folderPath: string) => Promise<{ success: boolean; items: { name: string; isDirectory: boolean; ext: string; size: number; modifiedAt: string; path: string }[]; error?: string }>;
   scanStageFiles: (folderPath: string) => Promise<{ success: boolean; files: { name: string; path: string; ext: string; size: number; createdAt: string; modifiedAt: string }[]; error?: string }>;
-  createFromTemplate: (params: { folderPath: string; fileName: string; template: any }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+  createFromTemplate: (params: { folderPath: string; fileName: string; template: any; fileType?: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
 
   // ZIP 导入导出
   openZipFile: () => Promise<string | null>;
@@ -81,4 +84,3 @@
 interface Window {
   electronAPI: ElectronAPI;
 }
-

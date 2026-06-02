@@ -10,11 +10,25 @@ export const DEFAULT_STAGES: StageConfig[] = [
   { id: 'system-4', name: '其他', keywords: [], color: '#8c8c8c', isSystem: true },
 ];
 
+const isOtherStage = (stage: StageConfig) => stage.id === 'system-4' || stage.name.trim() === '其他';
+
+const placeOtherStageLast = (stages: StageConfig[]): StageConfig[] => {
+  const regularStages = stages.filter(stage => !isOtherStage(stage));
+  const otherStages = stages.filter(isOtherStage);
+  return [...regularStages, ...otherStages];
+};
+
 // 获取所有阶段（系统 + 自定义，自定义可覆盖同id的系统阶段）
 export const getAllStages = (customStages: StageConfig[]): StageConfig[] => {
-  const overrideIds = new Set(customStages.map(s => s.id));
-  const base = DEFAULT_STAGES.filter(s => !overrideIds.has(s.id));
-  return [...base, ...customStages];
+  const defaultIds = new Set(DEFAULT_STAGES.map(s => s.id));
+  const overrides = new Map(customStages.map(s => [s.id, s]));
+  const systemStages = DEFAULT_STAGES.flatMap(stage => {
+    const override = overrides.get(stage.id);
+    if (override?.deleted) return [];
+    return [{ ...stage, ...override, isSystem: true, deleted: false }];
+  });
+  const customOnly = customStages.filter(stage => !stage.deleted && !defaultIds.has(stage.id));
+  return placeOtherStageLast([...systemStages, ...customOnly]);
 };
 
 // 获取阶段元数据（名称 → 颜色/标签）
@@ -31,8 +45,23 @@ export const getStageOrder = (allStages: StageConfig[]): string[] => {
   return allStages.map(s => s.name);
 };
 
-// 统一的项目进度计算函数
-// 返回 0-100 的进度百分比，基于已完成阶段数 / 总阶段数
+const countCompletedStages = (segments: TimelineStageSegment[]): number =>
+  segments.filter(s => Boolean(s.completedAt)).length;
+
+// 项目列表进度：已完成阶段数 / 当前系统中启用的全部阶段数
+export const getGlobalStageProgress = (
+  project: Project,
+  projectDocs: ProjectDocument[],
+  templates: WritingTemplate[],
+  versions: DocumentVersion[],
+  allStages: StageConfig[],
+): number => {
+  if (allStages.length === 0) return 0;
+  const segments = buildProjectStageSegments(project, projectDocs, templates, versions, allStages);
+  return Math.round((countCompletedStages(segments) / allStages.length) * 100);
+};
+
+// 当前项目阶段完成度：已完成阶段数 / 当前项目已创建的阶段数
 export const getProjectProgress = (
   project: Project,
   projectDocs: ProjectDocument[],
@@ -42,8 +71,7 @@ export const getProjectProgress = (
 ): number => {
   const segments = buildProjectStageSegments(project, projectDocs, templates, versions, allStages);
   if (segments.length === 0) return 0;
-  const completed = segments.filter(s => Boolean(s.completedAt)).length;
-  return Math.round((completed / segments.length) * 100);
+  return Math.round((countCompletedStages(segments) / segments.length) * 100);
 };
 
 export interface TimelineStageSegment {
@@ -74,6 +102,7 @@ export const detectTimelineStage = (
   ...parts: Array<string | undefined>
 ): string => {
   const text = parts.filter(Boolean).join(' ');
+  const fallbackStage = allStages.find(stage => stage.keywords.length === 0)?.name || '其他';
   // 先检查自定义阶段（按顺序匹配）
   for (const stage of allStages) {
     if (stage.isSystem) continue; // 系统阶段最后匹配
@@ -85,13 +114,13 @@ export const detectTimelineStage = (
   // 再检查系统阶段
   for (const stage of allStages) {
     if (!stage.isSystem) continue;
-    if (stage.name === '其他') continue; // "其他"最后匹配
+    if (stage.name === fallbackStage) continue; // 无关键词阶段最后匹配
     for (const keyword of stage.keywords) {
       if (text.includes(keyword)) return stage.name;
     }
   }
-  // 默认归入"其他"
-  return '其他';
+  // 默认归入无关键词阶段
+  return fallbackStage;
 };
 
 export const buildProjectStageSegments = (

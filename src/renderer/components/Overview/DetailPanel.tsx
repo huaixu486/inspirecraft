@@ -139,8 +139,11 @@ const DetailPanel: React.FC = () => {
   const selectedDoc = projectDocsList.find(d => d.id === selectedDocId) || null;
   const planSegments = buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages);
 
-  // 使用统一的项目进度（基于已完成阶段）
+  // 当前项目阶段完成度：已完成阶段 / 当前项目已创建阶段
   const avgProgress = getProjectProgress(currentProject, projectDocsList, templates, projectVersions, allStages);
+  const completedStageCount = planSegments.filter(s => Boolean(s.completedAt)).length;
+  const activeStageCount = planSegments.filter(s => !s.completedAt).length;
+  const createdStageCount = planSegments.length;
 
   const statusMap: Record<string, { color: string; label: string }> = {
     active: { color: 'blue', label: '进行中' },
@@ -338,8 +341,8 @@ const DetailPanel: React.FC = () => {
             </div>
           </div>
 
-          {/* 文档完成度 - 圆形进度 + 百分比统计 */}
-          <Title level={5} style={{ fontSize: 14, marginBottom: 12 }}>文档完成度</Title>
+          {/* 阶段完成度 - 圆形进度 + 百分比统计 */}
+          <Title level={5} style={{ fontSize: 14, marginBottom: 12 }}>阶段完成度</Title>
           <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
             <Progress
               type="circle"
@@ -349,23 +352,16 @@ const DetailPanel: React.FC = () => {
             />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
               {(() => {
-                const completed = projectDocsList.filter(d => d.overallProgress >= 80).length;
-                const inProgress = projectDocsList.filter(d => d.overallProgress > 0 && d.overallProgress < 80).length;
-                const notStarted = projectDocsList.filter(d => d.overallProgress === 0).length;
-                const total = projectDocsList.length || 1;
+                const total = createdStageCount || 1;
                 return (
                   <>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#52c41a', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>已完成</Text></Space>
-                      <Text style={{ fontSize: 12 }}>{Math.round(completed / total * 100)}%</Text>
+                      <Text style={{ fontSize: 12 }}>{Math.round(completedStageCount / total * 100)}%</Text>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#1890ff', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>待完成</Text></Space>
-                      <Text style={{ fontSize: 12 }}>{Math.round(inProgress / total * 100)}%</Text>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#d9d9d9', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>待开始</Text></Space>
-                      <Text style={{ fontSize: 12 }}>{Math.round(notStarted / total * 100)}%</Text>
+                      <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#1890ff', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>进行中</Text></Space>
+                      <Text style={{ fontSize: 12 }}>{Math.round(activeStageCount / total * 100)}%</Text>
                     </div>
                   </>
                 );
@@ -846,20 +842,11 @@ const DetailPanel: React.FC = () => {
             <Title level={5} style={{ margin: 0, fontSize: 15 }}>{currentProject.name}</Title>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <Tag color={statusInfo.color} style={{ margin: 0, fontSize: 11 }}>{statusInfo.label}</Tag>
-              <Text type="secondary" style={{ fontSize: 12 }}>{avgProgress}% 文档完成度</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{avgProgress}% 阶段完成度</Text>
             </div>
           </div>
         </div>
         <Button type="text" icon={<CloseOutlined />} onClick={() => setCurrentProject(null)} size="small" />
-      </div>
-
-      {/* Progress bar */}
-      <div style={{ marginBottom: 16 }}>
-        <Progress
-          percent={avgProgress} size="small"
-          strokeColor={avgProgress >= 80 ? '#52c41a' : '#1890ff'}
-          showInfo={false}
-        />
       </div>
 
       <Tabs className="detail-panel-tabs" items={tabItems} size="small" style={{ flex: 1, overflow: 'hidden' }} />

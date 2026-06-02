@@ -28,7 +28,7 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
-import { buildProjectStageSegments, getAllStages, getStageMeta, getProjectProgress as calcProjectProgress, TimelineStageSegment, StageConfig } from '../../utils/timelineStages';
+import { buildProjectStageSegments, getAllStages, getStageMeta, getGlobalStageProgress as calcProjectProgress, TimelineStageSegment, StageConfig } from '../../utils/timelineStages';
 import { Project, ProjectDocument } from '../../../shared/types';
 import ProjectFileExplorer from './ProjectFileExplorer';
 
@@ -521,4 +521,3 @@ const ProjectList: React.FC = () => {
 };
 
 export default ProjectList;
-

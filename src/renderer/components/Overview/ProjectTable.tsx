@@ -4,15 +4,17 @@ import { FolderOutlined, CalendarOutlined, WarningOutlined, ExclamationCircleOut
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { getAllStages, getStageMeta, detectTimelineStage } from '../../utils/timelineStages';
+import { useTemplateStore } from '../../stores/templateStore';
+import { getAllStages, getStageMeta, detectTimelineStage, getGlobalStageProgress } from '../../utils/timelineStages';
 import type { StageConfig } from '../../utils/timelineStages';
 import { Project } from '../../../shared/types';
 
 const { Text } = Typography;
 
 const ProjectTable: React.FC = () => {
-  const { projects, setCurrentProject } = useProjectStore();
+  const { projects, setCurrentProject, versions } = useProjectStore();
   const { projectDocs } = useProjectDocStore();
+  const { templates } = useTemplateStore();
   const customStages = useSettingsStore((s) => s.customStages);
   const allStages = getAllStages(customStages);
   const stageMeta = getStageMeta(allStages);
@@ -46,9 +48,13 @@ const ProjectTable: React.FC = () => {
       width: 180,
       render: (_: any, record: Project) => {
         const docs = projectDocs.filter(d => d.projectId === record.id);
-        const avg = docs.length > 0
-          ? Math.round(docs.reduce((acc, d) => acc + d.overallProgress, 0) / docs.length)
-          : 0;
+        const avg = getGlobalStageProgress(
+          record,
+          docs,
+          templates,
+          versions.filter(v => v.projectId === record.id),
+          allStages,
+        );
         return (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Progress

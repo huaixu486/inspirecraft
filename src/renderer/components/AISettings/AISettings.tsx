@@ -16,8 +16,8 @@ import {
   Checkbox,
   Spin,
 } from 'antd';
-import { SaveOutlined, ApiOutlined, FolderOpenOutlined, UserOutlined } from '@ant-design/icons';
-import { AIConfig } from '../../shared/types';
+import { SaveOutlined, ApiOutlined, FolderOpenOutlined, UserOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons';
+import { AIConfig, AIModelConfig, AIProvider } from '../../shared/types';
 import { useProjectStore } from '../../stores/projectStore';
 
 const { Title, Text, Paragraph } = Typography;
@@ -36,6 +36,51 @@ const AISettings: React.FC = () => {
     workspaceCapacity, updateWorkspaceCapacity,
     userProfile, updateUserProfile,
   } = useSettingsStore();
+  const watchedModels = Form.useWatch('models', form) as AIModelConfig[] | undefined;
+
+  const makeDefaultModel = (): AIModelConfig => ({
+    id: `model-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    name: '默认模型',
+    provider: 'custom',
+    apiKey: '',
+    model: '',
+    endpoint: 'https://api.example.com/v1/chat/completions',
+    enabled: true,
+  });
+
+  const normalizeAIConfig = (value: AIConfig | null): AIConfig => {
+    if (value?.models?.length) {
+      const models = value.models.map((model, index) => ({
+        ...model,
+        id: model.id || `model-${Date.now()}-${index}`,
+        name: model.name || model.model || `模型 ${index + 1}`,
+        enabled: model.enabled !== false,
+      }));
+      const activeModelId = value.activeModelId && models.some(model => model.id === value.activeModelId)
+        ? value.activeModelId
+        : models[0].id;
+      return {
+        models,
+        activeModelId,
+        parallelModelIds: value.parallelModelIds?.length ? value.parallelModelIds : [activeModelId],
+        multiModelMode: value.multiModelMode || 'single',
+      };
+    }
+    if (value?.provider && value.apiKey && value.model) {
+      const model: AIModelConfig = {
+        id: 'default',
+        name: value.model,
+        provider: value.provider,
+        apiKey: value.apiKey,
+        model: value.model,
+        endpoint: value.endpoint,
+        enabled: true,
+      };
+      return { models: [model], activeModelId: model.id, parallelModelIds: [model.id], multiModelMode: 'single' };
+    }
+    const model = makeDefaultModel();
+    return { models: [model], activeModelId: model.id, parallelModelIds: [model.id], multiModelMode: 'single' };
+  };
 
   // 导入文件夹选择弹窗状态
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -57,10 +102,9 @@ const AISettings: React.FC = () => {
   const loadConfig = async () => {
     try {
       const savedConfig = await window.electronAPI.loadAIConfig();
-      if (savedConfig) {
-        setConfig(savedConfig);
-        form.setFieldsValue(savedConfig);
-      }
+      const normalized = normalizeAIConfig(savedConfig);
+      setConfig(normalized);
+      form.setFieldsValue(normalized);
     } catch (error) {
       console.error('Failed to load AI config:', error);
     }
@@ -69,9 +113,11 @@ const AISettings: React.FC = () => {
   const handleSave = async () => {
     try {
       const values = await form.validateFields();
+      const normalized = normalizeAIConfig(values);
       setIsLoading(true);
-      await window.electronAPI.saveAIConfig(values);
-      setConfig(values);
+      await window.electronAPI.saveAIConfig(normalized);
+      setConfig(normalized);
+      form.setFieldsValue(normalized);
       message.success('AI 配置已保存');
     } catch (error: any) {
       message.error(`保存失败: ${error.message}`);
@@ -262,7 +308,13 @@ const AISettings: React.FC = () => {
   const handleTest = async () => {
     try {
       setIsTesting(true);
-      const result = await window.electronAPI.callAI('你好，请回复"连接成功"');
+      const values = normalizeAIConfig(form.getFieldsValue());
+      const result = await window.electronAPI.callAI({
+        prompt: '你好，请回复"连接成功"',
+        modelId: values.activeModelId,
+        modelIds: values.parallelModelIds,
+        mode: values.multiModelMode,
+      });
       message.success(`测试成功: ${result.substring(0, 50)}...`);
     } catch (error: any) {
       message.error(`测试失败: ${error.message}`);
@@ -271,7 +323,11 @@ const AISettings: React.FC = () => {
     }
   };
 
-  const provider = Form.useWatch('provider', form);
+  const modelOptions = (watchedModels || []).map(model => ({
+    value: model.id,
+    label: `${model.name || model.model || '未命名模型'}${model.enabled === false ? '（已停用）' : ''}`,
+    disabled: model.enabled === false,
+  }));
 
   return (
     <div>
@@ -369,67 +425,123 @@ const AISettings: React.FC = () => {
       </Paragraph>
 
       <Card>
-        <Form form={form} layout="vertical" initialValues={{
-          provider: 'claude',
-          model: 'claude-3-sonnet-20240229',
-        }}>
-          <Form.Item
-            name="provider"
-            label="AI 提供商"
-            rules={[{ required: true, message: '请选择 AI 提供商' }]}
-          >
-            <Select
-              options={[
-                { value: 'claude', label: 'Claude (Anthropic)' },
-                { value: 'openai', label: 'OpenAI (ChatGPT)' },
-                { value: 'custom', label: '自定义 API' },
-              ]}
-            />
-          </Form.Item>
-
-          <Form.Item
-            name="apiKey"
-            label="API Key"
-            rules={[{ required: true, message: '请输入 API Key' }]}
-          >
-            <Input.Password placeholder="输入你的 API Key" />
-          </Form.Item>
-
-          <Form.Item
-            name="model"
-            label="模型"
-            rules={[{ required: true, message: '请选择模型' }]}
-          >
-            <Select
-              options={
-                provider === 'claude'
-                  ? [
-                      { value: 'claude-3-opus-20240229', label: 'Claude 3 Opus' },
-                      { value: 'claude-3-sonnet-20240229', label: 'Claude 3 Sonnet' },
-                      { value: 'claude-3-haiku-20240307', label: 'Claude 3 Haiku' },
-                    ]
-                  : provider === 'openai'
-                  ? [
-                      { value: 'gpt-4', label: 'GPT-4' },
-                      { value: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
-                      { value: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo' },
-                    ]
-                  : [
-                      { value: 'custom', label: '自定义模型' },
-                    ]
-              }
-            />
-          </Form.Item>
-
-          {provider === 'custom' && (
+        <Form form={form} layout="vertical">
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1.2fr', gap: 16 }}>
             <Form.Item
-              name="endpoint"
-              label="API 端点"
-              rules={[{ required: true, message: '请输入 API 端点' }]}
+              name="activeModelId"
+              label="默认模型"
+              rules={[{ required: true, message: '请选择默认模型' }]}
             >
-              <Input placeholder="https://api.example.com/v1/chat/completions" />
+              <Select placeholder="选择默认模型" options={modelOptions} />
             </Form.Item>
-          )}
+            <Form.Item name="multiModelMode" label="调用模式" initialValue="single">
+              <Select
+                options={[
+                  { value: 'single', label: '单模型调用' },
+                  { value: 'parallel', label: '多模型并行输出' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="parallelModelIds" label="并行模型">
+              <Select
+                mode="multiple"
+                placeholder="选择参与并行输出的模型"
+                options={modelOptions}
+              />
+            </Form.Item>
+          </div>
+
+          <Form.List name="models">
+            {(fields, { add, remove }) => (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <Text strong>模型配置</Text>
+                  <Button
+                    icon={<PlusOutlined />}
+                    onClick={() => add(makeDefaultModel())}
+                  >
+                    添加模型
+                  </Button>
+                </div>
+
+                {fields.map((field, index) => {
+                  const model = watchedModels?.[field.name];
+                  const provider = model?.provider as AIProvider | undefined;
+                  return (
+                    <Card
+                      key={field.key}
+                      size="small"
+                      style={{ marginBottom: 12, background: '#fbfdff' }}
+                      title={`模型 ${index + 1}`}
+                      extra={
+                        <Space>
+                          <Form.Item name={[field.name, 'enabled']} valuePropName="checked" style={{ margin: 0 }}>
+                            <Checkbox>启用</Checkbox>
+                          </Form.Item>
+                          <Button
+                            danger
+                            type="text"
+                            icon={<DeleteOutlined />}
+                            onClick={() => remove(field.name)}
+                            disabled={fields.length <= 1}
+                          />
+                        </Space>
+                      }
+                    >
+                      <Form.Item name={[field.name, 'id']} hidden>
+                        <Input />
+                      </Form.Item>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 180px 1fr', gap: 12 }}>
+                        <Form.Item
+                          name={[field.name, 'name']}
+                          label="显示名称"
+                          rules={[{ required: true, message: '请输入显示名称' }]}
+                        >
+                          <Input placeholder="例如：DeepSeek R1 / GPT-4o / 本地模型" />
+                        </Form.Item>
+                        <Form.Item
+                          name={[field.name, 'provider']}
+                          label="提供商"
+                          rules={[{ required: true, message: '请选择提供商' }]}
+                        >
+                          <Select
+                            options={[
+                              { value: 'custom', label: '自定义 API' },
+                              { value: 'openai', label: 'OpenAI' },
+                              { value: 'claude', label: 'Claude' },
+                            ]}
+                          />
+                        </Form.Item>
+                        <Form.Item
+                          name={[field.name, 'model']}
+                          label="模型名称"
+                          rules={[{ required: true, message: '请输入模型名称' }]}
+                        >
+                          <Input placeholder="例如：deepseek-chat、gpt-4o、claude-3-5-sonnet-latest" />
+                        </Form.Item>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                        <Form.Item
+                          name={[field.name, 'apiKey']}
+                          label="API Key"
+                          rules={[{ required: true, message: '请输入 API Key' }]}
+                        >
+                          <Input.Password placeholder="输入该模型的 API Key" />
+                        </Form.Item>
+                        <Form.Item
+                          name={[field.name, 'endpoint']}
+                          label={provider === 'claude' ? 'Claude 端点（可选）' : 'API 端点'}
+                          rules={provider === 'custom' ? [{ required: true, message: '请输入 API 端点' }] : []}
+                        >
+                          <Input placeholder={provider === 'claude' ? 'https://api.anthropic.com/v1/messages' : 'https://api.example.com/v1/chat/completions'} />
+                        </Form.Item>
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </Form.List>
 
           <Divider />
 
