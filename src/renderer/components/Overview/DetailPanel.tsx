@@ -469,7 +469,7 @@ const DetailPanel: React.FC = () => {
                         borderRadius: isExpanded ? '8px 8px 0 0' : 8,
                         background: isExpanded ? '#fafafa' : '#fff',
                         cursor: 'pointer',
-                        borderBottom: isExpanded ? 'none' : undefined,
+                        borderBottom: isExpanded ? '1px solid #1890ff' : undefined,
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -480,12 +480,10 @@ const DetailPanel: React.FC = () => {
                         </Space>
                         <DownOutlined style={{ fontSize: 10, color: '#999', transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
                       </div>
-                      {!isExpanded && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, paddingLeft: 19 }}>
-                          <Progress percent={avgProgress} size="small" showInfo={false} style={{ flex: 1, marginBottom: 0 }} strokeColor={avgProgress >= 80 ? '#52c41a' : '#1890ff'} />
-                          <Text style={{ fontSize: 11, minWidth: 32 }}>{avgProgress}%</Text>
-                        </div>
-                      )}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, paddingLeft: 19 }}>
+                        <Progress percent={avgProgress} size="small" showInfo={false} style={{ flex: 1, marginBottom: 0 }} strokeColor={avgProgress >= 80 ? '#52c41a' : '#1890ff'} />
+                        <Text style={{ fontSize: 11, minWidth: 32 }}>{avgProgress}%</Text>
+                      </div>
                     </div>
                     {/* 展开的文档列表 */}
                     <AnimatedExpand open={isExpanded}>
@@ -493,7 +491,7 @@ const DetailPanel: React.FC = () => {
                         border: '1px solid #1890ff',
                         borderTop: 'none',
                         borderRadius: '0 0 8px 8px',
-                        padding: isExpanded ? '8px 10px' : '0 10px',
+                        padding: '8px 10px',
                         background: '#fff',
                       }}>
                         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
@@ -706,7 +704,7 @@ const DetailPanel: React.FC = () => {
                         borderRadius: isExpanded ? '8px 8px 0 0' : 8,
                         background: isExpanded ? '#fafafa' : '#fff',
                         cursor: 'pointer',
-                        borderBottom: isExpanded ? 'none' : undefined,
+                        borderBottom: isExpanded ? `1px solid ${color}` : undefined,
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -721,7 +719,7 @@ const DetailPanel: React.FC = () => {
                         </Space>
                         <DownOutlined style={{ fontSize: 10, color: '#999', transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
                       </div>
-                      {!isExpanded && latestDoc && (
+                      {latestDoc && (
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, paddingLeft: 14 }}>
                           <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: latestDocName, style: { maxWidth: 160 } }}>
                             最新：{latestDocName}
@@ -738,7 +736,7 @@ const DetailPanel: React.FC = () => {
                         border: `1px solid ${color}`,
                         borderTop: 'none',
                         borderRadius: '0 0 8px 8px',
-                        padding: isExpanded ? '8px 10px' : '0 10px',
+                        padding: '8px 10px',
                         background: '#fff',
                       }}>
                         {docsInStage.length > 0 ? docsInStage.map((doc, idx) => {
