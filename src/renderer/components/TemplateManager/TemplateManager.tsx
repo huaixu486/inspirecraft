@@ -992,11 +992,11 @@ ${content.slice(0, 24000)}`;
         open={isModalOpen}
         onOk={handleSubmit}
         onCancel={() => setIsModalOpen(false)}
-        width="min(90vw, 1120px)"
+        width="min(92vw, 1200px)"
         okText="保存模板"
         cancelText="取消"
-        style={{ top: 24 }}
-        styles={{ body: { height: 'calc(100vh - 168px)', overflow: 'hidden' } }}
+        style={{ top: 16, maxHeight: 'calc(100vh - 32px)' }}
+        styles={{ body: { height: 'calc(100vh - 120px)', overflow: 'hidden' } }}
       >
         <Form form={form} layout="vertical" className="template-editor-form">
           <div className="template-editor-grid">
