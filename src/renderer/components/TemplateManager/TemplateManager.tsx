@@ -559,11 +559,9 @@ const TemplateManager: React.FC = () => {
           <List.Item
             actions={[
               <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEditStage(stage)}>编辑</Button>,
-              ...(!stage.isSystem ? [
-                <Popconfirm title="确定删除此阶段？" onConfirm={() => handleDeleteStage(stage.id)}>
-                  <Button type="link" danger size="small" icon={<DeleteOutlined />}>删除</Button>
-                </Popconfirm>,
-              ] : []),
+              <Popconfirm title="确定删除此阶段？" onConfirm={() => handleDeleteStage(stage.id)}>
+                <Button type="link" danger size="small" icon={<DeleteOutlined />}>删除</Button>
+              </Popconfirm>,
             ]}
           >
             <List.Item.Meta
