@@ -77,6 +77,26 @@ const App: React.FC = () => {
     loadProjectDocs();
   }, []);
 
+  // 全局滚动检测：滚动时添加 .scrolling 类，停止后移除
+  useEffect(() => {
+    let scrollTimer: NodeJS.Timeout;
+    const handleScroll = (e: Event) => {
+      const target = e.target as HTMLElement;
+      if (!target?.classList) return;
+      target.classList.add('scrolling');
+      clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(() => {
+        target.classList.remove('scrolling');
+      }, 800);
+    };
+
+    document.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('scroll', handleScroll, true);
+      clearTimeout(scrollTimer);
+    };
+  }, []);
+
   const menuItems = [
     { key: 'overview', icon: <BarChartOutlined />, label: '总览' },
     { key: 'projects', icon: <FolderOutlined />, label: '项目' },

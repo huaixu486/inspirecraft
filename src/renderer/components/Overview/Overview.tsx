@@ -14,7 +14,7 @@ const Overview: React.FC = () => {
   return (
     <div className="overview-shell" style={{ display: 'flex', height: '100%' }}>
       {/* Left main content */}
-      <div className="overview-main" style={{ flex: 1, overflow: 'auto' }}>
+      <div className="overview-main" style={{ flex: 1, overflowX: 'hidden', overflowY: 'auto' }}>
         {/* Top title bar */}
         <div className="overview-header" style={{ marginBottom: 22 }}>
           <div>

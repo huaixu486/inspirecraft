@@ -132,6 +132,8 @@ const ProjectTable: React.FC = () => {
         rowKey="id"
         pagination={false}
         size="middle"
+        tableLayout="fixed"
+        scroll={{ x: '100%' }}
         onRow={(record) => ({
           onClick: () => setCurrentProject(record),
           style: { cursor: 'pointer' },
