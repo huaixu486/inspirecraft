@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, Drawer, message, Popconfirm, DatePicker } from 'antd';
+import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, Collapse, message, Popconfirm, DatePicker } from 'antd';
 import {
   CheckCircleOutlined, ClockCircleOutlined, CloseOutlined,
   FolderOutlined, FileOutlined, ExclamationCircleOutlined,
   PlusOutlined, DeleteOutlined, ReloadOutlined, ExperimentOutlined,
-  RightOutlined,
+  RightOutlined, DownOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useProjectStore } from '../../stores/projectStore';
@@ -36,10 +36,8 @@ const DetailPanel: React.FC = () => {
   const [selectedVersionId, setSelectedVersionId] = useState<string>('');
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [drawerStage, setDrawerStage] = useState<string>('');
-  const [filesDrawerOpen, setFilesDrawerOpen] = useState(false);
-  const [filesDrawerGroup, setFilesDrawerGroup] = useState<{ templateId: string; templateName: string; docs: ProjectDocument[] } | null>(null);
+  const [expandedStage, setExpandedStage] = useState<string | null>(null);
+  const [expandedTemplate, setExpandedTemplate] = useState<string | null>(null);
 
   const isOverdue = (deadline?: string, completedAt?: string) => {
     if (!deadline || completedAt) return false;
@@ -403,44 +401,92 @@ const DetailPanel: React.FC = () => {
             </Button>
           </div>
           {projectDocsList.length > 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {groupedByTemplate().map(group => {
                 const avgProgress = group.docs.length > 0
                   ? Math.round(group.docs.reduce((acc, d) => acc + d.overallProgress, 0) / group.docs.length)
                   : 0;
+                const isExpanded = expandedTemplate === group.templateId;
                 return (
-                  <div
-                    key={group.templateId}
-                    onClick={() => { setFilesDrawerGroup(group); setFilesDrawerOpen(true); }}
-                    style={{
-                      padding: '10px 12px',
-                      border: '1px solid #f0f0f0',
-                      borderRadius: 8,
-                      background: '#fff',
-                      cursor: 'pointer',
-                      transition: 'border-color 0.2s',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.borderColor = '#1890ff')}
-                    onMouseLeave={e => (e.currentTarget.style.borderColor = '#f0f0f0')}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                      <Space size={6}>
-                        <FileOutlined style={{ color: '#1890ff', fontSize: 14 }} />
-                        <Text strong style={{ fontSize: 12 }}>{group.templateName}</Text>
-                        <Tag style={{ margin: 0, fontSize: 10 }}>{group.docs.length} 份</Tag>
-                      </Space>
-                      <RightOutlined style={{ fontSize: 10, color: '#999' }} />
+                  <div key={group.templateId}>
+                    {/* 模板标题行 */}
+                    <div
+                      onClick={() => setExpandedTemplate(isExpanded ? null : group.templateId)}
+                      style={{
+                        padding: '8px 10px',
+                        border: `1px solid ${isExpanded ? '#1890ff' : '#f0f0f0'}`,
+                        borderRadius: isExpanded ? '8px 8px 0 0' : 8,
+                        background: isExpanded ? '#fafafa' : '#fff',
+                        cursor: 'pointer',
+                        borderBottom: isExpanded ? 'none' : undefined,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Space size={6}>
+                          <FileOutlined style={{ color: '#1890ff', fontSize: 13 }} />
+                          <Text strong style={{ fontSize: 12 }}>{group.templateName}</Text>
+                          <Tag style={{ margin: 0, fontSize: 10 }}>{group.docs.length} 份</Tag>
+                        </Space>
+                        <DownOutlined style={{ fontSize: 10, color: '#999', transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+                      </div>
+                      {!isExpanded && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, paddingLeft: 19 }}>
+                          <Progress percent={avgProgress} size="small" showInfo={false} style={{ flex: 1, marginBottom: 0 }} strokeColor={avgProgress >= 80 ? '#52c41a' : '#1890ff'} />
+                          <Text style={{ fontSize: 11, minWidth: 32 }}>{avgProgress}%</Text>
+                        </div>
+                      )}
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <Progress
-                        percent={avgProgress}
-                        size="small"
-                        showInfo={false}
-                        style={{ flex: 1, marginBottom: 0 }}
-                        strokeColor={avgProgress >= 80 ? '#52c41a' : '#1890ff'}
-                      />
-                      <Text style={{ fontSize: 11, minWidth: 32 }}>{avgProgress}%</Text>
-                    </div>
+                    {/* 展开的文档列表 */}
+                    {isExpanded && (
+                      <div style={{
+                        border: '1px solid #1890ff',
+                        borderTop: 'none',
+                        borderRadius: '0 0 8px 8px',
+                        padding: '8px 10px',
+                        background: '#fff',
+                      }}>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                          <Button
+                            type="link" size="small" icon={<PlusOutlined />}
+                            onClick={(e) => { e.stopPropagation(); setSelectedTemplateId(group.templateId); setAddModalOpen(true); }}
+                            style={{ padding: 0, fontSize: 11 }}
+                          >
+                            添加文件
+                          </Button>
+                        </div>
+                        {group.docs.map(doc => {
+                          const version = versions.find(v => v.id === doc.versionId);
+                          return (
+                            <div
+                              key={doc.id}
+                              style={{
+                                padding: '6px 8px',
+                                borderRadius: 6,
+                                marginBottom: 4,
+                                background: '#fafafa',
+                              }}
+                            >
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                                <Text style={{ fontSize: 11 }} ellipsis={{ tooltip: version?.fileName || doc.name, style: { maxWidth: 130 } }}>
+                                  {version?.fileName || doc.name}
+                                </Text>
+                                <Space size={2}>
+                                  <Button type="text" size="small" icon={<ReloadOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(doc, false)} style={{ padding: '0 4px' }} />
+                                  <Button type="text" size="small" icon={<ExperimentOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(doc, true)} style={{ padding: '0 4px' }} />
+                                  <Popconfirm title="确定删除？" onConfirm={() => deleteProjectDoc(doc.id)}>
+                                    <Button type="text" size="small" danger icon={<DeleteOutlined />} style={{ padding: '0 4px' }} />
+                                  </Popconfirm>
+                                </Space>
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <Progress percent={doc.overallProgress} size="small" showInfo={false} style={{ flex: 1, marginBottom: 0 }} />
+                                <Text style={{ fontSize: 10, minWidth: 28 }}>{doc.overallProgress}%</Text>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -452,91 +498,6 @@ const DetailPanel: React.FC = () => {
               </Button>
             </Empty>
           )}
-
-          {/* 文件分组抽屉 */}
-          <Drawer
-            title={
-              <Space>
-                <FileOutlined style={{ color: '#1890ff' }} />
-                {filesDrawerGroup?.templateName || '文档'}
-              </Space>
-            }
-            open={filesDrawerOpen}
-            onClose={() => setFilesDrawerOpen(false)}
-            width={340}
-            extra={
-              <Button
-                type="primary" size="small" icon={<PlusOutlined />}
-                onClick={() => {
-                  if (filesDrawerGroup) {
-                    setSelectedTemplateId(filesDrawerGroup.templateId);
-                    setAddModalOpen(true);
-                  }
-                }}
-              >
-                添加文件
-              </Button>
-            }
-          >
-            {filesDrawerGroup && filesDrawerGroup.docs.length > 0 ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {filesDrawerGroup.docs.map(doc => {
-                  const version = versions.find(v => v.id === doc.versionId);
-                  return (
-                    <div
-                      key={doc.id}
-                      style={{
-                        padding: '10px 12px',
-                        border: '1px solid #f0f0f0',
-                        borderRadius: 8,
-                        background: '#fff',
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                        <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: version?.fileName || doc.name, style: { maxWidth: 160 } }}>
-                          {version?.fileName || doc.name}
-                        </Text>
-                        <Space size={4}>
-                          <Button
-                            type="text" size="small" icon={<ReloadOutlined />}
-                            loading={isAnalyzing}
-                            onClick={() => handleAnalyze(doc, false)}
-                            title="基础分析"
-                          />
-                          <Button
-                            type="text" size="small" icon={<ExperimentOutlined />}
-                            loading={isAnalyzing}
-                            onClick={() => handleAnalyze(doc, true)}
-                            title="AI 深度分析"
-                          />
-                          <Popconfirm title="确定删除？" onConfirm={() => deleteProjectDoc(doc.id)}>
-                            <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-                          </Popconfirm>
-                        </Space>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <Progress
-                          percent={doc.overallProgress}
-                          size="small"
-                          showInfo={false}
-                          style={{ flex: 1, marginBottom: 0 }}
-                          strokeColor={doc.overallProgress >= 80 ? '#52c41a' : '#1890ff'}
-                        />
-                        <Text style={{ fontSize: 11, minWidth: 32 }}>{doc.overallProgress}%</Text>
-                      </div>
-                      {doc.analyzedAt && (
-                        <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 4 }}>
-                          已分析 · {formatDate(doc.analyzedAt)}
-                        </Text>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <Empty description="该分类暂无文档" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-            )}
-          </Drawer>
 
           {/* 关联文件弹窗 */}
           <Modal
@@ -674,57 +635,89 @@ const DetailPanel: React.FC = () => {
             <Text strong style={{ fontSize: 13 }}>阶段进度</Text>
           </div>
           {planSegments.length > 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {planSegments.map(segment => {
                 const color = stageMeta[segment.stage]?.color || '#8c8c8c';
                 const isCompleted = Boolean(segment.completedAt);
+                const isExpanded = expandedStage === segment.stage;
                 const latestDocName = segment.sourceDocNames[segment.sourceDocNames.length - 1] || '';
-                const docsInStage = projectDocsList.filter(d =>
-                  segment.sourceDocIds.includes(d.id)
-                );
+                const docsInStage = projectDocsList.filter(d => segment.sourceDocIds.includes(d.id));
                 const latestDoc = docsInStage[docsInStage.length - 1];
 
                 return (
-                  <div
-                    key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}
-                    onClick={() => {
-                      setDrawerStage(segment.stage);
-                      setDrawerOpen(true);
-                    }}
-                    style={{
-                      padding: '10px 12px',
-                      border: '1px solid #f0f0f0',
-                      borderRadius: 8,
-                      background: '#fff',
-                      cursor: 'pointer',
-                      transition: 'border-color 0.2s',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.borderColor = color)}
-                    onMouseLeave={e => (e.currentTarget.style.borderColor = '#f0f0f0')}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                      <Space size={6}>
-                        <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block' }} />
-                        <Text strong style={{ fontSize: 12 }}>{segment.label}</Text>
-                        {isCompleted ? (
-                          <Tag color="green" style={{ margin: 0, fontSize: 10 }}>已完成</Tag>
-                        ) : (
-                          <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>{segment.sourceDocNames.length} 个文件</Tag>
-                        )}
-                      </Space>
-                      <RightOutlined style={{ fontSize: 10, color: '#999' }} />
-                    </div>
-                    {latestDoc ? (
+                  <div key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}>
+                    {/* 阶段标题行 */}
+                    <div
+                      onClick={() => setExpandedStage(isExpanded ? null : segment.stage)}
+                      style={{
+                        padding: '8px 10px',
+                        border: `1px solid ${isExpanded ? color : '#f0f0f0'}`,
+                        borderRadius: isExpanded ? '8px 8px 0 0' : 8,
+                        background: isExpanded ? '#fafafa' : '#fff',
+                        cursor: 'pointer',
+                        borderBottom: isExpanded ? 'none' : undefined,
+                      }}
+                    >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: latestDocName, style: { maxWidth: 160 } }}>
-                          最新：{latestDocName}
-                        </Text>
-                        <Text style={{ fontSize: 11, color: latestDoc.overallProgress >= 80 ? '#52c41a' : '#1890ff', fontWeight: 600 }}>
-                          {latestDoc.overallProgress}%
-                        </Text>
+                        <Space size={6}>
+                          <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block' }} />
+                          <Text strong style={{ fontSize: 12 }}>{segment.label}</Text>
+                          {isCompleted ? (
+                            <Tag color="green" style={{ margin: 0, fontSize: 10 }}>已完成</Tag>
+                          ) : (
+                            <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>{segment.sourceDocNames.length} 个文件</Tag>
+                          )}
+                        </Space>
+                        <DownOutlined style={{ fontSize: 10, color: '#999', transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
                       </div>
-                    ) : (
-                      <Text type="secondary" style={{ fontSize: 11 }}>暂无文档</Text>
+                      {!isExpanded && latestDoc && (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, paddingLeft: 14 }}>
+                          <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: latestDocName, style: { maxWidth: 160 } }}>
+                            最新：{latestDocName}
+                          </Text>
+                          <Text style={{ fontSize: 11, color: latestDoc.overallProgress >= 80 ? '#52c41a' : '#1890ff', fontWeight: 600 }}>
+                            {latestDoc.overallProgress}%
+                          </Text>
+                        </div>
+                      )}
+                    </div>
+                    {/* 展开的文档列表 */}
+                    {isExpanded && (
+                      <div style={{
+                        border: `1px solid ${color}`,
+                        borderTop: 'none',
+                        borderRadius: '0 0 8px 8px',
+                        padding: '8px 10px',
+                        background: '#fff',
+                      }}>
+                        {docsInStage.length > 0 ? docsInStage.map((doc, idx) => {
+                          const isLatest = idx === docsInStage.length - 1;
+                          return (
+                            <div
+                              key={doc.id}
+                              onClick={() => setSelectedDocId(doc.id === selectedDocId ? null : doc.id)}
+                              style={{
+                                padding: '6px 8px',
+                                borderRadius: 6,
+                                marginBottom: idx < docsInStage.length - 1 ? 4 : 0,
+                                background: selectedDocId === doc.id ? '#e6f7ff' : '#fafafa',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
+                                <Space size={4}>
+                                  <Text style={{ fontSize: 11 }} ellipsis={{ tooltip: doc.name, style: { maxWidth: 130 } }}>{doc.name}</Text>
+                                  {isLatest && <Tag color="blue" style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }}>最新</Tag>}
+                                </Space>
+                                <Text style={{ fontSize: 10, fontWeight: 600 }}>{doc.overallProgress}%</Text>
+                              </div>
+                              <Progress percent={doc.overallProgress} size="small" showInfo={false} style={{ marginBottom: 0 }} />
+                            </div>
+                          );
+                        }) : (
+                          <Text type="secondary" style={{ fontSize: 11, display: 'block', textAlign: 'center', padding: 8 }}>暂无文档</Text>
+                        )}
+                      </div>
                     )}
                   </div>
                 );
@@ -741,123 +734,6 @@ const DetailPanel: React.FC = () => {
               </Button>
             </div>
           )}
-
-          {/* 阶段文档抽屉 */}
-          <Drawer
-            title={
-              <Space>
-                <span style={{ width: 8, height: 8, borderRadius: 2, background: stageMeta[drawerStage]?.color || '#8c8c8c', display: 'inline-block' }} />
-                {stageMeta[drawerStage]?.label || drawerStage}
-              </Space>
-            }
-            open={drawerOpen}
-            onClose={() => { setDrawerOpen(false); setSelectedDocId(null); }}
-            width={340}
-          >
-            {(() => {
-              const segment = planSegments.find(s => s.stage === drawerStage);
-              if (!segment) return <Empty description="暂无数据" />;
-              const docsInStage = projectDocsList.filter(d => segment.sourceDocIds.includes(d.id));
-
-              // 如果选中了文档，显示详情
-              if (selectedDoc && segment.sourceDocIds.includes(selectedDoc.id)) {
-                return (
-                  <div>
-                    <Button size="small" icon={<CloseOutlined />} onClick={() => setSelectedDocId(null)} style={{ marginBottom: 12 }}>
-                      返回列表
-                    </Button>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, padding: '10px 12px', background: '#f6f8fa', borderRadius: 8 }}>
-                      <Progress
-                        type="circle"
-                        percent={selectedDoc.overallProgress}
-                        size={56}
-                        strokeColor={selectedDoc.overallProgress >= 80 ? '#52c41a' : '#1890ff'}
-                      />
-                      <div>
-                        <Text style={{ fontSize: 12 }}>整体完成度</Text>
-                        <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
-                          <Text style={{ fontSize: 11, color: '#52c41a' }}>完成 {selectedDoc.sections.filter(s => s.status === 'completed').length}</Text>
-                          <Text style={{ fontSize: 11, color: '#faad14' }}>部分 {selectedDoc.sections.filter(s => s.status === 'partial').length}</Text>
-                          <Text style={{ fontSize: 11, color: '#d9d9d9' }}>缺失 {selectedDoc.sections.filter(s => s.status === 'missing').length}</Text>
-                        </div>
-                      </div>
-                    </div>
-                    <Space size={4} style={{ marginBottom: 12 }}>
-                      <Button size="small" icon={<ReloadOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(selectedDoc, false)}>基础分析</Button>
-                      <Button size="small" type="primary" icon={<ExperimentOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(selectedDoc, true)}>AI 分析</Button>
-                    </Space>
-                    <List
-                      size="small"
-                      dataSource={selectedDoc.sections}
-                      renderItem={section => (
-                        <List.Item style={{ padding: '6px 0', border: 'none' }}>
-                          <div style={{ width: '100%' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              {statusIcon(section.status)}
-                              <Text strong style={{ fontSize: 11, flex: 1 }}>{section.title}</Text>
-                              <Text type="secondary" style={{ fontSize: 10 }}>{section.wordCount} 字</Text>
-                            </div>
-                            {section.aiComment && (
-                              <div style={{ marginLeft: 18, marginTop: 3, padding: '3px 6px', background: '#f6f8fa', borderRadius: 4 }}>
-                                <Text type="secondary" style={{ fontSize: 10 }}>
-                                  <ExperimentOutlined style={{ fontSize: 9, marginRight: 3 }} />
-                                  {section.aiComment}
-                                </Text>
-                              </div>
-                            )}
-                          </div>
-                        </List.Item>
-                      )}
-                    />
-                  </div>
-                );
-              }
-
-              // 默认显示文档列表
-              return (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {docsInStage.map((doc, idx) => {
-                    const isLatest = idx === docsInStage.length - 1;
-                    return (
-                      <div
-                        key={doc.id}
-                        onClick={() => setSelectedDocId(doc.id)}
-                        style={{
-                          padding: '10px 12px',
-                          border: '1px solid #f0f0f0',
-                          borderRadius: 8,
-                          background: '#fff',
-                          cursor: 'pointer',
-                          transition: 'border-color 0.2s',
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.borderColor = '#1890ff')}
-                        onMouseLeave={e => (e.currentTarget.style.borderColor = '#f0f0f0')}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                          <Space size={4}>
-                            <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: doc.name, style: { maxWidth: 150 } }}>{doc.name}</Text>
-                            {isLatest && <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>最新</Tag>}
-                          </Space>
-                          <Text style={{ fontSize: 11, fontWeight: 600 }}>{doc.overallProgress}%</Text>
-                        </div>
-                        <Progress
-                          percent={doc.overallProgress}
-                          size="small"
-                          strokeColor={doc.overallProgress >= 80 ? '#52c41a' : '#1890ff'}
-                          showInfo={false}
-                        />
-                        {doc.analyzedAt && (
-                          <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 4 }}>
-                            {formatDate(doc.analyzedAt)}
-                          </Text>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })()}
-          </Drawer>
         </div>
       ),
     },
