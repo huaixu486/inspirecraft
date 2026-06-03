@@ -29,6 +29,7 @@ const AISettings: React.FC = () => {
   const [profileForm] = Form.useForm();
   const [isLoading, setIsLoading] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const [config, setConfig] = useState<AIConfig | null>(null);
   const { projects, addProject } = useProjectStore();
   const {
@@ -325,6 +326,29 @@ const AISettings: React.FC = () => {
     }
   };
 
+  const handleTestModel = async (modelIndex: number) => {
+    try {
+      setTestingModelId(`model-${modelIndex}`);
+      const formValues = await form.validateFields();
+      const values = normalizeAIConfig(formValues);
+      const model = values.models[modelIndex];
+      if (!model) {
+        message.error('模型配置不存在');
+        return;
+      }
+      const result = await window.electronAPI.callAI({
+        prompt: '你好，请回复"连接成功"',
+        modelId: model.id,
+        config: { ...values, models: [model], activeModelId: model.id },
+      });
+      message.success(`[${model.name || model.model}] 测试成功: ${result.substring(0, 50)}...`);
+    } catch (error: any) {
+      message.error(`测试失败: ${error.message}`);
+    } finally {
+      setTestingModelId(null);
+    }
+  };
+
   const modelOptions = (watchedModels || []).map(model => ({
     value: model.id,
     label: `${model.name || model.model || '未命名模型'}${model.enabled === false ? '（已停用）' : ''}`,
@@ -477,6 +501,14 @@ const AISettings: React.FC = () => {
                       title={`模型 ${index + 1}`}
                       extra={
                         <Space>
+                          <Button
+                            size="small"
+                            icon={<ApiOutlined />}
+                            loading={testingModelId === `model-${index}`}
+                            onClick={() => handleTestModel(index)}
+                          >
+                            测试
+                          </Button>
                           <Form.Item name={[field.name, 'enabled']} valuePropName="checked" style={{ margin: 0 }}>
                             <Checkbox>启用</Checkbox>
                           </Form.Item>
