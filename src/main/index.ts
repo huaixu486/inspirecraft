@@ -413,9 +413,21 @@ function compactResponse(value: any, maxLength = 600): string {
 function getTextFromContent(content: any): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
+    // 优先提取 text 类型的块
+    const textParts = content
+      .map(item => {
+        if (typeof item === 'string') return item;
+        if (item?.type === 'text') return item.text || '';
+        return '';
+      })
+      .filter(Boolean);
+    if (textParts.length > 0) return textParts.join('\n');
+
+    // 如果没有 text 块，尝试提取所有非 thinking 块
     return content
       .map(item => {
         if (typeof item === 'string') return item;
+        if (item?.type === 'thinking') return '';
         return item?.text || item?.content || item?.value || '';
       })
       .filter(Boolean)
