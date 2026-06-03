@@ -1,9 +1,10 @@
 /* Global styles for ProjectHub */
 
-/* 滚动条默认完全隐藏，滚动时通过 .scrolling 类显示 */
+/* 滚动条预留空间，thumb默认透明，滚动时渐显 */
 *::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  width: 6px;
+  height: 6px;
+  background: transparent;
 }
 
 *::-webkit-scrollbar-track {
@@ -11,38 +12,33 @@
 }
 
 *::-webkit-scrollbar-thumb {
-  background: transparent;
+  background: rgba(0, 0, 0, 0);
   border-radius: 999px;
+  transition: background 0.35s ease-in-out;
 }
 
 *::-webkit-scrollbar-corner {
   background: transparent;
 }
 
-/* 滚动中显示胶囊样式滚动条 */
-.scrolling::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
+/* 滚动中渐显胶囊滚动条 */
 .scrolling::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.25);
-  border-radius: 999px;
-  transition: background 0.3s;
+  background: rgba(0, 0, 0, 0.2);
 }
 
 .scrolling::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.4);
+  background: rgba(0, 0, 0, 0.35);
 }
 
 /* Firefox 滚动条 */
 * {
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  scrollbar-gutter: stable;
 }
 
 .scrolling {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(0, 0, 0, 0.25) transparent;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
 }
 
 /* 禁止横向滚动 */
