@@ -1,44 +1,52 @@
 /* Global styles for ProjectHub */
 
-/* 滚动条预留空间，thumb默认透明，滚动时渐显 */
+/* 滚动条：预留空间 + 胶囊样式 + 渐显渐隐动画 */
 *::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-  background: transparent;
+  width: 8px !important;
+  height: 8px !important;
 }
 
 *::-webkit-scrollbar-track {
-  background: transparent;
+  background: transparent !important;
 }
 
 *::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0);
-  border-radius: 999px;
-  transition: background 0.35s ease-in-out;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 999px !important;
+  width: 6px !important;
+  margin: 1px !important;
+  transition: background 0.4s ease-in-out !important;
+}
+
+*::-webkit-scrollbar-thumb:window-inactive {
+  background: transparent !important;
 }
 
 *::-webkit-scrollbar-corner {
-  background: transparent;
+  background: transparent !important;
 }
 
-/* 滚动中渐显胶囊滚动条 */
+/* 滚动中：胶囊样式渐显 */
 .scrolling::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.25) !important;
 }
 
 .scrolling::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(0, 0, 0, 0.4) !important;
 }
 
 /* Firefox 滚动条 */
 * {
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-  scrollbar-gutter: stable;
+  scrollbar-width: thin !important;
+  scrollbar-color: transparent transparent !important;
+  scrollbar-gutter: stable !important;
 }
 
 .scrolling {
-  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+  scrollbar-color: rgba(0, 0, 0, 0.25) transparent !important;
 }
 
 /* 禁止横向滚动 */
