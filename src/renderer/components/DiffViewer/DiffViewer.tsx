@@ -78,8 +78,8 @@ const DiffViewer: React.FC = () => {
                         <Tag color={getVersionColor(version.fileType)}>
                           {version.fileType?.toUpperCase() || '未知'}
                         </Tag>
-                        {version.description && (
-                          <Text type="secondary" style={{ fontSize: 12 }}>{version.description}</Text>
+                        {version.summary && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>{version.summary}</Text>
                         )}
                       </div>
                     </div>
