@@ -2,23 +2,28 @@
 
 /* 滚动条：预留空间 + 胶囊样式 + 渐显渐隐动画 */
 *::-webkit-scrollbar {
-  width: 8px !important;
-  height: 8px !important;
+  width: 10px !important;
+  height: 10px !important;
+  background: transparent !important;
 }
 
 *::-webkit-scrollbar-track {
   background: transparent !important;
+  background-color: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
 }
 
 *::-webkit-scrollbar-thumb {
   -webkit-appearance: none !important;
   appearance: none !important;
   background: transparent !important;
-  border: none !important;
-  border-radius: 999px !important;
-  width: 6px !important;
-  margin: 1px !important;
-  transition: background 0.4s ease-in-out !important;
+  background-color: transparent !important;
+  background-clip: content-box !important;
+  border: 3px solid transparent !important;
+  border-radius: 9999px !important;
+  box-shadow: none !important;
+  min-height: 36px !important;
 }
 
 *::-webkit-scrollbar-thumb:window-inactive {
@@ -29,24 +34,101 @@
   background: transparent !important;
 }
 
+*::-webkit-scrollbar-track-piece,
+*::-webkit-resizer {
+  background: transparent !important;
+  border: 0 !important;
+}
+
 /* 滚动中：胶囊样式渐显 */
 .scrolling::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.25) !important;
+  background: transparent !important;
+  background-color: transparent !important;
 }
 
 .scrolling::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.4) !important;
+  background: transparent !important;
+  background-color: transparent !important;
 }
 
 /* Firefox 滚动条 */
 * {
-  scrollbar-width: thin !important;
-  scrollbar-color: transparent transparent !important;
-  scrollbar-gutter: stable !important;
+  scrollbar-width: auto !important;
+  scrollbar-color: auto !important;
 }
 
 .scrolling {
-  scrollbar-color: rgba(0, 0, 0, 0.25) transparent !important;
+  scrollbar-color: auto !important;
+}
+
+*::-webkit-scrollbar-button {
+  display: none !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  background: transparent !important;
+  border: 0 !important;
+}
+
+*::-webkit-scrollbar-button:single-button,
+*::-webkit-scrollbar-button:start,
+*::-webkit-scrollbar-button:end,
+*::-webkit-scrollbar-button:increment,
+*::-webkit-scrollbar-button:decrement,
+*::-webkit-scrollbar-button:vertical,
+*::-webkit-scrollbar-button:horizontal,
+*::-webkit-scrollbar-button:vertical:start:decrement,
+*::-webkit-scrollbar-button:vertical:end:increment,
+*::-webkit-scrollbar-button:horizontal:start:decrement,
+*::-webkit-scrollbar-button:horizontal:end:increment {
+  display: none !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  background: transparent !important;
+  border: 0 !important;
+}
+
+.scrolling::-webkit-scrollbar {
+  width: 10px !important;
+  height: 10px !important;
+}
+
+.scrolling::-webkit-scrollbar-track {
+  background: transparent !important;
+  background-color: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+.scrolling::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.52) !important;
+  background-color: rgba(100, 116, 139, 0.52) !important;
+  background-clip: content-box !important;
+  border: 3px solid transparent !important;
+  border-radius: 9999px !important;
+  box-shadow: none !important;
+  min-height: 36px !important;
+}
+
+.scrolling::-webkit-scrollbar-thumb:hover {
+  background: rgba(24, 144, 255, 0.5) !important;
+  background-color: rgba(24, 144, 255, 0.5) !important;
+  background-clip: content-box !important;
+  border: 3px solid transparent !important;
+  border-radius: 9999px !important;
+  box-shadow: none !important;
+}
+
+.scrolling {
+  scrollbar-width: auto !important;
+  scrollbar-color: auto !important;
 }
 
 /* 禁止横向滚动 */
@@ -119,6 +201,8 @@ body.template-editor-modal-open {
   background:
     linear-gradient(135deg, rgba(248, 251, 255, 0.98), rgba(238, 246, 253, 0.94)),
     #eef5fb;
+  width: 100vw;
+  min-width: 0;
 }
 
 .app-sidebar {
@@ -154,6 +238,16 @@ body.template-editor-modal-open {
   background:
     linear-gradient(90deg, rgba(250, 253, 255, 0.9), rgba(244, 249, 254, 0.82)),
     transparent;
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+}
+
+.app-content {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  scrollbar-gutter: stable;
 }
 
 .app-topbar {
@@ -167,6 +261,7 @@ body.template-editor-modal-open {
 
 .overview-main {
   min-width: 0;
+  scrollbar-gutter: stable;
 }
 
 .overview-header {
@@ -176,8 +271,8 @@ body.template-editor-modal-open {
 }
 
 .overview-detail-rail {
-  box-shadow: -18px 0 46px rgba(15, 23, 42, 0.06);
-  backdrop-filter: blur(14px);
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .dashboard-card.ant-card {
@@ -296,9 +391,12 @@ body.template-editor-modal-open {
   margin: 16px 16px 16px 12px;
   height: calc(100% - 32px) !important;
   background: rgba(255, 255, 255, 0.96);
-  border: 1px solid rgba(226, 232, 240, 0.86);
+  border: 1px solid rgba(226, 232, 240, 0.72);
   border-radius: 14px;
-  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.075);
+  box-shadow:
+    0 8px 22px rgba(15, 23, 42, 0.055),
+    0 1px 3px rgba(15, 23, 42, 0.035);
+  backdrop-filter: none;
 }
 
 .detail-panel .ant-tabs-nav {
@@ -317,8 +415,11 @@ body.template-editor-modal-open {
 .template-manager-page {
   min-height: 100%;
   box-sizing: border-box;
-  padding: 22px 24px;
-  background: rgba(248, 251, 255, 0.62);
+  padding: 0;
+  background: transparent;
+  width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .template-section {
@@ -327,6 +428,9 @@ body.template-editor-modal-open {
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.9);
   box-shadow: 0 12px 34px rgba(15, 23, 42, 0.045);
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .template-section + .template-page-divider + .template-section {
@@ -347,6 +451,25 @@ body.template-editor-modal-open {
   background: rgba(255, 255, 255, 0.94);
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
   overflow: hidden;
+}
+
+.template-card-list,
+.template-card-list .ant-spin-nested-loading,
+.template-card-list .ant-spin-container,
+.template-card-list .ant-row,
+.stage-list,
+.stage-list .ant-spin-nested-loading,
+.stage-list .ant-spin-container,
+.stage-list .ant-list-items {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.template-card-list .ant-list-item,
+.stage-list .ant-list-item {
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .template-card .ant-card-actions {
@@ -683,6 +806,7 @@ body.template-editor-modal-open {
   overflow-x: hidden;
   padding: 2px 8px 8px 0;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .template-node-card {
@@ -927,6 +1051,7 @@ body.template-editor-modal-open {
   overflow-x: hidden;
   padding-right: 4px;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .template-node-preview-row {
@@ -1083,7 +1208,55 @@ body.template-editor-modal-open {
 }
 
 .detail-panel-tabs .ant-tabs-tabpane {
-  padding-right: 3px;
+  padding-right: 10px;
+  scrollbar-width: auto !important;
+  scrollbar-color: auto !important;
+  scrollbar-gutter: stable;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar {
+  width: 10px !important;
+  height: 10px !important;
+  background: transparent !important;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar-track {
+  background: transparent !important;
+  background-color: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar-thumb {
+  background: transparent !important;
+  background-color: transparent !important;
+  background-clip: content-box !important;
+  border: 3px solid transparent !important;
+  border-radius: 9999px !important;
+  box-shadow: none !important;
+  min-height: 36px !important;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane.scrolling {
+  scrollbar-color: auto !important;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane.scrolling::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.52) !important;
+  background-color: rgba(100, 116, 139, 0.52) !important;
+  background-clip: content-box !important;
+  border: 3px solid transparent !important;
+  border-radius: 9999px !important;
+  box-shadow: none !important;
+}
+
+.detail-panel-tabs .ant-tabs-tabpane.scrolling::-webkit-scrollbar-thumb:hover {
+  background: rgba(24, 144, 255, 0.5) !important;
+  background-color: rgba(24, 144, 255, 0.5) !important;
+  background-clip: content-box !important;
+  border: 3px solid transparent !important;
+  border-radius: 9999px !important;
+  box-shadow: none !important;
 }
 
 /* List item styles */

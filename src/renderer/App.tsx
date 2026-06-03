@@ -300,6 +300,7 @@ const App: React.FC = () => {
           </div>
         </div>
         <Content
+          className="app-content"
           style={{
             margin: 0,
             padding: '20px',

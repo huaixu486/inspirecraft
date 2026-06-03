@@ -566,11 +566,7 @@ const DetailPanel: React.FC = () => {
               })}
             </div>
           ) : (
-            <Empty description="暂未关联文档" image={Empty.PRESENTED_IMAGE_SIMPLE}>
-              <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
-                关联文件
-              </Button>
-            </Empty>
+            <Empty description="暂未关联文档" image={Empty.PRESENTED_IMAGE_SIMPLE} />
           )}
 
           {/* 关联文件弹窗 */}

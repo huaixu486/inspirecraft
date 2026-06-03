@@ -358,19 +358,27 @@ function analyzeBasic(content: string, template: WritingTemplate): SectionAnalys
 // HTTP 请求函数
 function makeRequest(url: string, options: any, body?: string): Promise<any> {
   return new Promise((resolve, reject) => {
+    console.log(`[AI] Request: ${options?.method || 'GET'} ${url}`);
     const request = net.request({
       url,
       method: options?.method || 'GET',
     });
 
     Object.entries(options?.headers || {}).forEach(([key, value]) => {
-      request.setHeader(key, String(value));
+      if (key !== 'Authorization') {
+        request.setHeader(key, String(value));
+      } else {
+        // 只显示 apiKey 前8位
+        const masked = String(value).replace(/Bearer (.*)/, (_, k) => `Bearer ${k.substring(0, 8)}...`);
+        request.setHeader(key, masked);
+      }
     });
 
     request.on('response', (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
+        console.log(`[AI] Response: ${res.statusCode} ${data.substring(0, 200)}`);
         let parsed: any = data;
         try {
           parsed = JSON.parse(data);
@@ -386,10 +394,62 @@ function makeRequest(url: string, options: any, body?: string): Promise<any> {
       });
     });
 
-    request.on('error', reject);
+    request.on('error', (err) => {
+      console.error(`[AI] Request error:`, err);
+      reject(err);
+    });
     if (body) request.write(body);
     request.end();
   });
+}
+
+function compactResponse(value: any, maxLength = 600): string {
+  const raw = typeof value === 'string' ? value : JSON.stringify(value);
+  return (raw || '')
+    .replace(/\s+/g, ' ')
+    .slice(0, maxLength);
+}
+
+function getTextFromContent(content: any): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map(item => {
+        if (typeof item === 'string') return item;
+        return item?.text || item?.content || item?.value || '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  return content?.text || content?.content || '';
+}
+
+function extractAIText(result: any): string {
+  if (!result) return '';
+  if (typeof result === 'string') return result;
+  if (typeof result.output_text === 'string') return result.output_text;
+  if (typeof result.text === 'string') return result.text;
+  if (typeof result.content === 'string') return result.content;
+  if (Array.isArray(result.content)) return getTextFromContent(result.content);
+
+  const firstChoice = result.choices?.[0];
+  if (firstChoice) {
+    return getTextFromContent(firstChoice.message?.content)
+      || getTextFromContent(firstChoice.delta?.content)
+      || firstChoice.text
+      || '';
+  }
+
+  if (Array.isArray(result.output)) {
+    return result.output
+      .map((item: any) => getTextFromContent(item.content) || item.text || '')
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  if (result.data) return extractAIText(result.data);
+  if (result.result) return extractAIText(result.result);
+  return '';
 }
 
 function normalizeOpenAIEndpoint(endpoint?: string): string {
@@ -402,9 +462,20 @@ function normalizeOpenAIEndpoint(endpoint?: string): string {
   return normalized;
 }
 
+function normalizeClaudeEndpoint(endpoint?: string): string {
+  const fallback = 'https://api.anthropic.com/v1/messages';
+  const raw = (endpoint || fallback).trim();
+  if (!raw) return fallback;
+  const normalized = raw.replace(/\/+$/, '');
+  if (/\/v\d+\/messages$/i.test(normalized) || /\/messages$/i.test(normalized)) return normalized;
+  if (/\/v\d+$/i.test(normalized)) return `${normalized}/messages`;
+  if (/\/anthropic$/i.test(normalized)) return `${normalized}/v1/messages`;
+  return normalized;
+}
+
 // 调用 Claude API
 async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<string> {
-  const url = config.endpoint || 'https://api.anthropic.com/v1/messages';
+  const url = normalizeClaudeEndpoint(config.endpoint);
   const body = JSON.stringify({
     model: config.model || 'claude-3-sonnet-20240229',
     max_tokens: 4096,
@@ -421,15 +492,15 @@ async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<str
   };
 
   const result = await makeRequest(url, options, body);
-  if (result.content && result.content[0]) {
-    return result.content[0].text;
-  }
-  throw new Error(result.error?.message || 'Claude API 调用失败');
+  const text = extractAIText(result);
+  if (text) return text;
+  throw new Error(result.error?.message || result.message || `Claude API 调用失败：响应中没有可读取文本（${url}）。响应：${compactResponse(result)}`);
 }
 
 // 调用 OpenAI API
 async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<string> {
   const url = normalizeOpenAIEndpoint(config.endpoint);
+  console.log(`[AI] OpenAI call: url=${url}, model=${config.model || 'gpt-3.5-turbo'}, endpoint=${config.endpoint}`);
   const body = JSON.stringify({
     model: config.model || 'gpt-3.5-turbo',
     messages: [{ role: 'user', content: prompt }],
@@ -445,14 +516,17 @@ async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<str
   };
 
   const result = await makeRequest(url, options, body);
-  if (result.choices && result.choices[0]) {
-    return result.choices[0].message?.content || result.choices[0].text || '';
-  }
-  throw new Error(result.error?.message || result.message || `OpenAI API 调用失败：响应中没有 choices 字段（${url}）`);
+  console.log(`[AI] OpenAI result:`, JSON.stringify(result).substring(0, 500));
+  const text = extractAIText(result);
+  if (text) return text;
+  throw new Error(result.error?.message || result.message || `OpenAI API 调用失败：响应中没有可读取文本（${url}）。响应：${compactResponse(result)}`);
 }
 
 async function callAIModel(config: AIModelConfig, prompt: string): Promise<string> {
   if (config.provider === 'claude') return callClaudeAPI(config, prompt);
+  if (config.provider === 'custom' && /\/anthropic(?:\/|$)/i.test(config.endpoint || '')) {
+    return callClaudeAPI(config, prompt);
+  }
   if (config.provider === 'openai' || config.provider === 'custom') return callOpenAIAPI(config, prompt);
   throw new Error('不支持的 AI 提供商');
 }

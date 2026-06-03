@@ -40,9 +40,9 @@ const Overview: React.FC = () => {
       {/* Right detail panel */}
       <div className="overview-detail-rail" style={{
         width: currentProject ? 360 : 0,
-        borderLeft: currentProject ? '1px solid rgba(226, 232, 240, 0.82)' : 'none',
+        borderLeft: 'none',
         overflow: 'hidden',
-        background: currentProject ? 'rgba(255, 255, 255, 0.72)' : 'transparent',
+        background: 'transparent',
         transition: 'width 0.2s',
         height: '100%',
         display: 'flex',
