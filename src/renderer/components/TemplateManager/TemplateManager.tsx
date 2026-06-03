@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Card,
   Button,
@@ -18,6 +18,8 @@ import {
   AutoComplete,
   InputNumber,
   Switch,
+  Dropdown,
+  Spin,
 } from 'antd';
 import {
   PlusOutlined,
@@ -28,6 +30,9 @@ import {
   ImportOutlined,
   UpOutlined,
   DownOutlined,
+  CaretRightOutlined,
+  CaretDownOutlined,
+  MinusOutlined,
 } from '@ant-design/icons';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -75,7 +80,10 @@ const getImportedBaseName = (filePath: string, fileName?: string) =>
   (fileName || filePath.split(/[/\\]/).pop() || '').replace(/\.[^.]+$/, '');
 
 const inferOutputFileType = (filePath: string): TemplateOutputFileType => {
-  const ext = filePath.split('.').pop()?.toLowerCase() as TemplateOutputFileType | undefined;
+  const rawExt = filePath.split('.').pop()?.toLowerCase();
+  if (rawExt === 'ppt') return 'pptx';
+  if (rawExt === 'xls') return 'xlsx';
+  const ext = rawExt as TemplateOutputFileType | undefined;
   return ext && supportedTemplateFileTypes.includes(ext) ? ext : 'docx';
 };
 
@@ -459,6 +467,24 @@ function flattenTemplateNodeRows(nodes: TemplateNode[], depth = 0): Array<{ node
   ]);
 }
 
+function flattenVisibleTemplateNodeRows(nodes: TemplateNode[], collapsedIds: Set<string>, depth = 0): Array<{ node: TemplateNode; depth: number }> {
+  return nodes.flatMap(node => [
+    { node, depth },
+    ...(node.children?.length && !collapsedIds.has(node.id) ? flattenVisibleTemplateNodeRows(node.children, collapsedIds, depth + 1) : []),
+  ]);
+}
+
+function findTemplateNodeAncestorIds(nodes: TemplateNode[], targetId: string, trail: string[] = []): string[] | null {
+  for (const node of nodes) {
+    if (node.id === targetId) return trail;
+    if (node.children?.length) {
+      const found = findTemplateNodeAncestorIds(node.children, targetId, [...trail, node.id]);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function rebuildTemplateTree(nodes: TemplateNode[]): TemplateNode[] {
   const roots: TemplateNode[] = [];
   const stack: TemplateNode[] = [];
@@ -494,7 +520,9 @@ const TemplateManager: React.FC = () => {
   const { projects, versions, updateProject } = useProjectStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isPreparingTemplateEditor, setIsPreparingTemplateEditor] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<WritingTemplate | null>(null);
+  const [deletingTemplate, setDeletingTemplate] = useState<WritingTemplate | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isAiExtracting, setIsAiExtracting] = useState(false);
   const [importedFilePath, setImportedFilePath] = useState<string>('');
@@ -502,6 +530,11 @@ const TemplateManager: React.FC = () => {
   const [fontOptions, setFontOptions] = useState(fallbackFontNames.map(font => ({ value: font })));
   const [form] = Form.useForm();
   const enableFormatRules = Form.useWatch('enableFormatRules', form);
+
+  useEffect(() => {
+    document.body.classList.toggle('template-editor-modal-open', isModalOpen);
+    return () => document.body.classList.remove('template-editor-modal-open');
+  }, [isModalOpen]);
 
   // 阶段管理状态
   const [isStageModalOpen, setIsStageModalOpen] = useState(false);
@@ -511,6 +544,9 @@ const TemplateManager: React.FC = () => {
 
   // 模板结构编辑器状态
   const [templateNodes, setTemplateNodes] = useState<TemplateNode[]>([]);
+  const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(new Set());
+  const [activeNodeId, setActiveNodeId] = useState<string>('');
+  const nodeCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   // 模板结构编辑器操作
   const addTemplateNode = () => {
@@ -544,6 +580,32 @@ const TemplateManager: React.FC = () => {
     setTemplateNodes(moveTemplateNodeById(templateNodes, id, direction));
   };
 
+  const toggleTemplateNodeCollapsed = (id: string) => {
+    setCollapsedNodeIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const focusTemplateNode = (id: string) => {
+    const ancestors = findTemplateNodeAncestorIds(templateNodes, id) || [];
+    if (ancestors.length > 0) {
+      setCollapsedNodeIds(prev => {
+        const next = new Set(prev);
+        ancestors.forEach(parentId => next.delete(parentId));
+        return next;
+      });
+    }
+    setActiveNodeId(id);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        nodeCardRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    });
+  };
+
   // 打开弹窗时初始化节点
   const initTemplateNodes = (template: WritingTemplate | null) => {
     if (template?.nodes) {
@@ -551,6 +613,8 @@ const TemplateManager: React.FC = () => {
     } else {
       setTemplateNodes([]);
     }
+    setCollapsedNodeIds(new Set());
+    setActiveNodeId('');
   };
 
   // 重新扫描所有项目的阶段文件
@@ -623,14 +687,180 @@ const TemplateManager: React.FC = () => {
   const countRequiredNodes = (nodes: TemplateNode[]): number =>
     nodes.reduce((count, node) => count + (node.isRequired ? 1 : 0) + (node.children ? countRequiredNodes(node.children) : 0), 0);
 
-  const renderNodeRows = (nodes: TemplateNode[], depth = 0): React.ReactNode[] =>
-    nodes.flatMap(node => [
-      <div key={node.id} className="template-node-preview-row" style={{ paddingLeft: 10 + depth * 16 }}>
-        <span className="template-node-level">{node.level}级</span>
-        <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: node.title }}>{node.title}</Text>
-      </div>,
-      ...(node.children ? renderNodeRows(node.children, depth + 1) : []),
-    ]);
+  const renderLevelControl = (node: TemplateNode) => {
+    const level = Math.min(Math.max(node.level || 1, 1), 4);
+    const setLevel = (nextLevel: number) => updateTemplateNodeLevel(node.id, Math.min(Math.max(nextLevel, 1), 4));
+    return (
+      <div className="template-node-level-stepper">
+        <Button
+          className="template-node-level-step"
+          type="text"
+          size="small"
+          icon={<MinusOutlined />}
+          disabled={level <= 1}
+          onClick={() => setLevel(level - 1)}
+        />
+        <Dropdown
+          trigger={['click']}
+          menu={{
+            selectedKeys: [String(level)],
+            items: [1, 2, 3, 4].map(itemLevel => ({
+              key: String(itemLevel),
+              label: `第 ${itemLevel} 级`,
+              onClick: () => setLevel(itemLevel),
+            })),
+          }}
+        >
+          <Button className="template-node-level-current" size="small">
+            第 {level} 级
+          </Button>
+        </Dropdown>
+        <Button
+          className="template-node-level-step"
+          type="text"
+          size="small"
+          icon={<PlusOutlined />}
+          disabled={level >= 4}
+          onClick={() => setLevel(level + 1)}
+        />
+      </div>
+    );
+  };
+
+  const renderNodeRows = (nodes: TemplateNode[], depth = 0, prefix: number[] = []): React.ReactNode[] =>
+    nodes.map((node, index) => {
+      const hasChildren = Boolean(node.children?.length);
+      const isCollapsed = collapsedNodeIds.has(node.id);
+      const nodeNumber = [...prefix, index + 1];
+      return (
+        <React.Fragment key={node.id}>
+        <div
+          className={activeNodeId === node.id ? 'template-node-preview-row active' : 'template-node-preview-row'}
+          style={{ paddingLeft: 8 + depth * 16 }}
+          onClick={() => focusTemplateNode(node.id)}
+        >
+          {hasChildren ? (
+            <Button
+              className="template-preview-collapse"
+              type="text"
+              size="small"
+              icon={isCollapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleTemplateNodeCollapsed(node.id);
+              }}
+            />
+          ) : (
+            <span className="template-preview-collapse-spacer" />
+          )}
+          <span className="template-node-level">{nodeNumber.join('.')}</span>
+          <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: node.title }}>{node.title}</Text>
+        </div>
+        {hasChildren && !isCollapsed && (
+          <div className="template-node-preview-children">
+            <div className="template-node-preview-children-inner">
+              {renderNodeRows(node.children || [], depth + 1, nodeNumber)}
+            </div>
+          </div>
+        )}
+        </React.Fragment>
+      );
+    });
+
+  const renderEditorNodeRows = (nodes: TemplateNode[], depth = 0, prefix: number[] = []): React.ReactNode[] =>
+    nodes.map((node, index) => {
+      const hasChildren = Boolean(node.children?.length);
+      const isCollapsed = collapsedNodeIds.has(node.id);
+      const nodeNumber = [...prefix, index + 1];
+      return (
+        <React.Fragment key={node.id}>
+          <div
+            ref={(element) => { nodeCardRefs.current[node.id] = element; }}
+            className={activeNodeId === node.id ? 'template-node-card active' : 'template-node-card'}
+            style={{ marginLeft: depth * 18 }}
+          >
+            <div className="template-node-order">
+              {hasChildren ? (
+                <Button
+                  className="template-node-collapse"
+                  type="text"
+                  size="small"
+                  icon={isCollapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
+                  onClick={() => toggleTemplateNodeCollapsed(node.id)}
+                />
+              ) : (
+                <span className="template-node-collapse-spacer" />
+              )}
+              <HolderOutlined className="template-node-handle" />
+              <span className="template-node-index">{nodeNumber.join('.')}</span>
+            </div>
+
+            <div className="template-node-content">
+              <Input
+                className="template-node-title-input"
+                value={node.title}
+                onChange={(e) => updateTemplateNode(node.id, { title: e.target.value })}
+                placeholder="例如：一、项目概述"
+              />
+              <div className="template-node-subline">
+                {renderLevelControl(node)}
+                <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
+                  {node.description ? '已从导入文件提取章节说明' : '可作为文档进度检测节点'}
+                </Text>
+              </div>
+              <TextArea
+                className="template-node-description-input"
+                value={node.description}
+                onChange={(e) => updateTemplateNode(node.id, { description: e.target.value })}
+                placeholder="可填写或确认该章节的内容要求、格式要求、审阅重点"
+                autoSize={{ minRows: 1, maxRows: 4 }}
+              />
+            </div>
+
+            <div className="template-node-actions">
+              <Button
+                className={node.isRequired ? 'template-node-required active' : 'template-node-required'}
+                size="small"
+                onClick={() => updateTemplateNode(node.id, { isRequired: !node.isRequired })}
+              >
+                {node.isRequired ? '必需' : '可选'}
+              </Button>
+              <div className="template-node-move">
+                <Button
+                  type="text"
+                  size="small"
+                  disabled={!canMoveTemplateNode(templateNodes, node.id, 'up')}
+                  icon={<UpOutlined />}
+                  onClick={() => moveTemplateNode(node.id, 'up')}
+                />
+                <Button
+                  type="text"
+                  size="small"
+                  disabled={!canMoveTemplateNode(templateNodes, node.id, 'down')}
+                  icon={<DownOutlined />}
+                  onClick={() => moveTemplateNode(node.id, 'down')}
+                />
+              </div>
+              <Button
+                className="template-node-delete"
+                type="text"
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                onClick={() => removeTemplateNode(node.id)}
+              />
+            </div>
+          </div>
+          {hasChildren && !isCollapsed && (
+            <div className="template-node-editor-children">
+              <div className="template-node-editor-children-inner">
+                {renderEditorNodeRows(node.children || [], depth + 1, nodeNumber)}
+              </div>
+            </div>
+          )}
+        </React.Fragment>
+      );
+    });
 
   const nodeTotal = flattenNodeCount(templateNodes);
   const requiredTotal = countRequiredNodes(templateNodes);
@@ -752,39 +982,48 @@ ${content.slice(0, 24000)}`;
   }, []);
 
   const handleCreate = () => {
+    setIsPreparingTemplateEditor(true);
     setEditingTemplate(null);
-    setImportedFilePath('');
-    setImportedDocumentText('');
-    form.resetFields();
-    form.setFieldsValue({
-      outputFileType: 'docx',
-      enableFormatRules: false,
-      formatRules: buildDefaultFormatFormValues(),
-    });
-    initTemplateNodes(null);
     setIsModalOpen(true);
+    window.requestAnimationFrame(() => {
+      setImportedFilePath('');
+      setImportedDocumentText('');
+      form.resetFields();
+      form.setFieldsValue({
+        outputFileType: 'docx',
+        enableFormatRules: false,
+        formatRules: buildDefaultFormatFormValues(),
+      });
+      initTemplateNodes(null);
+      setIsPreparingTemplateEditor(false);
+    });
   };
 
   const handleEdit = (template: WritingTemplate) => {
+    setIsPreparingTemplateEditor(true);
     setEditingTemplate(template);
-    setImportedDocumentText('');
-    form.setFieldsValue({
-      name: template.name,
-      description: template.description,
-      category: template.category,
-      outputFileType: template.outputFileType || inferOutputFileType(template.filePath || ''),
-      enableFormatRules: Boolean(template.formatRules || template.titleFontRequirement || template.bodyFontRequirement),
-      formatRules: flattenFormatRulesForForm(template.formatRules || {
-        heading1: { fontRequirement: template.titleFontRequirement },
-        body: { fontRequirement: template.bodyFontRequirement },
-      }),
-    });
-    initTemplateNodes(template);
     setIsModalOpen(true);
+    window.requestAnimationFrame(() => {
+      setImportedDocumentText('');
+      form.setFieldsValue({
+        name: template.name,
+        description: template.description,
+        category: template.category,
+        outputFileType: template.outputFileType || inferOutputFileType(template.filePath || ''),
+        enableFormatRules: Boolean(template.formatRules || template.titleFontRequirement || template.bodyFontRequirement),
+        formatRules: flattenFormatRulesForForm(template.formatRules || {
+          heading1: { fontRequirement: template.titleFontRequirement },
+          body: { fontRequirement: template.bodyFontRequirement },
+        }),
+      });
+      initTemplateNodes(template);
+      setIsPreparingTemplateEditor(false);
+    });
   };
 
   const handleDelete = async (id: string) => {
     await deleteTemplate(id);
+    setDeletingTemplate(null);
     message.success('模板已删除');
   };
 
@@ -853,7 +1092,7 @@ ${content.slice(0, 24000)}`;
   const handleImportFromDoc = async () => {
     try {
       const filePath = await window.electronAPI.openFile([
-        { name: '文档文件', extensions: ['doc', 'docx', 'pdf', 'txt', 'md', 'rtf'] },
+        { name: '文档文件', extensions: ['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'pdf', 'txt', 'md', 'rtf'] },
         { name: '所有文件', extensions: ['*'] },
       ]);
       if (!filePath) return;
@@ -931,7 +1170,7 @@ ${content.slice(0, 24000)}`;
       <div className="template-section-header" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
           <Title level={4} style={{ margin: 0 }}>模板管理</Title>
-          <Text type="secondary" style={{ fontSize: 13 }}>维护写作模板结构，可从 Word、PDF、文本等文档中提取章节</Text>
+          <Text type="secondary" style={{ fontSize: 13 }}>维护写作模板结构，可从 Word、PPT、Excel、PDF、文本等文档中提取章节</Text>
         </div>
         <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
           创建模板
@@ -950,14 +1189,22 @@ ${content.slice(0, 24000)}`;
               <Card
                 className="template-card"
                 actions={[
-                  <EditOutlined key="edit" onClick={() => handleEdit(template)} />,
-                  <Popconfirm
+                  <Button
+                    key="edit"
+                    className="template-card-action"
+                    type="text"
+                    icon={<EditOutlined />}
+                    onClick={() => handleEdit(template)}
+                  />,
+                  <Button
                     key="delete"
                     title="确定删除此模板？"
-                    onConfirm={() => handleDelete(template.id)}
-                  >
-                    <DeleteOutlined />
-                  </Popconfirm>,
+                    className="template-card-action"
+                    type="text"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() => setDeletingTemplate(template)}
+                  />,
                 ]}
               >
                 <Card.Meta
@@ -988,16 +1235,27 @@ ${content.slice(0, 24000)}`;
 
       <Modal
         className="template-editor-modal"
+        rootClassName="template-editor-modal-root"
         title={editingTemplate ? '编辑模板' : '创建模板'}
         open={isModalOpen}
         onOk={handleSubmit}
         onCancel={() => setIsModalOpen(false)}
-        width="min(95vw, 1400px)"
+        afterClose={() => document.body.classList.remove('template-editor-modal-open')}
+        destroyOnClose
+        width="min(88vw, 1560px)"
         okText="保存模板"
         cancelText="取消"
-        style={{ top: 16, maxHeight: 'calc(100vh - 32px)' }}
-        styles={{ body: { height: 'calc(100vh - 120px)', overflow: 'hidden' } }}
+        transitionName="template-modal-motion"
+        maskTransitionName="template-modal-mask-motion"
+        style={{ top: 0, maxHeight: 'calc(100vh - 16px)' }}
+        styles={{ body: { overflow: 'hidden' } }}
+        okButtonProps={{ disabled: isPreparingTemplateEditor }}
       >
+        {isPreparingTemplateEditor ? (
+          <div className="template-editor-loading">
+            <Spin tip="正在准备模板..." />
+          </div>
+        ) : (
         <Form form={form} layout="vertical" className="template-editor-form">
           <div className="template-editor-grid">
             <div className="template-editor-main">
@@ -1094,7 +1352,7 @@ ${content.slice(0, 24000)}`;
                 <div>
                   <Text strong>从文件导入结构</Text>
                   <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 2 }}>
-                    支持 .doc/.docx/.pdf/.txt/.md/.rtf，自动识别章节标题并保留源文件用于后续创建文件。
+                    支持 .doc/.docx/.ppt/.pptx/.xls/.xlsx/.pdf/.txt/.md/.rtf，自动识别章节标题并保留源文件用于后续创建文件。
                   </Text>
                   {importedFilePath && (
                     <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 6 }} ellipsis={{ tooltip: importedFilePath }}>
@@ -1141,85 +1399,7 @@ ${content.slice(0, 24000)}`;
               </Space>
             </div>
             <div className="template-node-list">
-              {flattenTemplateNodeRows(templateNodes).map(({ node, depth }, index) => (
-                <div
-                  key={node.id}
-                  className="template-node-card"
-                  style={{ marginLeft: depth * 18 }}
-                >
-                  <div className="template-node-order">
-                    <HolderOutlined className="template-node-handle" />
-                    <span className="template-node-index">{index + 1}</span>
-                  </div>
-
-                  <div className="template-node-content">
-                    <Input
-                      className="template-node-title-input"
-                      value={node.title}
-                      onChange={(e) => updateTemplateNode(node.id, { title: e.target.value })}
-                      placeholder="例如：一、项目概述"
-                    />
-                    <div className="template-node-subline">
-                      <Select
-                        className="template-node-level-select"
-                        size="small"
-                        value={node.level}
-                        onChange={(value) => updateTemplateNodeLevel(node.id, value)}
-                        options={[
-                          { value: 1, label: '第 1 级' },
-                          { value: 2, label: '第 2 级' },
-                          { value: 3, label: '第 3 级' },
-                          { value: 4, label: '第 4 级' },
-                        ]}
-                      />
-                      <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
-                        {node.description ? '已从导入文件提取章节说明' : '可作为文档进度检测节点'}
-                      </Text>
-                    </div>
-                    <TextArea
-                      className="template-node-description-input"
-                      value={node.description}
-                      onChange={(e) => updateTemplateNode(node.id, { description: e.target.value })}
-                      placeholder="可填写或确认该章节的内容要求、格式要求、审阅重点"
-                      autoSize={{ minRows: 1, maxRows: 4 }}
-                    />
-                  </div>
-
-                  <div className="template-node-actions">
-                    <Button
-                      className={node.isRequired ? 'template-node-required active' : 'template-node-required'}
-                      size="small"
-                      onClick={() => updateTemplateNode(node.id, { isRequired: !node.isRequired })}
-                    >
-                      {node.isRequired ? '必需' : '可选'}
-                    </Button>
-                    <div className="template-node-move">
-                      <Button
-                        type="text"
-                        size="small"
-                        disabled={!canMoveTemplateNode(templateNodes, node.id, 'up')}
-                        icon={<UpOutlined />}
-                        onClick={() => moveTemplateNode(node.id, 'up')}
-                      />
-                      <Button
-                        type="text"
-                        size="small"
-                        disabled={!canMoveTemplateNode(templateNodes, node.id, 'down')}
-                        icon={<DownOutlined />}
-                        onClick={() => moveTemplateNode(node.id, 'down')}
-                      />
-                    </div>
-                    <Button
-                      className="template-node-delete"
-                      type="text"
-                      size="small"
-                      danger
-                      icon={<DeleteOutlined />}
-                      onClick={() => removeTemplateNode(node.id)}
-                    />
-                  </div>
-                </div>
-              ))}
+              {renderEditorNodeRows(templateNodes)}
             </div>
             {templateNodes.length === 0 && (
               <div style={{ textAlign: 'center', padding: 16, color: '#999', fontSize: 12 }}>
@@ -1241,6 +1421,21 @@ ${content.slice(0, 24000)}`;
             </div>
           </div>
         </Form>
+        )}
+      </Modal>
+
+      <Modal
+        title="删除模板"
+        open={Boolean(deletingTemplate)}
+        onOk={() => deletingTemplate && handleDelete(deletingTemplate.id)}
+        onCancel={() => setDeletingTemplate(null)}
+        okText="删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+      >
+        <Text>
+          确定删除“{deletingTemplate?.name}”吗？此操作不会删除已保存的项目文档。
+        </Text>
       </Modal>
 
       {/* ========== 项目阶段管理 ========== */}

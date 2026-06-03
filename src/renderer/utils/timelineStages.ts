@@ -101,26 +101,26 @@ export const detectTimelineStage = (
   allStages: StageConfig[],
   ...parts: Array<string | undefined>
 ): string => {
-  const text = parts.filter(Boolean).join(' ');
   const fallbackStage = allStages.find(stage => stage.keywords.length === 0)?.name || '其他';
-  // 先检查自定义阶段（按顺序匹配）
-  for (const stage of allStages) {
-    if (stage.isSystem) continue; // 系统阶段最后匹配
-    if (stage.keywords.length === 0) continue;
-    for (const keyword of stage.keywords) {
-      if (text.includes(keyword)) return stage.name;
-    }
-  }
-  // 再检查系统阶段
-  for (const stage of allStages) {
-    if (!stage.isSystem) continue;
-    if (stage.name === fallbackStage) continue; // 无关键词阶段最后匹配
-    for (const keyword of stage.keywords) {
-      if (text.includes(keyword)) return stage.name;
-    }
-  }
-  // 默认归入无关键词阶段
-  return fallbackStage;
+  const primaryText = parts[0] || '';
+  const secondaryText = parts.slice(1).filter(Boolean).join(' ');
+  const candidates = allStages
+    .filter(stage => stage.name !== fallbackStage && stage.keywords.length > 0)
+    .map((stage, order) => {
+      let score = 0;
+      if (primaryText.includes(stage.name)) score += 90;
+      if (secondaryText.includes(stage.name)) score += 8;
+      for (const keyword of stage.keywords) {
+        if (!keyword) continue;
+        if (primaryText.includes(keyword)) score += 100 + keyword.length / 100;
+        if (secondaryText.includes(keyword)) score += 10 + keyword.length / 1000;
+      }
+      return { stage, score, order };
+    })
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.order - b.order);
+
+  return candidates[0]?.stage.name || fallbackStage;
 };
 
 export const buildProjectStageSegments = (

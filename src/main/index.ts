@@ -1,4 +1,5 @@
 ﻿import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import { net } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
@@ -6,8 +7,6 @@ import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, R
 import * as mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
 const JSZip = require('jszip');
-import * as https from 'https';
-import * as http from 'http';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -359,25 +358,48 @@ function analyzeBasic(content: string, template: WritingTemplate): SectionAnalys
 // HTTP 请求函数
 function makeRequest(url: string, options: any, body?: string): Promise<any> {
   return new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const client = urlObj.protocol === 'https:' ? https : http;
+    const request = net.request({
+      url,
+      method: options?.method || 'GET',
+    });
 
-    const req = client.request(url, options, (res) => {
+    Object.entries(options?.headers || {}).forEach(([key, value]) => {
+      request.setHeader(key, String(value));
+    });
+
+    request.on('response', (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
+        let parsed: any = data;
         try {
-          resolve(JSON.parse(data));
+          parsed = JSON.parse(data);
         } catch {
-          resolve(data);
+          parsed = data;
         }
+        if (res.statusCode >= 400) {
+          const message = parsed?.error?.message || parsed?.message || data || `HTTP ${res.statusCode}`;
+          reject(new Error(`HTTP ${res.statusCode}: ${message}`));
+          return;
+        }
+        resolve(parsed);
       });
     });
 
-    req.on('error', reject);
-    if (body) req.write(body);
-    req.end();
+    request.on('error', reject);
+    if (body) request.write(body);
+    request.end();
   });
+}
+
+function normalizeOpenAIEndpoint(endpoint?: string): string {
+  const fallback = 'https://api.openai.com/v1/chat/completions';
+  const raw = (endpoint || fallback).trim();
+  if (!raw) return fallback;
+  const normalized = raw.replace(/\/+$/, '');
+  if (/\/chat\/completions$/i.test(normalized)) return normalized;
+  if (/\/v\d+$/i.test(normalized)) return `${normalized}/chat/completions`;
+  return normalized;
 }
 
 // 调用 Claude API
@@ -407,7 +429,7 @@ async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<str
 
 // 调用 OpenAI API
 async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<string> {
-  const url = config.endpoint || 'https://api.openai.com/v1/chat/completions';
+  const url = normalizeOpenAIEndpoint(config.endpoint);
   const body = JSON.stringify({
     model: config.model || 'gpt-3.5-turbo',
     messages: [{ role: 'user', content: prompt }],
@@ -424,9 +446,9 @@ async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<str
 
   const result = await makeRequest(url, options, body);
   if (result.choices && result.choices[0]) {
-    return result.choices[0].message.content;
+    return result.choices[0].message?.content || result.choices[0].text || '';
   }
-  throw new Error(result.error?.message || 'OpenAI API 调用失败');
+  throw new Error(result.error?.message || result.message || `OpenAI API 调用失败：响应中没有 choices 字段（${url}）`);
 }
 
 async function callAIModel(config: AIModelConfig, prompt: string): Promise<string> {
@@ -465,6 +487,32 @@ async function callConfiguredAI(prompt: string): Promise<string> {
   return config?.multiModelMode === 'parallel'
     ? callParallelAI(prompt, config.parallelModelIds)
     : callDefaultAI(prompt, config?.activeModelId);
+}
+
+async function callAIWithConfig(configValue: AIConfig, prompt: string, modelId?: string, modelIds?: string[], mode?: 'single' | 'parallel'): Promise<string> {
+  const config = normalizeAIConfig(configValue);
+  const enabledModels = getEnabledAIModels(config);
+  if (enabledModels.length === 0) throw new Error('请先配置至少一个可用 AI 模型');
+
+  if (mode === 'parallel') {
+    const selectedIds = modelIds?.length ? modelIds : config?.parallelModelIds || [];
+    const selectedModels = enabledModels.filter(model => selectedIds.includes(model.id));
+    const models = selectedModels.length > 0 ? selectedModels : enabledModels.slice(0, 1);
+    const results = await Promise.all(models.map(async model => {
+      try {
+        const output = await callAIModel(model, prompt);
+        return `【${model.name}】\n${output}`;
+      } catch (error: any) {
+        return `【${model.name}】调用失败：${error.message}`;
+      }
+    }));
+    return results.join('\n\n---\n\n');
+  }
+
+  const activeModel = enabledModels.find(model => model.id === modelId)
+    || enabledModels.find(model => model.id === config?.activeModelId)
+    || enabledModels[0];
+  return callAIModel(activeModel, prompt);
 }
 
 function createWindow() {
@@ -613,7 +661,7 @@ ipcMain.handle('dialog:openFile', async (_event: any, filters?: Electron.FileFil
     properties: ['openFile'],
     title: '选择文件',
     filters: filters || [
-      { name: '文档文件', extensions: ['doc', 'docx', 'pdf', 'txt', 'md', 'rtf'] },
+      { name: '文档文件', extensions: ['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'pdf', 'txt', 'md', 'rtf'] },
       { name: '所有文件', extensions: ['*'] },
     ],
   });
@@ -650,6 +698,86 @@ function getXmlAttr(fragment: string, attrName: string): string {
 function getWordVal(fragment: string, tagName: string): string {
   const match = fragment.match(new RegExp(`<w:${tagName}\\b[^>]*w:val="([^"]*)"`, 'i'));
   return match?.[1] || '';
+}
+
+function extractReadableBinaryText(buffer: Buffer): string {
+  const candidates = [buffer.toString('utf16le'), buffer.toString('utf8'), buffer.toString('latin1')]
+    .map(value => normalizeExtractedText(
+      value
+        .replace(/[^\u4e00-\u9fa5A-Za-z0-9，。、；：！？（）()《》.\-_/\s]/g, ' ')
+        .split(/\n| {2,}/)
+        .map(line => line.trim())
+        .filter(line => line.length >= 2)
+        .join('\n')
+    ))
+    .filter(Boolean);
+  return candidates.sort((a, b) => b.length - a.length)[0] || '';
+}
+
+async function extractPptxText(buffer: Buffer): Promise<string> {
+  const zip = await JSZip.loadAsync(buffer);
+  const slideFiles = Object.keys(zip.files)
+    .filter(name => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+    .sort((a, b) => Number(a.match(/slide(\d+)\.xml/i)?.[1] || 0) - Number(b.match(/slide(\d+)\.xml/i)?.[1] || 0));
+
+  const lines: string[] = [];
+  for (const fileName of slideFiles) {
+    const xml = await zip.file(fileName)?.async('string');
+    if (!xml) continue;
+    const slideLines = Array.from(xml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g) as Iterable<RegExpMatchArray>)
+      .map(match => normalizeExtractedText(decodeXmlText(match[1])))
+      .filter(Boolean);
+    if (slideLines.length > 0) lines.push(...slideLines);
+  }
+  return normalizeExtractedText(lines.join('\n'));
+}
+
+async function extractXlsxText(buffer: Buffer): Promise<string> {
+  const zip = await JSZip.loadAsync(buffer);
+  const sharedStringsXml = await zip.file('xl/sharedStrings.xml')?.async('string');
+  const sharedStrings = sharedStringsXml
+    ? Array.from(sharedStringsXml.matchAll(/<si\b[\s\S]*?<\/si>/g) as Iterable<RegExpMatchArray>).map(match => {
+        const text = Array.from(match[0].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g) as Iterable<RegExpMatchArray>)
+          .map(t => decodeXmlText(t[1]))
+          .join('');
+        return normalizeExtractedText(text);
+      })
+    : [];
+
+  const sheetFiles = Object.keys(zip.files)
+    .filter(name => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
+    .sort((a, b) => Number(a.match(/sheet(\d+)\.xml/i)?.[1] || 0) - Number(b.match(/sheet(\d+)\.xml/i)?.[1] || 0));
+
+  const lines: string[] = [];
+  for (const fileName of sheetFiles) {
+    const xml = await zip.file(fileName)?.async('string');
+    if (!xml) continue;
+    const sheetLines: string[] = [];
+    for (const rowMatch of xml.matchAll(/<row\b[\s\S]*?<\/row>/g) as Iterable<RegExpMatchArray>) {
+      const cells: string[] = [];
+      for (const cellMatch of rowMatch[0].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g) as Iterable<RegExpMatchArray>) {
+        const attrs = cellMatch[1] || '';
+        const cellXml = cellMatch[2] || '';
+        const type = getXmlAttr(attrs, 't');
+        let value = '';
+        if (type === 's') {
+          const index = Number(cellXml.match(/<v>([\s\S]*?)<\/v>/)?.[1] || -1);
+          value = sharedStrings[index] || '';
+        } else if (type === 'inlineStr') {
+          value = Array.from(cellXml.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g) as Iterable<RegExpMatchArray>)
+            .map(match => decodeXmlText(match[1]))
+            .join('');
+        } else {
+          value = decodeXmlText(cellXml.match(/<v>([\s\S]*?)<\/v>/)?.[1] || '');
+        }
+        const normalized = normalizeExtractedText(value);
+        if (normalized) cells.push(normalized);
+      }
+      if (cells.length > 0) sheetLines.push(cells.join('  '));
+    }
+    if (sheetLines.length > 0) lines.push(...sheetLines);
+  }
+  return normalizeExtractedText(lines.join('\n'));
 }
 
 function chineseCounter(value: number): string {
@@ -862,6 +990,27 @@ ipcMain.handle('file:parseDocument', async (_event: any, filePath: string) => {
       return { success: true, content: normalizeExtractedText(data.text), fileName, pages: data.numpages };
     }
 
+    if (ext === '.pptx') {
+      const content = await extractPptxText(buffer);
+      return content
+        ? { success: true, content, fileName }
+        : { success: false, error: '未从 PPTX 中提取到可识别文本' };
+    }
+
+    if (ext === '.xlsx') {
+      const content = await extractXlsxText(buffer);
+      return content
+        ? { success: true, content, fileName }
+        : { success: false, error: '未从 Excel 中提取到可识别文本' };
+    }
+
+    if (ext === '.ppt' || ext === '.xls') {
+      const content = extractReadableBinaryText(buffer);
+      return content && isReadableExtractedText(content)
+        ? { success: true, content, fileName }
+        : { success: false, error: '旧版 .ppt/.xls 为二进制格式，未提取到可识别文本；建议另存为 .pptx/.xlsx 后导入' };
+    }
+
     if (ext === '.rtf') {
       return { success: true, content: stripRtf(buffer.toString('utf8')), fileName };
     }
@@ -906,6 +1055,27 @@ ipcMain.handle('file:parseDocumentSilent', async (_event: any, filePath: string)
     if (ext === '.pdf') {
       const data = await pdfParse(buffer);
       return { success: true, content: normalizeExtractedText(data.text), fileName, pages: data.numpages };
+    }
+
+    if (ext === '.pptx') {
+      const content = await extractPptxText(buffer);
+      return content
+        ? { success: true, content, fileName }
+        : { success: false, error: '未从 PPTX 中提取到可识别文本' };
+    }
+
+    if (ext === '.xlsx') {
+      const content = await extractXlsxText(buffer);
+      return content
+        ? { success: true, content, fileName }
+        : { success: false, error: '未从 Excel 中提取到可识别文本' };
+    }
+
+    if (ext === '.ppt' || ext === '.xls') {
+      const content = extractReadableBinaryText(buffer);
+      return content && isReadableExtractedText(content)
+        ? { success: true, content, fileName }
+        : { success: false, error: '旧版 .ppt/.xls 为二进制格式，未提取到可识别文本；建议另存为 .pptx/.xlsx 后导入' };
     }
 
     if (ext === '.rtf') {
@@ -1092,9 +1262,12 @@ ipcMain.handle('ai:saveConfig', async (_event: any, config: AIConfig) => {
 });
 
 // AI 调用
-ipcMain.handle('ai:call', async (_event: any, prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel' }) => {
+ipcMain.handle('ai:call', async (_event: any, prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: AIConfig }) => {
   try {
     if (typeof prompt === 'string') return await callConfiguredAI(prompt);
+    if (prompt.config) {
+      return await callAIWithConfig(prompt.config, prompt.prompt, prompt.modelId, prompt.modelIds, prompt.mode);
+    }
     return prompt.mode === 'parallel'
       ? await callParallelAI(prompt.prompt, prompt.modelIds)
       : await callDefaultAI(prompt.prompt, prompt.modelId);

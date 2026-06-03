@@ -37,6 +37,11 @@ const hashPath = (value: string) => {
 const hasStageKeyword = (allStages: StageConfig[], file: ScannedStageFile) =>
   detectTimelineStage(allStages, file.name, file.path) !== '其他';
 
+const matchTemplateForStage = (templates: WritingTemplate[], allStages: StageConfig[], stage: string) =>
+  templates.find(t =>
+    t.name.includes(stage) || t.category?.includes(stage) || detectTimelineStage(allStages, t.name, t.category) === stage
+  );
+
 export const syncProjectStageFiles = async (
   project: Project,
   deps: SyncDeps,
@@ -51,6 +56,8 @@ export const syncProjectStageFiles = async (
   let updated = 0;
 
   for (const file of files) {
+    const stage = detectTimelineStage(deps.allStages, file.name, file.path);
+    const matchedTemplate = matchTemplateForStage(deps.templates, deps.allStages, stage);
     const normalizedFilePath = normalizePath(file.path);
     const existing = deps.projectDocs.find(doc =>
       doc.projectId === project.id &&
@@ -74,14 +81,12 @@ export const syncProjectStageFiles = async (
         await deps.updateProjectDoc(existing.id, common);
         updated += 1;
       }
+      if (matchedTemplate?.id && existing.templateId !== matchedTemplate.id) {
+        await deps.updateProjectDoc(existing.id, { templateId: matchedTemplate.id });
+        updated += 1;
+      }
       continue;
     }
-
-    // 通过关键字自动匹配模板
-    const stage = detectTimelineStage(deps.allStages, file.name, file.path);
-    const matchedTemplate = deps.templates.find(t =>
-      t.name.includes(stage) || t.category?.includes(stage) || detectTimelineStage(deps.allStages, t.name, t.category) === stage
-    );
 
     await deps.addProjectDoc({
       id: `auto-${project.id}-${hashPath(file.path)}`,

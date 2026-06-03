@@ -308,12 +308,14 @@ const AISettings: React.FC = () => {
   const handleTest = async () => {
     try {
       setIsTesting(true);
-      const values = normalizeAIConfig(form.getFieldsValue());
+      const formValues = await form.validateFields();
+      const values = normalizeAIConfig(formValues);
       const result = await window.electronAPI.callAI({
         prompt: '你好，请回复"连接成功"',
         modelId: values.activeModelId,
         modelIds: values.parallelModelIds,
         mode: values.multiModelMode,
+        config: values,
       });
       message.success(`测试成功: ${result.substring(0, 50)}...`);
     } catch (error: any) {

@@ -37,7 +37,7 @@
   // AI操作
   loadAIConfig: () => Promise<any>;
   saveAIConfig: (config: any) => Promise<void>;
-  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel' }) => Promise<string>;
+  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any }) => Promise<string>;
   generateSummary: (content: string) => Promise<{ success: boolean; summary?: string; error?: string }>;
   reviewSuggestion: (params: any) => Promise<{ success: boolean; suggestions?: string; error?: string }>;
 

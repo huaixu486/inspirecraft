@@ -80,19 +80,36 @@ const App: React.FC = () => {
   // 全局滚动检测：滚动时添加 .scrolling 类，停止后移除
   useEffect(() => {
     let scrollTimer: NodeJS.Timeout;
-    const handleScroll = (e: Event) => {
-      const target = e.target as HTMLElement;
-      if (!target?.classList) return;
-      target.classList.add('scrolling');
+    const showScrollbar = (el: HTMLElement) => {
+      if (!el?.classList) return;
+      el.classList.add('scrolling');
       clearTimeout(scrollTimer);
       scrollTimer = setTimeout(() => {
-        target.classList.remove('scrolling');
-      }, 800);
+        el.classList.remove('scrolling');
+      }, 1000);
+    };
+
+    const handleScroll = (e: Event) => {
+      showScrollbar(e.target as HTMLElement);
+    };
+
+    const handleWheel = (e: WheelEvent) => {
+      // 找到最近的可滚动父元素
+      let el = e.target as HTMLElement;
+      while (el && el !== document.body) {
+        if (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth) {
+          showScrollbar(el);
+          break;
+        }
+        el = el.parentElement!;
+      }
     };
 
     document.addEventListener('scroll', handleScroll, true);
+    document.addEventListener('wheel', handleWheel, { passive: true });
     return () => {
       document.removeEventListener('scroll', handleScroll, true);
+      document.removeEventListener('wheel', handleWheel);
       clearTimeout(scrollTimer);
     };
   }, []);
