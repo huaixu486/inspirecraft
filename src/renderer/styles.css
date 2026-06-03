@@ -162,7 +162,6 @@ body.template-editor-modal-open {
 }
 
 .overview-main {
-  scrollbar-gutter: stable;
   min-width: 0;
 }
 
@@ -680,7 +679,6 @@ body.template-editor-modal-open {
   overflow-x: hidden;
   padding: 2px 8px 8px 0;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
 }
 
 .template-node-card {
@@ -925,7 +923,6 @@ body.template-editor-modal-open {
   overflow-x: hidden;
   padding-right: 4px;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
 }
 
 .template-node-preview-row {
@@ -1026,43 +1023,6 @@ body.template-editor-modal-open {
   }
 }
 
-/* Scrollbar styles */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(100, 116, 139, 0.26) transparent;
-}
-
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.22);
-  background-clip: padding-box;
-  border: 2px solid transparent;
-  border-radius: 999px;
-  min-height: 40px;
-  transition: background 0.18s ease, border-color 0.18s ease;
-}
-
-*:hover {
-  scrollbar-color: rgba(24, 144, 255, 0.36) transparent;
-}
-
-*:hover::-webkit-scrollbar-thumb {
-  background: rgba(24, 144, 255, 0.32);
-  border-color: transparent;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(24, 144, 255, 0.5);
-}
-
 /* Progress bar styles */
 .ant-progress-inner {
   border-radius: 4px;
@@ -1120,33 +1080,6 @@ body.template-editor-modal-open {
 
 .detail-panel-tabs .ant-tabs-tabpane {
   padding-right: 3px;
-  scrollbar-width: none;
-  scrollbar-color: transparent transparent;
-}
-
-.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
-
-.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar-thumb {
-  background: transparent;
-  background-clip: padding-box;
-  border: 0;
-  border-radius: 999px;
-  min-height: 36px;
-}
-
-.detail-panel-tabs:hover .ant-tabs-tabpane {
-  scrollbar-color: transparent transparent;
-}
-
-.detail-panel-tabs:hover .ant-tabs-tabpane::-webkit-scrollbar-thumb {
-  background: transparent;
-}
-
-.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar-thumb:hover {
-  background: transparent;
 }
 
 /* List item styles */
