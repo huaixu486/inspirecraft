@@ -1,21 +1,16 @@
-import React, { useState, useMemo } from 'react';
-import { Select, Card, Typography, Empty, Space, Tag, Statistic, Row, Col } from 'antd';
+import React from 'react';
+import { Card, Typography, Empty, Timeline, Tag, Space } from 'antd';
+import {
+  FileTextOutlined,
+  ClockCircleOutlined,
+  CheckCircleOutlined,
+} from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
-import DiffMatchPatch from 'diff-match-patch';
 
-const { Text } = Typography;
-
-interface DiffLine {
-  type: 'equal' | 'insert' | 'delete';
-  text: string;
-  lineNumA?: number;
-  lineNumB?: number;
-}
+const { Text, Title } = Typography;
 
 const DiffViewer: React.FC = () => {
   const { currentProject, versions } = useProjectStore();
-  const [selectedVersionA, setSelectedVersionA] = useState<string | null>(null);
-  const [selectedVersionB, setSelectedVersionB] = useState<string | null>(null);
 
   if (!currentProject) {
     return (
@@ -26,226 +21,79 @@ const DiffViewer: React.FC = () => {
     );
   }
 
-  const projectVersions = versions.filter(
-    (v) => v.projectId === currentProject.id
-  );
+  const projectVersions = versions
+    .filter(v => v.projectId === currentProject.id)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-  const getVersionContent = (versionId: string | null) => {
-    if (!versionId) return '';
-    const version = versions.find((v) => v.id === versionId);
-    return version?.content || '';
-  };
-
-  const computeDiff = (textA: string, textB: string): DiffLine[] => {
-    const dmp = new DiffMatchPatch();
-    const diffs = dmp.diff_main(textA, textB);
-    dmp.diff_cleanupSemantic(diffs);
-
-    const lines: DiffLine[] = [];
-    let lineNumA = 1;
-    let lineNumB = 1;
-
-    for (const [operation, text] of diffs) {
-      const textLines = text.split('\n');
-
-      for (let i = 0; i < textLines.length; i++) {
-        const line = textLines[i];
-        const isLastLine = i === textLines.length - 1;
-
-        if (operation === DiffMatchPatch.DIFF_EQUAL) {
-          lines.push({
-            type: 'equal',
-            text: line,
-            lineNumA: lineNumA,
-            lineNumB: lineNumB,
-          });
-          if (!isLastLine || line.length > 0) {
-            lineNumA++;
-            lineNumB++;
-          }
-        } else if (operation === DiffMatchPatch.DIFF_DELETE) {
-          lines.push({
-            type: 'delete',
-            text: line,
-            lineNumA: lineNumA,
-          });
-          if (!isLastLine || line.length > 0) {
-            lineNumA++;
-          }
-        } else if (operation === DiffMatchPatch.DIFF_INSERT) {
-          lines.push({
-            type: 'insert',
-            text: line,
-            lineNumB: lineNumB,
-          });
-          if (!isLastLine || line.length > 0) {
-            lineNumB++;
-          }
-        }
-      }
+  const getVersionColor = (fileType: string) => {
+    switch (fileType?.toLowerCase()) {
+      case 'docx':
+      case 'doc':
+        return '#1890ff';
+      case 'pdf':
+        return '#ff4d4f';
+      case 'xlsx':
+      case 'xls':
+        return '#52c41a';
+      case 'pptx':
+      case 'ppt':
+        return '#faad14';
+      default:
+        return '#999';
     }
-
-    return lines;
   };
-
-  const contentA = getVersionContent(selectedVersionA);
-  const contentB = getVersionContent(selectedVersionB);
-
-  const diffResult = useMemo(() => {
-    if (!selectedVersionA || !selectedVersionB) return [];
-    return computeDiff(contentA, contentB);
-  }, [contentA, contentB, selectedVersionA, selectedVersionB]);
-
-  const stats = useMemo(() => {
-    const equal = diffResult.filter(l => l.type === 'equal').length;
-    const insert = diffResult.filter(l => l.type === 'insert').length;
-    const deleteCount = diffResult.filter(l => l.type === 'delete').length;
-    return { equal, insert, delete: deleteCount, total: diffResult.length };
-  }, [diffResult]);
 
   return (
     <div>
-      <div style={{ marginBottom: 16 }}>
-        <Text strong style={{ fontSize: 18 }}>
-          {currentProject.name} - 版本对比
-        </Text>
-      </div>
+      <Title level={4}>版本历史</Title>
+      <Text type="secondary" style={{ display: 'block', marginBottom: 24 }}>
+        记录项目的文件版本变更时间线
+      </Text>
 
-      <Space style={{ marginBottom: 16 }} size="large">
-        <div>
-          <Text>基准版本：</Text>
-          <Select
-            style={{ width: 250 }}
-            placeholder="选择基准版本"
-            onChange={(value) => setSelectedVersionA(value)}
-            options={projectVersions.map((v) => ({
-              value: v.id,
-              label: `${v.fileName} - ${new Date(v.createdAt).toLocaleDateString('zh-CN')}`,
-            }))}
-          />
-        </div>
-        <div>
-          <Text>对比版本：</Text>
-          <Select
-            style={{ width: 250 }}
-            placeholder="选择对比版本"
-            onChange={(value) => setSelectedVersionB(value)}
-            options={projectVersions.map((v) => ({
-              value: v.id,
-              label: `${v.fileName} - ${new Date(v.createdAt).toLocaleDateString('zh-CN')}`,
-            }))}
-          />
-        </div>
-      </Space>
-
-      {selectedVersionA && selectedVersionB && (
-        <Card style={{ marginBottom: 16 }}>
-          <Row gutter={16}>
-            <Col span={6}>
-              <Statistic title="总行数" value={stats.total} />
-            </Col>
-            <Col span={6}>
-              <Statistic
-                title="新增"
-                value={stats.insert}
-                valueStyle={{ color: '#52c41a' }}
-                prefix="+"
-              />
-            </Col>
-            <Col span={6}>
-              <Statistic
-                title="删除"
-                value={stats.delete}
-                valueStyle={{ color: '#ff4d4f' }}
-                prefix="-"
-              />
-            </Col>
-            <Col span={6}>
-              <Statistic
-                title="未变更"
-                value={stats.equal}
-                valueStyle={{ color: '#999' }}
-              />
-            </Col>
-          </Row>
-        </Card>
-      )}
-
-      {!selectedVersionA || !selectedVersionB ? (
-        <Empty description="请选择两个版本进行对比" />
-      ) : diffResult.length === 0 ? (
-        <Empty description="两个版本内容完全相同" />
+      {projectVersions.length === 0 ? (
+        <Empty description="暂无版本记录" />
       ) : (
         <Card>
-          <div
-            style={{
-              fontFamily: 'monospace',
-              fontSize: 13,
-              lineHeight: 1.8,
-              maxHeight: 600,
-              overflow: 'auto',
-              background: '#fafafa',
-              borderRadius: 4,
-            }}
-          >
-            {diffResult.map((line, index) => {
-              let bgColor = 'transparent';
-              let lineColor = '#999';
-              let prefix = ' ';
-
-              if (line.type === 'insert') {
-                bgColor = '#e6ffec';
-                lineColor = '#52c41a';
-                prefix = '+';
-              } else if (line.type === 'delete') {
-                bgColor = '#ffebe9';
-                lineColor = '#ff4d4f';
-                prefix = '-';
-              }
-
-              const lineNum = line.type === 'delete'
-                ? (line.lineNumA?.toString() || '')
-                : (line.lineNumB?.toString() || '');
-
-              return (
-                <div
-                  key={index}
-                  style={{
-                    display: 'flex',
-                    background: bgColor,
-                    borderBottom: '1px solid #f0f0f0',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: 40,
-                      textAlign: 'right',
-                      paddingRight: 8,
-                      color: '#999',
-                      borderRight: '1px solid #f0f0f0',
-                      userSelect: 'none',
-                    }}
-                  >
-                    {lineNum}
-                  </div>
-                  <div
-                    style={{
-                      width: 20,
-                      textAlign: 'center',
-                      color: lineColor,
-                      fontWeight: 'bold',
-                      userSelect: 'none',
-                    }}
-                  >
-                    {prefix}
-                  </div>
-                  <div style={{ flex: 1, padding: '0 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                    {line.text || <span style={{ color: '#ccc' }}>&nbsp;</span>}
+          <Timeline
+            items={projectVersions.map(version => ({
+              dot: (
+                <div style={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: '50%',
+                  background: getVersionColor(version.fileType),
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}>
+                  <FileTextOutlined style={{ color: '#fff', fontSize: 12 }} />
+                </div>
+              ),
+              children: (
+                <div style={{ paddingBottom: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <div>
+                      <Text strong style={{ fontSize: 14 }}>{version.fileName}</Text>
+                      <div style={{ marginTop: 4 }}>
+                        <Tag color={getVersionColor(version.fileType)}>
+                          {version.fileType?.toUpperCase() || '未知'}
+                        </Tag>
+                        {version.description && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>{version.description}</Text>
+                        )}
+                      </div>
+                    </div>
+                    <Space size={4}>
+                      <ClockCircleOutlined style={{ color: '#999', fontSize: 12 }} />
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {new Date(version.createdAt).toLocaleString('zh-CN')}
+                      </Text>
+                    </Space>
                   </div>
                 </div>
-              );
-            })}
-          </div>
+              ),
+            }))}
+          />
         </Card>
       )}
     </div>
