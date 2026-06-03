@@ -51,13 +51,13 @@ const AISettings: React.FC = () => {
 
   const normalizeAIConfig = (value: AIConfig | null): AIConfig => {
     if (value?.models?.length) {
-      const models = value.models.map((model, index) => ({
+      const models = value.models.map((model: AIModelConfig, index: number) => ({
         ...model,
         id: model.id || `model-${Date.now()}-${index}`,
         name: model.name || model.model || `模型 ${index + 1}`,
         enabled: model.enabled !== false,
       }));
-      const activeModelId = value.activeModelId && models.some(model => model.id === value.activeModelId)
+      const activeModelId = value.activeModelId && models.some((m: AIModelConfig) => m.id === value.activeModelId)
         ? value.activeModelId
         : models[0].id;
       return {
