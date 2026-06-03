@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Card, Typography, Empty, Button, Space, Tag, Input, Tooltip, Select } from 'antd';
+import { Card, Typography, Empty, Button, Space, Tag, Input, Tooltip, Drawer, Divider, List } from 'antd';
 import {
   LeftOutlined,
   RightOutlined,
@@ -9,6 +9,7 @@ import {
   RestOutlined,
   FlagOutlined,
   PlusOutlined,
+  CalendarOutlined,
 } from '@ant-design/icons';
 
 const { Text, Title } = Typography;
@@ -38,8 +39,9 @@ const DiffViewer: React.FC = () => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [editingDate, setEditingDate] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
+  const [newDesc, setNewDesc] = useState('');
   const [newType, setNewType] = useState<DayType>('work');
 
   const holidays = useMemo(() => new Set([
@@ -85,6 +87,11 @@ const DiffViewer: React.FC = () => {
 
   const formatDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
+  const formatDateDisplay = (dateStr: string) => {
+    const d = new Date(dateStr);
+    return `${d.getMonth() + 1}月${d.getDate()}日 周${WEEKDAYS[d.getDay()]}`;
+  };
+
   const getDayType = (date: Date): DayType => {
     const dateStr = formatDate(date);
     const event = events.find(e => e.date === dateStr);
@@ -96,27 +103,39 @@ const DiffViewer: React.FC = () => {
     return 'work';
   };
 
-  const getEventsForDate = (date: Date) => events.filter(e => e.date === formatDate(date));
+  const getEventsForDate = (dateStr: string) => events.filter(e => e.date === dateStr);
 
-  const addEvent = (dateStr: string) => {
-    if (!newTitle.trim()) return;
+  const addEvent = () => {
+    if (!selectedDate || !newTitle.trim()) return;
     const event: CalendarEvent = {
       id: Date.now().toString(),
-      date: dateStr,
+      date: selectedDate,
       type: newType,
       title: newTitle.trim(),
+      description: newDesc.trim() || undefined,
     };
     setEvents([...events, event]);
     setNewTitle('');
+    setNewDesc('');
     setNewType('work');
-    setEditingDate(null);
   };
 
   const deleteEvent = (id: string) => {
     setEvents(events.filter(e => e.id !== id));
   };
 
+  const openDateDrawer = (dateStr: string) => {
+    setSelectedDate(dateStr);
+    setDrawerOpen(true);
+    setNewTitle('');
+    setNewDesc('');
+    setNewType(getDayType(new Date(dateStr)));
+  };
+
   const today = formatDate(new Date());
+  const selectedDateType = selectedDate ? getDayType(new Date(selectedDate)) : 'work';
+  const selectedDateConfig = dayTypeConfig[selectedDateType];
+  const selectedDateEvents = selectedDate ? getEventsForDate(selectedDate) : [];
 
   const monthStats = useMemo(() => {
     let workDays = 0, restDays = 0, holidaysCount = 0;
@@ -131,166 +150,204 @@ const DiffViewer: React.FC = () => {
   }, [year, month, events, holidays, makeupDays]);
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <Title level={4} style={{ margin: 0 }}>工作日历</Title>
-        <Space>
-          <Tag color="blue">工作日 {monthStats.workDays} 天</Tag>
-          <Tag color="green">休息日 {monthStats.restDays} 天</Tag>
-          <Tag color="gold">节假日 {monthStats.holidays} 天</Tag>
-        </Space>
+    <div style={{ display: 'flex', height: '100%', gap: 16 }}>
+      {/* 左侧：日历主体 */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <Title level={4} style={{ margin: 0 }}>工作日历</Title>
+          <Space>
+            <Tag color="blue">工作日 {monthStats.workDays} 天</Tag>
+            <Tag color="green">休息日 {monthStats.restDays} 天</Tag>
+            <Tag color="gold">节假日 {monthStats.holidays} 天</Tag>
+          </Space>
+        </div>
+
+        <Card
+          title={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <Button icon={<LeftOutlined />} onClick={() => setCurrentDate(new Date(year, month - 1, 1))} />
+              <Text strong style={{ fontSize: 18, minWidth: 120, textAlign: 'center' }}>{year}年 {MONTHS[month]}</Text>
+              <Button icon={<RightOutlined />} onClick={() => setCurrentDate(new Date(year, month + 1, 1))} />
+              <Button onClick={() => setCurrentDate(new Date())}>今天</Button>
+            </div>
+          }
+          extra={
+            <Space size={4}>
+              {Object.entries(dayTypeConfig).map(([type, config]) => (
+                <Tag key={type} color={config.color} style={{ margin: 0 }}>{config.label}</Tag>
+              ))}
+            </Space>
+          }
+          styles={{ body: { padding: '8px 12px' } }}
+        >
+          {/* 星期头 */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, marginBottom: 6 }}>
+            {WEEKDAYS.map((day, i) => (
+              <div key={day} style={{ textAlign: 'center', padding: '6px 0', fontWeight: 600, color: i === 0 || i === 6 ? '#ff4d4f' : '#666', fontSize: 13 }}>
+                {day}
+              </div>
+            ))}
+          </div>
+
+          {/* 日历网格 */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2 }}>
+            {calendarDays.map(({ date, isCurrentMonth }, index) => {
+              const dateStr = formatDate(date);
+              const dayType = getDayType(date);
+              const dayEvents = getEventsForDate(dateStr);
+              const isToday = dateStr === today;
+              const isSelected = selectedDate === dateStr;
+              const config = dayTypeConfig[dayType];
+
+              return (
+                <div
+                  key={index}
+                  onClick={() => openDateDrawer(dateStr)}
+                  style={{
+                    minHeight: 72,
+                    padding: '4px 6px',
+                    borderRadius: 6,
+                    border: isSelected ? `2px solid ${config.color}` : isToday ? '2px solid #1890ff' : '1px solid #f0f0f0',
+                    background: isCurrentMonth ? isSelected ? `${config.color}08` : isToday ? '#e6f7ff' : '#fff' : '#fafafa',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s',
+                    opacity: isCurrentMonth ? 1 : 0.4,
+                    position: 'relative',
+                  }}
+                  onMouseEnter={e => {
+                    if (isCurrentMonth && !isSelected) {
+                      e.currentTarget.style.borderColor = config.color;
+                      e.currentTarget.style.transform = 'scale(1.02)';
+                    }
+                  }}
+                  onMouseLeave={e => {
+                    if (isCurrentMonth && !isSelected) {
+                      e.currentTarget.style.borderColor = isToday ? '#1890ff' : '#f0f0f0';
+                      e.currentTarget.style.transform = 'scale(1)';
+                    }
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <span style={{ fontSize: 13, fontWeight: isToday ? 700 : 500, color: isToday ? '#1890ff' : isCurrentMonth ? '#333' : '#999' }}>
+                      {date.getDate()}
+                    </span>
+                    {dayType !== 'work' && (
+                      <span style={{ fontSize: 8, padding: '1px 3px', borderRadius: 2, background: `${config.color}15`, color: config.color, fontWeight: 600 }}>
+                        {config.label}
+                      </span>
+                    )}
+                  </div>
+                  {dayEvents.length > 0 && (
+                    <div style={{ marginTop: 2 }}>
+                      {dayEvents.slice(0, 2).map(event => (
+                        <div key={event.id} style={{ fontSize: 9, padding: '1px 3px', borderRadius: 2, background: `${dayTypeConfig[event.type].color}15`, color: dayTypeConfig[event.type].color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 1 }}>
+                          {event.title}
+                        </div>
+                      ))}
+                      {dayEvents.length > 2 && <div style={{ fontSize: 9, color: '#999', textAlign: 'center' }}>+{dayEvents.length - 2}</div>}
+                    </div>
+                  )}
+                  {isToday && <div style={{ position: 'absolute', bottom: 3, right: 3, width: 5, height: 5, borderRadius: '50%', background: '#1890ff' }} />}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
       </div>
 
-      <Card
+      {/* 右侧：日期详情抽屉 */}
+      <Drawer
         title={
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            <Button icon={<LeftOutlined />} onClick={() => setCurrentDate(new Date(year, month - 1, 1))} />
-            <Text strong style={{ fontSize: 18, minWidth: 120, textAlign: 'center' }}>{year}年 {MONTHS[month]}</Text>
-            <Button icon={<RightOutlined />} onClick={() => setCurrentDate(new Date(year, month + 1, 1))} />
-            <Button onClick={() => setCurrentDate(new Date())}>今天</Button>
-          </div>
+          selectedDate ? (
+            <Space>
+              <CalendarOutlined />
+              <span>{formatDateDisplay(selectedDate)}</span>
+              <Tag color={selectedDateConfig.color}>{selectedDateConfig.label}</Tag>
+            </Space>
+          ) : '日期详情'
         }
-        extra={
-          <Space size={4}>
-            {Object.entries(dayTypeConfig).map(([type, config]) => (
-              <Tag key={type} color={config.color} style={{ margin: 0 }}>{config.label}</Tag>
-            ))}
-          </Space>
-        }
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        width={320}
+        styles={{ body: { padding: '12px 16px' } }}
       >
-        {/* 星期头 */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, marginBottom: 8 }}>
-          {WEEKDAYS.map((day, i) => (
-            <div key={day} style={{ textAlign: 'center', padding: '8px 0', fontWeight: 600, color: i === 0 || i === 6 ? '#ff4d4f' : '#666', fontSize: 13 }}>
-              {day}
+        {selectedDate && (
+          <>
+            {/* 添加日程表单 */}
+            <div style={{ marginBottom: 16 }}>
+              <Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>添加日程</Text>
+              <Space direction="vertical" style={{ width: '100%' }} size={8}>
+                <select
+                  value={newType}
+                  onChange={e => setNewType(e.target.value as DayType)}
+                  style={{
+                    width: '100%', padding: '6px 10px', borderRadius: 6,
+                    border: '1px solid #d9d9d9', fontSize: 13, cursor: 'pointer',
+                    background: '#fff',
+                  }}
+                >
+                  {Object.entries(dayTypeConfig).map(([type, config]) => (
+                    <option key={type} value={type}>{config.label}</option>
+                  ))}
+                </select>
+                <Input
+                  placeholder="日程标题"
+                  value={newTitle}
+                  onChange={e => setNewTitle(e.target.value)}
+                  onPressEnter={addEvent}
+                />
+                <Input.TextArea
+                  placeholder="备注（可选）"
+                  rows={2}
+                  value={newDesc}
+                  onChange={e => setNewDesc(e.target.value)}
+                />
+                <Button type="primary" icon={<PlusOutlined />} block onClick={addEvent} disabled={!newTitle.trim()}>
+                  添加
+                </Button>
+              </Space>
             </div>
-          ))}
-        </div>
 
-        {/* 日历网格 */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2 }}>
-          {calendarDays.map(({ date, isCurrentMonth }, index) => {
-            const dateStr = formatDate(date);
-            const dayType = getDayType(date);
-            const dayEvents = getEventsForDate(date);
-            const isToday = dateStr === today;
-            const config = dayTypeConfig[dayType];
-            const isSelected = selectedDate === dateStr;
-            const isEditing = editingDate === dateStr;
+            <Divider style={{ margin: '12px 0' }} />
 
-            return (
-              <div
-                key={index}
-                onClick={() => {
-                  setSelectedDate(dateStr);
-                  if (!isEditing) {
-                    setEditingDate(dateStr);
-                    setNewTitle('');
-                    setNewType(dayType);
-                  }
-                }}
-                style={{
-                  minHeight: 90,
-                  padding: 6,
-                  borderRadius: 8,
-                  border: isSelected ? `2px solid ${config.color}` : isToday ? '2px solid #1890ff' : '1px solid #f0f0f0',
-                  background: isCurrentMonth ? isSelected ? `${config.color}08` : isToday ? '#e6f7ff' : '#fff' : '#fafafa',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s',
-                  opacity: isCurrentMonth ? 1 : 0.4,
-                  position: 'relative',
-                  overflow: 'hidden',
-                }}
-                onMouseEnter={e => {
-                  if (isCurrentMonth && !isSelected) {
-                    e.currentTarget.style.borderColor = config.color;
-                    e.currentTarget.style.boxShadow = `0 2px 8px ${config.color}20`;
-                  }
-                }}
-                onMouseLeave={e => {
-                  if (isCurrentMonth && !isSelected) {
-                    e.currentTarget.style.borderColor = isToday ? '#1890ff' : '#f0f0f0';
-                    e.currentTarget.style.boxShadow = 'none';
-                  }
-                }}
-              >
-                {/* 日期数字 + 类型标签 */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <span style={{ fontSize: 13, fontWeight: isToday ? 700 : 500, color: isToday ? '#1890ff' : isCurrentMonth ? '#333' : '#999' }}>
-                    {date.getDate()}
-                  </span>
-                  {dayType !== 'work' && (
-                    <span style={{ fontSize: 9, padding: '1px 4px', borderRadius: 3, background: `${config.color}15`, color: config.color, fontWeight: 600 }}>
-                      {config.label}
-                    </span>
-                  )}
-                </div>
-
-                {/* 已有事件列表 */}
-                {dayEvents.length > 0 && (
-                  <div style={{ marginTop: 4 }}>
-                    {dayEvents.map(event => (
-                      <Tooltip key={event.id} title={event.description} placement="topLeft">
-                        <div style={{
-                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                          fontSize: 10, padding: '1px 4px', borderRadius: 3,
-                          background: `${dayTypeConfig[event.type].color}15`,
-                          color: dayTypeConfig[event.type].color,
-                          marginBottom: 2,
-                        }}>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{event.title}</span>
-                          <DeleteOutlined
-                            style={{ fontSize: 8, marginLeft: 2, cursor: 'pointer', opacity: 0.6 }}
-                            onClick={(e) => { e.stopPropagation(); deleteEvent(event.id); }}
-                          />
+            {/* 已有日程列表 */}
+            <div>
+              <Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>日程列表 ({selectedDateEvents.length})</Text>
+              {selectedDateEvents.length === 0 ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>暂无日程</Text>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {selectedDateEvents.map(event => {
+                    const cfg = dayTypeConfig[event.type];
+                    return (
+                      <div key={event.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: '#fafafa', borderRadius: 6, border: `1px solid ${cfg.color}20` }}>
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: cfg.color, flexShrink: 0 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={{ fontSize: 13, display: 'block' }}>{event.title}</Text>
+                          {event.description && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>{event.description}</Text>}
                         </div>
-                      </Tooltip>
-                    ))}
-                  </div>
-                )}
+                        <Tag color={cfg.color} style={{ margin: 0, fontSize: 10 }}>{cfg.label}</Tag>
+                        <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => deleteEvent(event.id)} />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
 
-                {/* 内联编辑区域：选中且是当前月时显示 */}
-                {isSelected && isCurrentMonth && isEditing && (
-                  <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 3 }} onClick={e => e.stopPropagation()}>
-                    <Select
-                      size="small"
-                      value={newType}
-                      onChange={setNewType}
-                      style={{ width: '100%' }}
-                      popupMatchSelectWidth={false}
-                      options={Object.entries(dayTypeConfig).map(([type, cfg]) => ({
-                        value: type,
-                        label: <span style={{ color: cfg.color }}>● {cfg.label}</span>,
-                      }))}
-                    />
-                    <div style={{ display: 'flex', gap: 2 }}>
-                      <Input
-                        size="small"
-                        placeholder="添加日程..."
-                        value={newTitle}
-                        onChange={e => setNewTitle(e.target.value)}
-                        onPressEnter={() => addEvent(dateStr)}
-                        style={{ flex: 1 }}
-                      />
-                      <Button
-                        type="primary"
-                        size="small"
-                        icon={<PlusOutlined />}
-                        onClick={() => addEvent(dateStr)}
-                        disabled={!newTitle.trim()}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {isToday && (
-                  <div style={{ position: 'absolute', bottom: 4, right: 4, width: 6, height: 6, borderRadius: '50%', background: '#1890ff' }} />
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </Card>
+            {/* 该日期自动类型说明 */}
+            <Divider style={{ margin: '12px 0' }} />
+            <div style={{ padding: '8px 10px', background: '#f6f8fa', borderRadius: 6 }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                该日期类型：<Tag color={selectedDateConfig.color} style={{ margin: 0 }}>{selectedDateConfig.label}</Tag>
+                {selectedDateType === 'holiday' && '（法定节假日）'}
+                {selectedDateType === 'rest' && '（周末休息）'}
+                {selectedDateType === 'work' && '（正常工作日）'}
+              </Text>
+            </div>
+          </>
+        )}
+      </Drawer>
     </div>
   );
 };
