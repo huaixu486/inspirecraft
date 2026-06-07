@@ -37,10 +37,51 @@ const hashPath = (value: string) => {
 const hasStageKeyword = (allStages: StageConfig[], file: ScannedStageFile) =>
   detectTimelineStage(allStages, file.name, file.path) !== '其他';
 
-const matchTemplateForStage = (templates: WritingTemplate[], allStages: StageConfig[], stage: string) =>
-  templates.find(t =>
+const templateKindGroups = [
+  ['申报指南', '指南'],
+  ['提案表', '提案'],
+  ['可研报告', '可行性研究', '可研'],
+  ['任务书'],
+  ['合同'],
+  ['预算', '经费'],
+  ['验收报告', '验收'],
+  ['总结报告', '总结'],
+  ['审查意见', '审查'],
+];
+
+const normalizeMatchText = (...parts: Array<string | undefined>) =>
+  parts.filter(Boolean).join(' ').toLowerCase();
+
+const findKindGroup = (text: string) =>
+  templateKindGroups.find(group => group.some(token => text.includes(token.toLowerCase())));
+
+const templateMatchesKind = (template: WritingTemplate, group?: string[]) => {
+  if (!group) return false;
+  const templateText = normalizeMatchText(template.name, template.category, template.description);
+  return group.some(token => templateText.includes(token.toLowerCase()));
+};
+
+const sortNewestTemplate = (items: WritingTemplate[]) =>
+  [...items].sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime());
+
+const matchTemplateForFile = (templates: WritingTemplate[], allStages: StageConfig[], file: ScannedStageFile, stage: string) => {
+  const fileText = normalizeMatchText(file.name, file.path);
+  const kindGroup = findKindGroup(fileText);
+  if (kindGroup) {
+    const kindMatches = templates.filter(template => templateMatchesKind(template, kindGroup));
+    return kindMatches.length ? sortNewestTemplate(kindMatches)[0] : undefined;
+  }
+  const directMatches = templates.filter(template => {
+    const templateName = String(template.name || '').toLowerCase();
+    const templateCategory = String(template.category || '').toLowerCase();
+    return Boolean(templateName && fileText.includes(templateName)) || Boolean(templateCategory && fileText.includes(templateCategory));
+  });
+  if (directMatches.length) return sortNewestTemplate(directMatches)[0];
+  const stageMatches = templates.filter(t =>
     t.name.includes(stage) || t.category?.includes(stage) || detectTimelineStage(allStages, t.name, t.category) === stage
   );
+  return stageMatches.length === 1 ? stageMatches[0] : undefined;
+};
 
 export const syncProjectStageFiles = async (
   project: Project,
@@ -57,7 +98,7 @@ export const syncProjectStageFiles = async (
 
   for (const file of files) {
     const stage = detectTimelineStage(deps.allStages, file.name, file.path);
-    const matchedTemplate = matchTemplateForStage(deps.templates, deps.allStages, stage);
+    const matchedTemplate = matchTemplateForFile(deps.templates, deps.allStages, file, stage);
     const normalizedFilePath = normalizePath(file.path);
     const existing = deps.projectDocs.find(doc =>
       doc.projectId === project.id &&

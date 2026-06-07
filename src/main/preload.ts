@@ -1,4 +1,4 @@
-﻿import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 // 暴露给渲染进程的API
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFile: (filters?: any[]) => ipcRenderer.invoke('dialog:openFile', filters),
   openInExplorer: (folderPath: string) => ipcRenderer.invoke('file:openInExplorer', folderPath),
   openFileWithApp: (filePath: string) => ipcRenderer.invoke('file:openWithDefaultApp', filePath),
+  startDrag: (filePath: string) => ipcRenderer.sendSync('shell:startDrag', filePath),
+  getPathForFile: (file: any) => webUtils.getPathForFile(file),
+  renameFile: (params: { filePath: string; newName: string }) => ipcRenderer.invoke('file:rename', params),
+  importFiles: (params: { folderPath: string; filePaths: string[] }) => ipcRenderer.invoke('file:importFiles', params),
   deleteFile: (filePath: string) => ipcRenderer.invoke('file:delete', filePath),
   readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
   readDir: (dirPath: string) => ipcRenderer.invoke('file:readDir', dirPath),
@@ -14,6 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   parseWordDocument: (filePath: string) => ipcRenderer.invoke('file:parseWord', filePath),
   parseDocument: (filePath: string) => ipcRenderer.invoke('file:parseDocument', filePath),
   parseDocumentSilent: (filePath: string) => ipcRenderer.invoke('file:parseDocumentSilent', filePath),
+  extractTemplateFormatRules: (filePath: string) => ipcRenderer.invoke('file:extractTemplateFormatRules', filePath),
   parsePdfDocument: (filePath: string) => ipcRenderer.invoke('file:parsePdf', filePath),
 
   // 项目操作

@@ -38,11 +38,11 @@ import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
-import { WritingTemplate, TemplateNode, StageConfig, TemplateOutputFileType, TemplateFormatRules } from '../../shared/types';
+import { WritingTemplate, TemplateNode, StageConfig, TemplateOutputFileType, TemplateFormatRules } from '../../../shared/types';
 import { getAllStages, getGlobalStageProgress } from '../../utils/timelineStages';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 
-const { Title, Text } = Typography;
+const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const templateFileTypeOptions: { value: TemplateOutputFileType; label: string }[] = [
@@ -69,11 +69,14 @@ const fontSizeOptions = [
 const fallbackFontNames = ['宋体', '黑体', '微软雅黑', '仿宋', '楷体', '等线', 'Arial', 'Calibri', 'Times New Roman'];
 const supportedTemplateFileTypes = templateFileTypeOptions.map(option => option.value);
 const formatRuleRows = [
-  { key: 'heading1', label: '一级标题', defaultFont: '黑体', defaultSize: 16, defaultLineHeight: 1.5 },
-  { key: 'heading2', label: '二级标题', defaultFont: '黑体', defaultSize: 15, defaultLineHeight: 1.5 },
-  { key: 'heading3', label: '三级标题', defaultFont: '黑体', defaultSize: 14, defaultLineHeight: 1.5 },
-  { key: 'heading4', label: '四级标题', defaultFont: '黑体', defaultSize: 12, defaultLineHeight: 1.5 },
-  { key: 'body', label: '正文', defaultFont: '宋体', defaultSize: 12, defaultLineHeight: 1.5 },
+  { key: 'heading1', label: '一级标题', defaultFont: '黑体', defaultSize: 16, defaultLineHeight: 1.5, defaultBold: true },
+  { key: 'heading2', label: '二级标题', defaultFont: '黑体', defaultSize: 15, defaultLineHeight: 1.5, defaultBold: true },
+  { key: 'heading3', label: '三级标题', defaultFont: '黑体', defaultSize: 14, defaultLineHeight: 1.5, defaultBold: true },
+  { key: 'heading4', label: '四级标题', defaultFont: '黑体', defaultSize: 12, defaultLineHeight: 1.5, defaultBold: true },
+  { key: 'body', label: '正文', defaultFont: '宋体', defaultSize: 12, defaultLineHeight: 1.5, defaultBold: false },
+  { key: 'caption', label: '图题/图例', defaultFont: '宋体', defaultSize: 10.5, defaultLineHeight: 1.5, defaultBold: false },
+  { key: 'tableTitle', label: '表题', defaultFont: '宋体', defaultSize: 10.5, defaultLineHeight: 1.5, defaultBold: false },
+  { key: 'tableHeader', label: '表头', defaultFont: '宋体', defaultSize: 10.5, defaultLineHeight: 1.5, defaultBold: true },
 ] as const;
 
 const getImportedBaseName = (filePath: string, fileName?: string) =>
@@ -120,7 +123,7 @@ function isLikelyReadableHeading(value: string): boolean {
   return !isLikelyGarbledText(compact);
 }
 
-async function parseImportedDocument(filePath: string): Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; error?: string }> {
+async function parseImportedDocument(filePath: string): Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; convertedFilePath?: string; error?: string }> {
   const ext = filePath.split('.').pop()?.toLowerCase();
   const fileName = filePath.split(/[/\\]/).pop();
   const isMissingHandler = (message: string, channel: string) =>
@@ -227,9 +230,106 @@ const flattenFormatRulesForForm = (rules?: TemplateFormatRules) => {
       fontSize: rule?.fontRequirement?.fontSize || fallback[row.key].fontSize,
       letterSpacing: rule?.fontRequirement?.letterSpacing ?? fallback[row.key].letterSpacing,
       lineHeight: rule?.fontRequirement?.lineHeight || fallback[row.key].lineHeight,
+      fontWeight: rule?.fontRequirement?.fontWeight || (row.defaultBold ? 'bold' : 'normal'),
     };
   });
   return fallback;
+};
+
+type TemplateFormatRuleKey = typeof formatRuleRows[number]['key'];
+
+const fontSizeNameMap: Record<string, number> = {
+  初号: 42,
+  小初: 36,
+  一号: 26,
+  小一: 24,
+  二号: 22,
+  小二: 18,
+  三号: 16,
+  小三: 15,
+  四号: 14,
+  小四: 12,
+  五号: 10.5,
+  小五: 9,
+  六号: 7.5,
+  小六: 6.5,
+};
+
+const styleTextAliases: Record<TemplateFormatRuleKey, string[]> = {
+  heading1: ['一级标题', '章标题', '一级题名'],
+  heading2: ['二级标题', '节标题', '二级题名'],
+  heading3: ['三级标题', '三级题名'],
+  heading4: ['四级标题', '四级题名'],
+  body: ['正文', '正文内容', '主体文字'],
+  caption: ['图题', '图例', '图注', '图名', '图片标题'],
+  tableTitle: ['表题', '表名', '表格标题'],
+  tableHeader: ['表头', '表格表头', '表头文字'],
+};
+
+const mergeFormatFormValues = (base: Record<string, any>, incoming?: Record<string, any>) => {
+  const merged = { ...base };
+  Object.entries(incoming || {}).forEach(([key, value]) => {
+    if (!value) return;
+    merged[key] = { ...(merged[key] || {}) };
+    ['fontFamily', 'fontSize', 'letterSpacing', 'lineHeight', 'fontWeight'].forEach(field => {
+      if ((value as any)[field] !== undefined && (value as any)[field] !== '') {
+        merged[key][field] = (value as any)[field];
+      }
+    });
+  });
+  return merged;
+};
+
+const formatRulesToPartialFormValues = (rules?: TemplateFormatRules): Record<string, any> => {
+  const result: Record<string, any> = {};
+  formatRuleRows.forEach(row => {
+    const rule = rules?.[row.key];
+    if (!rule) return;
+    result[row.key] = {
+      fontFamily: rule.fontRequirement?.fontFamily,
+      fontSize: rule.fontRequirement?.fontSize,
+      letterSpacing: rule.fontRequirement?.letterSpacing,
+      lineHeight: rule.fontRequirement?.lineHeight,
+      fontWeight: rule.fontRequirement?.fontWeight,
+    };
+  });
+  return result;
+};
+
+const parseFormatValuesFromText = (text: string) => {
+  const fontFamily = fallbackFontNames.find(font => text.includes(font));
+  const namedSize = Object.entries(fontSizeNameMap).find(([name]) => text.includes(name))?.[1];
+  const ptSize = Number(text.match(/(\d+(?:\.\d+)?)\s*(?:pt|磅)/i)?.[1]);
+  const lineHeight = Number(text.match(/(?:行距|行间距|倍行距)[^\d]*(\d+(?:\.\d+)?)/)?.[1]);
+  return {
+    fontFamily,
+    fontSize: namedSize || (Number.isFinite(ptSize) && ptSize > 0 ? ptSize : undefined),
+    lineHeight: Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : undefined,
+    fontWeight: /加粗|粗体|黑体/.test(text) ? 'bold' : /不加粗|常规|普通/.test(text) ? 'normal' : undefined,
+  };
+};
+
+const inferFormatRulesFromText = (content: string): { values: Record<string, any>; evidence: string[] } => {
+  const values: Record<string, any> = {};
+  const evidence: string[] = [];
+  const lines = content
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  formatRuleRows.forEach(row => {
+    const aliases = styleTextAliases[row.key];
+    const matchedLine = lines.find(line =>
+      aliases.some(alias => line.includes(alias)) && /(字体|字号|号|pt|磅|行距|加粗|黑体|宋体|仿宋|楷体|微软雅黑)/.test(line)
+    );
+    if (!matchedLine) return;
+    const parsed = parseFormatValuesFromText(matchedLine);
+    if (!parsed.fontFamily && !parsed.fontSize && !parsed.lineHeight && !parsed.fontWeight) return;
+    values[row.key] = parsed;
+    evidence.push(`${row.label}：根据文字说明「${matchedLine.slice(0, 80)}」识别`);
+  });
+
+  return { values, evidence };
 };
 
 // ==================== 标题提取逻辑 ====================
@@ -291,21 +391,169 @@ function normalizeHeadingDescription(value?: string): string | undefined {
     .map(line => line.trim())
     .filter(line => line && !/^[-—_=\s]{3,}$/.test(line));
   const compact = lines.join('\n').trim();
-  return compact ? compact.slice(0, 1200) : undefined;
+  return compact || undefined;
 }
 
-function nodesFromHeadingItems(items: Array<{ title: string; level?: number; description?: string }>): TemplateNode[] {
+
+type TemplateGuidanceParts = {
+  requirementText: string;
+  exampleText: string;
+};
+
+const uniqueTextLines = (lines: string[]) => {
+  const seen = new Set<string>();
+  return lines
+    .map(line => normalizeHeadingDescription(line) || '')
+    .filter(Boolean)
+    .filter(line => {
+      const key = line.replace(/\s+/g, ' ').slice(0, 120);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
+const isExampleHeadingText = (text: string) =>
+  /(范文|示例|示范|样例|例文|参考文|参考写法|参考内容|优秀案例|写法参考)/.test(text);
+
+const isRequirementHeadingText = (text: string) =>
+  /(要求|填写|说明|格式|规范|须知|注意事项|编写|撰写|内容要点|提交材料|审查要点|评分|指标|标准)/.test(text);
+
+const classifyTemplateBlock = (text: string, heading = ''): 'requirement' | 'example' | 'unknown' => {
+  const target = `${heading}\n${text}`;
+  if (isExampleHeadingText(heading)) return 'example';
+  if (isRequirementHeadingText(heading)) return 'requirement';
+  const exampleHits = (target.match(/范文|示例|示范|样例|例文|例如|参考写法|参考内容|以下为|如下所示|可参考/g) || []).length;
+  const requirementHits = (target.match(/要求|应当|应|需|需要|必须|不得|填写|说明|格式|字号|字体|行距|内容包括|材料|附件|指标|标准|依据|编写/g) || []).length;
+  if (exampleHits > requirementHits && exampleHits > 0) return 'example';
+  if (requirementHits > 0) return 'requirement';
+  return 'unknown';
+};
+
+const splitTemplateGuidanceText = (text = '', heading = ''): TemplateGuidanceParts => {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map(part => part.trim())
+    .filter(Boolean);
+  const requirementLines: string[] = [];
+  const exampleLines: string[] = [];
+  let mode: 'requirement' | 'example' | null = isExampleHeadingText(heading)
+    ? 'example'
+    : isRequirementHeadingText(heading)
+      ? 'requirement'
+      : null;
+
+  const source = paragraphs.length ? paragraphs : text.split('\n').map(line => line.trim()).filter(Boolean);
+  source.forEach(part => {
+    if (isExampleHeadingText(part)) {
+      mode = 'example';
+      exampleLines.push(part);
+      return;
+    }
+    if (isRequirementHeadingText(part)) {
+      mode = 'requirement';
+      requirementLines.push(part);
+      return;
+    }
+    const kind = classifyTemplateBlock(part, heading);
+    if (kind === 'example') {
+      exampleLines.push(part);
+    } else if (kind === 'requirement') {
+      requirementLines.push(part);
+    } else if (mode === 'example') {
+      exampleLines.push(part);
+    } else if (mode === 'requirement') {
+      requirementLines.push(part);
+    }
+  });
+
+  return {
+    requirementText: uniqueTextLines(requirementLines).join('\n').slice(0, 5000),
+    exampleText: uniqueTextLines(exampleLines).join('\n').slice(0, 6000),
+  };
+};
+
+const collectTemplateGuidance = (nodes: TemplateNode[], originalContent = ''): TemplateGuidanceParts => {
+  const requirementLines: string[] = [];
+  const exampleLines: string[] = [];
+  const visit = (items: TemplateNode[]) => {
+    items.forEach(node => {
+      if (node.requirementText) {
+        requirementLines.push(node.requirementText);
+      } else if (node.description) {
+        const legacyGuidance = splitTemplateGuidanceText(node.description, node.title);
+        requirementLines.push(legacyGuidance.requirementText);
+        exampleLines.push(legacyGuidance.exampleText);
+      }
+      if (node.exampleText) exampleLines.push(`${node.title}\n${node.exampleText}`);
+      if (node.children?.length) visit(node.children);
+    });
+  };
+  visit(nodes);
+  if (!requirementLines.length && !exampleLines.length && originalContent.trim()) {
+    const fallback = splitTemplateGuidanceText(originalContent);
+    requirementLines.push(fallback.requirementText);
+    exampleLines.push(fallback.exampleText);
+  }
+  return {
+    requirementText: uniqueTextLines(requirementLines).join('\n\n').slice(0, 8000),
+    exampleText: uniqueTextLines(exampleLines).join('\n\n').slice(0, 10000),
+  };
+};
+
+
+interface AiTemplateHeadingItem {
+  title: string;
+  level?: number;
+  description?: string;
+  requirementText?: string;
+  exampleText?: string;
+  isRequired?: boolean;
+}
+
+interface AiTemplateExtractionResult {
+  nodes: TemplateNode[];
+  requirementText: string;
+  exampleText: string;
+  formatRules?: TemplateFormatRules;
+  formatValues?: Record<string, any>;
+  evidence: string[];
+}
+
+const normalizeStringEvidence = (value: unknown): string[] => {
+  if (Array.isArray(value)) return value.map(item => String(item || '').trim()).filter(Boolean);
+  if (typeof value === 'string' && value.trim()) return value.split(/\n/).map(item => item.trim()).filter(Boolean);
+  return [];
+};
+
+function nodesFromHeadingItems(items: AiTemplateHeadingItem[]): TemplateNode[] {
   const nodes: TemplateNode[] = [];
   const stack: TemplateNode[] = [];
   items
     .filter(item => item.title && !isLikelyGarbledText(item.title))
     .forEach((item, index) => {
+      const rawDescription = String(item.description || '').trim();
+      const rawRequirement = String(item.requirementText || '').trim();
+      const rawExample = String(item.exampleText || '').trim();
+      const splitDescription = splitTemplateGuidanceText(rawDescription, item.title);
+      const splitRequirement = splitTemplateGuidanceText(rawRequirement, item.title);
+      const requirementText = uniqueTextLines([
+        splitRequirement.requirementText || rawRequirement,
+        splitDescription.requirementText,
+      ]).join('\n');
+      const exampleText = uniqueTextLines([
+        rawExample,
+        splitRequirement.exampleText,
+        splitDescription.exampleText,
+      ]).join('\n');
       const node: TemplateNode = {
-      id: `${Date.now()}-${index}`,
-      title: item.title.trim(),
-      level: Math.min(Math.max(Number(item.level) || 1, 1), 4),
-      description: normalizeHeadingDescription(item.description),
-      isRequired: true,
+        id: `${Date.now()}-${index}`,
+        title: item.title.trim(),
+        level: Math.min(Math.max(Number(item.level) || 1, 1), 4),
+        description: requirementText || undefined,
+        requirementText: requirementText || undefined,
+        exampleText: exampleText || undefined,
+        isRequired: item.isRequired === false ? false : !isExampleHeadingText(item.title),
       };
 
       while (stack.length && stack[stack.length - 1].level >= node.level) {
@@ -323,22 +571,138 @@ function nodesFromHeadingItems(items: Array<{ title: string; level?: number; des
   return nodes;
 }
 
-function parseAiHeadingResponse(response: string): TemplateNode[] {
-  const jsonText = response.match(/\[[\s\S]*\]/)?.[0];
-  if (!jsonText) return [];
-
+const extractJsonForAiTemplate = (response: string): any | null => {
+  const trimmed = String(response || '').trim();
   try {
-    const parsed = JSON.parse(jsonText);
-    if (!Array.isArray(parsed)) return [];
-    return nodesFromHeadingItems(parsed.map((item: any) => ({
-      title: String(item.title || item.name || '').trim(),
-      level: Number(item.level) || 1,
-      description: String(item.description || item.requirement || item.requirements || item.tips || '').trim(),
-    })));
-  } catch {
-    return [];
+    return JSON.parse(trimmed);
+  } catch {}
+  const objectMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (objectMatch) {
+    try {
+      return JSON.parse(objectMatch[0]);
+    } catch {}
   }
+  const arrayMatch = trimmed.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    try {
+      return JSON.parse(arrayMatch[0]);
+    } catch {}
+  }
+  return null;
+};
+
+const normalizeAiFormatStyleValues = (value: any) => {
+  const source = value?.fontRequirement || value || {};
+  const fontSize = Number(source.fontSize ?? source.size ?? source.pt);
+  const lineHeight = Number(source.lineHeight ?? source.lineSpacing);
+  const letterSpacing = Number(source.letterSpacing ?? source.spacing);
+  const fontWeightText = String(source.fontWeight || source.weight || '').toLowerCase();
+  return {
+    fontFamily: source.fontFamily || source.font || source.fontName,
+    fontSize: Number.isFinite(fontSize) && fontSize > 0 ? fontSize : undefined,
+    letterSpacing: Number.isFinite(letterSpacing) && letterSpacing >= 0 ? letterSpacing : undefined,
+    lineHeight: Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : undefined,
+    fontWeight: /bold|加粗|黑体|粗/.test(fontWeightText) ? 'bold' : /normal|常规|不加粗/.test(fontWeightText) ? 'normal' : undefined,
+  };
+};
+
+const normalizeAiFormatRules = (raw: any): { rules?: TemplateFormatRules; values: Record<string, any>; evidence: string[] } => {
+  const source = raw?.formatRules || raw?.styleRules || raw || {};
+  const values: Record<string, any> = {};
+  const evidence: string[] = [];
+  const aliasMap: Record<string, TemplateFormatRuleKey> = {
+    heading1: 'heading1',
+    h1: 'heading1',
+    title1: 'heading1',
+    一级标题: 'heading1',
+    heading2: 'heading2',
+    h2: 'heading2',
+    title2: 'heading2',
+    二级标题: 'heading2',
+    heading3: 'heading3',
+    h3: 'heading3',
+    三级标题: 'heading3',
+    heading4: 'heading4',
+    h4: 'heading4',
+    四级标题: 'heading4',
+    body: 'body',
+    正文: 'body',
+    caption: 'caption',
+    图题: 'caption',
+    图例: 'caption',
+    tableTitle: 'tableTitle',
+    表题: 'tableTitle',
+    tableHeader: 'tableHeader',
+    表头: 'tableHeader',
+  };
+
+  Object.entries(source || {}).forEach(([rawKey, rawValue]) => {
+    const normalizedKey = String(rawKey).replace(/\s/g, '');
+    const key = aliasMap[rawKey] || aliasMap[normalizedKey];
+    if (!key) return;
+    const styleValues = normalizeAiFormatStyleValues(rawValue);
+    const hasValue = Object.values(styleValues).some(value => value !== undefined && value !== '');
+    if (!hasValue) return;
+    values[key] = styleValues;
+    const row = formatRuleRows.find(item => item.key === key);
+    evidence.push(`${row?.label || key}：AI根据模板文本说明/样式样本识别`);
+  });
+
+  const rules: TemplateFormatRules = {};
+  formatRuleRows.forEach(row => {
+    const value = values[row.key];
+    if (!value) return;
+    rules[row.key] = { fontRequirement: value };
+  });
+
+  return {
+    rules: Object.keys(rules).length ? rules : undefined,
+    values,
+    evidence,
+  };
+};
+
+function parseAiHeadingResponse(response: string): AiTemplateExtractionResult {
+  const parsed = extractJsonForAiTemplate(response);
+  if (!parsed) return { nodes: [], requirementText: '', exampleText: '', evidence: [] };
+  const rawItems = Array.isArray(parsed)
+    ? parsed
+    : parsed.nodes || parsed.headings || parsed.sections || parsed.outline || [];
+  if (!Array.isArray(rawItems)) return { nodes: [], requirementText: '', exampleText: '', evidence: [] };
+
+  const items = rawItems.map((item: any) => ({
+    title: String(item.title || item.name || item.heading || '').trim(),
+    level: Number(item.level || item.headingLevel) || 1,
+    description: String(item.description || item.tips || item.note || '').trim(),
+    requirementText: String(item.requirementText || item.requirement || item.requirements || item.writingRequirement || item.contentRequirement || '').trim(),
+    exampleText: String(item.exampleText || item.example || item.sample || item.sampleText || item.referenceText || '').trim(),
+    isRequired: item.isRequired,
+  }));
+  const nodes = nodesFromHeadingItems(items);
+  const guidance = collectTemplateGuidance(nodes);
+  const normalizedFormat = normalizeAiFormatRules(parsed.formatRules || parsed.styleRules || parsed.format || {});
+  const requirementText = uniqueTextLines([
+    String(parsed.requirementText || parsed.requirements || parsed.templateRequirements || '').trim(),
+    guidance.requirementText,
+  ]).join('\n\n').slice(0, 8000);
+  const exampleText = uniqueTextLines([
+    String(parsed.exampleText || parsed.examples || parsed.sampleText || parsed.referenceWriting || '').trim(),
+    guidance.exampleText,
+  ]).join('\n\n').slice(0, 10000);
+  return {
+    nodes,
+    requirementText,
+    exampleText,
+    formatRules: normalizedFormat.rules,
+    formatValues: normalizedFormat.values,
+    evidence: [
+      ...normalizeStringEvidence(parsed.evidence || parsed.formatEvidence),
+      ...normalizedFormat.evidence,
+    ].slice(0, 12),
+  };
 }
+
+
 
 function inferHeadingLevel(heading: HeadingMatch, previous: HeadingMatch[]): number {
   const recent = previous.slice(-8);
@@ -395,12 +759,15 @@ function extractTemplateNodes(content: string): TemplateNode[] {
   for (const h of headingContents) {
     if (isLikelyGarbledText(h.title)) continue;
     idCounter++;
+    const guidance = splitTemplateGuidanceText(h.description, h.title);
     const node: TemplateNode = {
       id: String(idCounter),
       title: h.title,
       level: h.level,
-      isRequired: true,
-      description: h.description || undefined,
+      isRequired: !isExampleHeadingText(h.title),
+      description: guidance.requirementText || undefined,
+      requirementText: guidance.requirementText || undefined,
+      exampleText: guidance.exampleText || undefined,
     };
 
     while (stack.length && stack[stack.length - 1].level >= node.level) {
@@ -527,6 +894,7 @@ const TemplateManager: React.FC = () => {
   const [isAiExtracting, setIsAiExtracting] = useState(false);
   const [importedFilePath, setImportedFilePath] = useState<string>('');
   const [importedDocumentText, setImportedDocumentText] = useState<string>('');
+  const [formatRuleEvidence, setFormatRuleEvidence] = useState<string[]>([]);
   const [fontOptions, setFontOptions] = useState(fallbackFontNames.map(font => ({ value: font })));
   const [form] = Form.useForm();
   const enableFormatRules = Form.useWatch('enableFormatRules', form);
@@ -666,7 +1034,7 @@ const TemplateManager: React.FC = () => {
     const rules: TemplateFormatRules = {};
     formatRuleRows.forEach(row => {
       const value = values.formatRules?.[row.key] || {};
-      const hasAnyValue = value.fontFamily || value.fontSize || value.letterSpacing || value.lineHeight;
+      const hasAnyValue = value.fontFamily || value.fontSize || value.letterSpacing || value.lineHeight || value.fontWeight;
       if (!hasAnyValue) return;
       rules[row.key] = {
         fontRequirement: {
@@ -674,7 +1042,7 @@ const TemplateManager: React.FC = () => {
           fontSize: value.fontSize,
           letterSpacing: value.letterSpacing,
           lineHeight: value.lineHeight,
-          fontWeight: row.key === 'body' ? 'normal' : 'bold',
+          fontWeight: value.fontWeight || (row.defaultBold ? 'bold' : 'normal'),
         },
       };
     });
@@ -865,24 +1233,110 @@ const TemplateManager: React.FC = () => {
   const nodeTotal = flattenNodeCount(templateNodes);
   const requiredTotal = countRequiredNodes(templateNodes);
 
-  const extractNodesWithAi = async (content: string) => {
-    const prompt = `你是文档模板结构识别助手。请从下面文档文本中识别章节标题，并提取每个章节标题下方的写作要求、内容要求、格式要求或填写说明。
+  const extractNodesWithAi = async (content: string): Promise<AiTemplateExtractionResult> => {
+    const prompt = `你是“文档模板结构、写作要求、范文和格式规则”识别助手。请从下面的模板文本中同时识别：
+1. 标题结构和标题层级。
+2. 每个标题下哪些是硬性写作要求、填写说明、内容要求、格式要求。
+3. 每个标题下哪些是范文、示例、样例、参考写法。范文只作为写法参考，不可当作硬性要求。
+4. 文档不同部分的格式规则，包括一级标题、二级标题、三级标题、四级标题、正文、图题/图例、表题、表头。
 
-要求：
-1. 只返回 JSON 数组，不要解释。
-2. 每项格式为 {"title":"原始章节标题","level":1,"description":"该章节下方的要求或说明"}。
-3. level 只允许 1-4；按文档上下文判断，“一、/第X章”通常为1级，“（一）”通常为2级，“1.”在“一、/（一）”之后通常为3级，“（1）”通常为4级。
-4. description 只保留模板要求、编写提示、格式要求、内容说明；没有则为空字符串。
-5. 不要返回乱码、正文句子、页眉页脚、目录页码。
+请只返回 JSON 对象，不要 Markdown，不要代码块。格式如下：
+{
+  "nodes": [
+    {
+      "title": "原始章节标题",
+      "level": 1,
+      "requirementText": "该章节硬性要求/填写说明/内容要求/格式要求；没有则为空字符串",
+      "exampleText": "该章节范文/示例/样例/参考写法；没有则为空字符串",
+      "isRequired": true
+    }
+  ],
+  "requirementText": "模板全局硬性要求、填写说明、格式/内容约束；不要包含范文正文",
+  "exampleText": "模板全局范文、示例、样例、参考写法；只用于提取写作结构和表达方法",
+  "formatRules": {
+    "heading1": {"fontFamily":"字体名","fontSize":14,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"},
+    "heading2": {"fontFamily":"字体名","fontSize":14,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"},
+    "heading3": {"fontFamily":"字体名","fontSize":14,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"},
+    "heading4": {"fontFamily":"字体名","fontSize":12,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"},
+    "body": {"fontFamily":"字体名","fontSize":12,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"normal"},
+    "caption": {"fontFamily":"字体名","fontSize":10.5,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"normal"},
+    "tableTitle": {"fontFamily":"字体名","fontSize":10.5,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"normal"},
+    "tableHeader": {"fontFamily":"字体名","fontSize":10.5,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"}
+  },
+  "evidence": ["格式或分类识别依据，简短说明"]
+}
 
-文档文本：
-${content.slice(0, 24000)}`;
+识别规则：
+1. level 只允许 1-4。按上下文判断：“一、/第X章”通常为1级，“（一）”通常为2级，“1.”通常为3级，“（1）”通常为4级；如果文档实际层级不同，以上下文为准。
+2. requirementText 只放“要求、应当、必须、需、填写、说明、格式、字号、字体、行距、内容包括、提交材料、指标、标准、依据”等约束性内容。
+3. exampleText 只放“范文、示例、示范、样例、参考写法、参考内容、例如、如下所示”等样例性内容。
+4. 不要把范文中的项目事实、金额、时间、数据、背景当成当前模板要求。
+5. 目录、页码、页眉页脚、乱码、孤立正文句子不要作为标题。
+6. 如果格式在文本中明确说明，按说明提取；如果没有说明但模板文本明显展示了对应样式，请根据样式样本推断，并在 evidence 中说明。
+
+模板文本：
+${content.slice(0, 30000)}`;
 
     const response = await window.electronAPI.callAI(prompt);
     return parseAiHeadingResponse(response);
   };
 
+  const applyAiTemplateExtraction = async (result: AiTemplateExtractionResult, successPrefix = 'AI 已识别') => {
+    if (result.nodes.length === 0) {
+      message.warning('AI 未返回可用章节，请检查 AI 配置或文档内容');
+      return false;
+    }
+
+    const fallbackGuidance = collectTemplateGuidance(result.nodes, importedDocumentText);
+    const requirementText = result.requirementText || fallbackGuidance.requirementText;
+    const exampleText = result.exampleText || fallbackGuidance.exampleText;
+    const currentFormatValues = form.getFieldValue('formatRules') || buildDefaultFormatFormValues();
+    const mergedFormatValues = mergeFormatFormValues(
+      currentFormatValues,
+      result.formatValues || formatRulesToPartialFormValues(result.formatRules),
+    );
+    const evidence = result.evidence.slice(0, 12);
+
+    form.setFieldsValue({
+      requirementText,
+      exampleText,
+      ...(Object.keys(result.formatValues || {}).length || result.formatRules
+        ? { enableFormatRules: true, formatRules: mergedFormatValues }
+        : {}),
+    });
+    if (evidence.length > 0) {
+      setFormatRuleEvidence(evidence);
+    }
+    setTemplateNodes(result.nodes);
+    message.success(`${successPrefix} ${result.nodes.length} 个章节${evidence.length ? `，并补充 ${evidence.length} 条格式/分类依据` : ''}`);
+    return true;
+  };
+
+  const enrichAiResultWithSourceFormat = async (result: AiTemplateExtractionResult) => {
+    const fileExt = importedFilePath.split('.').pop()?.toLowerCase();
+    if (!importedFilePath || (fileExt !== 'docx' && fileExt !== 'doc') || !window.electronAPI.extractTemplateFormatRules) {
+      return result;
+    }
+    try {
+      const formatResult = await window.electronAPI.extractTemplateFormatRules(importedFilePath);
+      if (!formatResult.success || !formatResult.formatRules) return result;
+      const actualValues = formatRulesToPartialFormValues(formatResult.formatRules as TemplateFormatRules);
+      return {
+        ...result,
+        formatValues: mergeFormatFormValues(result.formatValues || {}, actualValues),
+        evidence: [
+          ...(formatResult.evidence || []),
+          ...result.evidence,
+        ].slice(0, 12),
+      };
+    } catch (error) {
+      console.warn('Template source format enrichment failed:', error);
+      return result;
+    }
+  };
+
   const handleAiExtract = async () => {
+
     if (!importedDocumentText) {
       message.warning('请先选择并解析一个文件');
       return;
@@ -890,13 +1344,8 @@ ${content.slice(0, 24000)}`;
 
     setIsAiExtracting(true);
     try {
-      const nodes = await extractNodesWithAi(importedDocumentText);
-      if (nodes.length === 0) {
-        message.warning('AI 未返回可用章节，请检查 AI 配置或文档内容');
-        return;
-      }
-      setTemplateNodes(nodes);
-      message.success(`AI 已识别 ${nodes.length} 个章节`);
+      const aiResult = await enrichAiResultWithSourceFormat(await extractNodesWithAi(importedDocumentText));
+      await applyAiTemplateExtraction(aiResult);
     } catch (error: any) {
       message.warning(error?.message || 'AI 章节识别失败，请先配置 AI API 密钥');
     } finally {
@@ -988,9 +1437,12 @@ ${content.slice(0, 24000)}`;
     window.requestAnimationFrame(() => {
       setImportedFilePath('');
       setImportedDocumentText('');
+      setFormatRuleEvidence([]);
       form.resetFields();
       form.setFieldsValue({
         outputFileType: 'docx',
+        requirementText: '',
+        exampleText: '',
         enableFormatRules: false,
         formatRules: buildDefaultFormatFormValues(),
       });
@@ -1005,9 +1457,12 @@ ${content.slice(0, 24000)}`;
     setIsModalOpen(true);
     window.requestAnimationFrame(() => {
       setImportedDocumentText('');
+      setFormatRuleEvidence([]);
       form.setFieldsValue({
         name: template.name,
         description: template.description,
+        requirementText: template.requirementText || collectTemplateGuidance(template.nodes || []).requirementText,
+        exampleText: template.exampleText || collectTemplateGuidance(template.nodes || []).exampleText,
         category: template.category,
         outputFileType: template.outputFileType || inferOutputFileType(template.filePath || ''),
         enableFormatRules: Boolean(template.formatRules || template.titleFontRequirement || template.bodyFontRequirement),
@@ -1053,6 +1508,8 @@ ${content.slice(0, 24000)}`;
         id: templateId,
         name: values.name,
         description: values.description,
+        requirementText: String(values.requirementText || '').trim(),
+        exampleText: String(values.exampleText || '').trim(),
         category: values.category,
         outputFileType: values.outputFileType || 'docx',
         titleFontRequirement: heading1Rule,
@@ -1100,6 +1557,7 @@ ${content.slice(0, 24000)}`;
       setIsExtracting(true);
       setImportedFilePath(filePath);
       setImportedDocumentText('');
+      setFormatRuleEvidence([]);
 
       const fileBaseName = getImportedBaseName(filePath);
       const currentName = form.getFieldValue('name');
@@ -1140,22 +1598,47 @@ ${content.slice(0, 24000)}`;
         }
       }
 
+      const textualFormat = inferFormatRulesFromText(result.content);
+      let actualFormatValues: Record<string, any> = {};
+      const actualEvidence: string[] = [];
+      if ((fileExt === 'docx' || fileExt === 'doc') && window.electronAPI.extractTemplateFormatRules) {
+        try {
+          const formatResult = await window.electronAPI.extractTemplateFormatRules(filePath);
+          if (formatResult.success && formatResult.formatRules) {
+            actualFormatValues = formatRulesToPartialFormValues(formatResult.formatRules as TemplateFormatRules);
+            actualEvidence.push(...(formatResult.evidence || []));
+          }
+        } catch (error) {
+          console.warn('Template format extraction failed:', error);
+        }
+      }
+      const currentFormatValues = form.getFieldValue('formatRules') || buildDefaultFormatFormValues();
+      const mergedFormatValues = mergeFormatFormValues(
+        mergeFormatFormValues(currentFormatValues, actualFormatValues),
+        textualFormat.values,
+      );
+      const evidence = [...actualEvidence, ...textualFormat.evidence].slice(0, 12);
+      if (evidence.length > 0) {
+        form.setFieldsValue({ enableFormatRules: true, formatRules: mergedFormatValues });
+        setFormatRuleEvidence(evidence);
+      }
+
       const nodes = extractTemplateNodes(result.content);
       if (nodes.length === 0) {
         try {
-          const aiNodes = await extractNodesWithAi(result.content);
-          if (aiNodes.length > 0) {
-            setTemplateNodes(aiNodes);
-            message.success(`规则未检测到章节，AI 已识别 ${aiNodes.length} 个章节`);
+          const aiResult = await extractNodesWithAi(result.content);
+          if (await applyAiTemplateExtraction(aiResult, '规则未检测到章节，AI 已识别')) {
             return;
           }
         } catch {}
-        message.warning('文件已关联并填入模板名称，但未检测到章节标题。可以点击“AI识别”重试，或确认文档使用了一、二、三 / 第X章 / 1. 2. 3. 等编号格式。');
+        message.warning('文件已关联并填入模板名称，但未检测到章节标题。可以点击“AI识别结构/要求/格式”重试，或确认文档使用了一、二、三 / 第X章 / 1. 2. 3. 等编号格式。');
         return;
       }
 
+      const guidance = collectTemplateGuidance(nodes, result.content);
+      form.setFieldsValue({ requirementText: guidance.requirementText, exampleText: guidance.exampleText });
       setTemplateNodes(nodes);
-      message.success(`已从 ${result.fileName || '文档'} 提取 ${nodes.length} 个章节，请检查并调整`);
+      message.success(`已从 ${result.fileName || '文档'} 提取 ${nodes.length} 个章节${evidence.length ? `，并识别 ${evidence.length} 条格式依据` : ''}`);
     } catch (error: any) {
       console.error('Import failed:', error);
       message.error(`导入失败：${error?.message || '未知错误'}`);
@@ -1214,7 +1697,7 @@ ${content.slice(0, 24000)}`;
                     <div>
                       <Tag color="blue" style={{ marginBottom: 8 }}>{template.category}</Tag>
                       <br />
-                      <Text ellipsis={{ rows: 2 }}>{template.description}</Text>
+                      <Paragraph ellipsis={{ rows: 2 }} style={{ marginBottom: 0 }}>{template.description}</Paragraph>
                       <br />
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         {template.outputFileType?.toUpperCase() || 'DOCX'} · 包含 {flattenNodeCount(template.nodes)} 个章节{template.filePath ? ' · 已保存源文件' : ''}
@@ -1300,6 +1783,20 @@ ${content.slice(0, 24000)}`;
                   <TextArea rows={2} placeholder="简要说明模板用途、适用范围或填写要求" />
                 </Form.Item>
 
+                <Form.Item
+                  name="requirementText"
+                  label="模板要求/填写说明"
+                >
+                  <TextArea rows={3} placeholder="导入后自动识别硬性要求、内容要求、格式要求；可人工修正" />
+                </Form.Item>
+
+                <Form.Item
+                  name="exampleText"
+                  label="范文/参考写法"
+                >
+                  <TextArea rows={3} placeholder="导入后自动识别范文、示例、样例内容；仅作为写法参考，不作为硬性要求" />
+                </Form.Item>
+
                 <div className="template-format-toggle">
                   <div>
                     <Text strong>默认格式规则</Text>
@@ -1312,6 +1809,15 @@ ${content.slice(0, 24000)}`;
                   </Form.Item>
                 </div>
 
+                {enableFormatRules && formatRuleEvidence.length > 0 && (
+                  <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 10, background: '#f8fbff', marginBottom: 10 }}>
+                    <Text strong style={{ fontSize: 12 }}>格式识别依据</Text>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                      {formatRuleEvidence.map(item => <Tag key={item} color="blue" style={{ margin: 0 }}>{item}</Tag>)}
+                    </div>
+                  </div>
+                )}
+
                 {enableFormatRules && (
                   <div className="template-format-table">
                     <div className="template-format-head">
@@ -1320,6 +1826,7 @@ ${content.slice(0, 24000)}`;
                       <span>字号</span>
                       <span>字间距</span>
                       <span>行间距</span>
+                      <span>字重</span>
                     </div>
                     {formatRuleRows.map(row => (
                       <div className="template-format-row" key={row.key}>
@@ -1341,6 +1848,9 @@ ${content.slice(0, 24000)}`;
                         </Form.Item>
                         <Form.Item name={['formatRules', row.key, 'lineHeight']} style={{ margin: 0 }}>
                           <InputNumber min={1} max={3} step={0.1} />
+                        </Form.Item>
+                        <Form.Item name={['formatRules', row.key, 'fontWeight']} style={{ margin: 0 }}>
+                          <Select options={[{ value: 'normal', label: '常规' }, { value: 'bold', label: '加粗' }]} />
                         </Form.Item>
                       </div>
                     ))}
@@ -1373,7 +1883,7 @@ ${content.slice(0, 24000)}`;
                     loading={isAiExtracting}
                     onClick={handleAiExtract}
                   >
-                    AI识别
+                    AI识别结构/要求/格式
                   </Button>
                 </Space>
               </div>

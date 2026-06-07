@@ -17,7 +17,7 @@ import {
   Spin,
 } from 'antd';
 import { SaveOutlined, ApiOutlined, FolderOpenOutlined, UserOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons';
-import { AIConfig, AIModelConfig, AIProvider } from '../../shared/types';
+import { AIConfig, AIModelConfig, AIProvider } from '../../../shared/types';
 import { useProjectStore } from '../../stores/projectStore';
 
 const { Title, Text, Paragraph } = Typography;
@@ -331,7 +331,7 @@ const AISettings: React.FC = () => {
       setTestingModelId(`model-${modelIndex}`);
       const formValues = await form.validateFields();
       const values = normalizeAIConfig(formValues);
-      const model = values.models[modelIndex];
+      const model = values.models?.[modelIndex];
       if (!model) {
         message.error('模型配置不存在');
         return;

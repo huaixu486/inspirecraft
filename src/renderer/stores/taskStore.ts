@@ -81,6 +81,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         await get().updateTask(taskId, {
           status: 'completed',
           result: result.result,
+          completedAt: new Date().toISOString(),
         });
       } else {
         // 更新任务状态为待处理（失败）

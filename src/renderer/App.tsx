@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Layout, Menu, theme, Typography, Button, Space, Progress } from 'antd';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Layout, Menu, theme, Typography, Button, Space, Progress, Select } from 'antd';
 import {
   FolderOutlined,
   FileTextOutlined,
@@ -31,6 +31,7 @@ import { useTemplateStore } from './stores/templateStore';
 import { useTaskStore } from './stores/taskStore';
 import { useSettingsStore } from './stores/settingsStore';
 import { useProjectDocStore } from './stores/projectDocStore';
+import { buildProjectStageSegments, detectTimelineStage, getAllStages } from './utils/timelineStages';
 
 const { Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -58,11 +59,20 @@ class ErrorBoundary extends React.Component<
 
 const App: React.FC = () => {
   const [selectedKey, setSelectedKey] = useState('overview');
-  const { loadProjects, loadVersions } = useProjectStore();
-  const { loadTemplates, loadReviews } = useTemplateStore();
+  const {
+    projects,
+    currentProject,
+    currentStageName,
+    versions,
+    loadProjects,
+    loadVersions,
+    setCurrentProject,
+    setCurrentStageName,
+  } = useProjectStore();
+  const { templates, loadTemplates, loadReviews } = useTemplateStore();
   const { loadTasks } = useTaskStore();
-  const { loadSettings, workspaceCapacity, workspaceUsedBytes, userProfile } = useSettingsStore();
-  const { loadProjectDocs } = useProjectDocStore();
+  const { loadSettings, workspaceCapacity, workspaceUsedBytes, userProfile, customStages } = useSettingsStore();
+  const { projectDocs, loadProjectDocs } = useProjectDocStore();
   const {
     token: { colorBgContainer, borderRadiusLG },
   } = theme.useToken();
@@ -137,6 +147,72 @@ const App: React.FC = () => {
   const storagePercent = workspaceCapacity > 0
     ? Math.min(Math.round((usedGB / workspaceCapacity) * 100), 100)
     : 0;
+
+  const allStages = useMemo(() => getAllStages(customStages), [customStages]);
+
+  const stageOptions = useMemo(() => {
+    const docIdsByStage = new Map<string, Set<string>>();
+    const stageNames = new Set(allStages.map(stage => stage.name));
+
+    const addDocToStage = (stageName: string, docId: string) => {
+      stageNames.add(stageName);
+      const ids = docIdsByStage.get(stageName) || new Set<string>();
+      ids.add(docId);
+      docIdsByStage.set(stageName, ids);
+    };
+
+    if (currentProject) {
+      const docs = projectDocs.filter(doc => doc.projectId === currentProject.id);
+      const projectVersions = versions.filter(version => version.projectId === currentProject.id);
+      const segments = buildProjectStageSegments(currentProject, docs, templates, projectVersions, allStages);
+
+      segments.forEach(segment => {
+        segment.sourceDocIds.forEach(docId => addDocToStage(segment.stage, docId));
+      });
+
+      docs.forEach(doc => {
+        const template = templates.find(item => item.id === doc.templateId);
+        const version = doc.versionId ? projectVersions.find(item => item.id === doc.versionId) : undefined;
+        const stageName = detectTimelineStage(
+          allStages,
+          doc.name,
+          doc.sourceFilePath,
+          template?.name,
+          template?.category,
+          version?.fileName,
+        );
+        addDocToStage(stageName, doc.id);
+      });
+    }
+
+    const orderedNames = [
+      ...allStages.map(stage => stage.name).filter(name => stageNames.has(name)),
+      ...Array.from(stageNames).filter(name => !allStages.some(stage => stage.name === name)),
+    ];
+
+    return orderedNames.map(name => {
+      const docCount = docIdsByStage.get(name)?.size || 0;
+      return {
+        value: name,
+        label: docCount > 0 ? `${name} · ${docCount}文档` : name,
+        docCount,
+      };
+    });
+  }, [allStages, currentProject, projectDocs, templates, versions]);
+
+  useEffect(() => {
+    if (!currentProject) {
+      if (currentStageName) setCurrentStageName('');
+      return;
+    }
+    if (stageOptions.length === 0) {
+      if (currentStageName) setCurrentStageName('');
+      return;
+    }
+    if (currentStageName && stageOptions.some(option => option.value === currentStageName)) return;
+    const firstWithDocs = stageOptions.find(option => option.docCount > 0)?.value;
+    setCurrentStageName(firstWithDocs || stageOptions[0].value);
+  }, [currentProject, currentStageName, stageOptions, setCurrentStageName]);
 
   const renderContent = () => {
     switch (selectedKey) {
@@ -279,12 +355,54 @@ const App: React.FC = () => {
         {/* Top bar with notification bell */}
         <div className="app-topbar" style={{
           display: 'flex',
-          justifyContent: 'flex-end',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 16,
           padding: '8px 22px',
           borderBottom: '1px solid rgba(226, 232, 240, 0.55)',
           background: 'rgba(255, 255, 255, 0.58)',
           flexShrink: 0,
         }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
+            <Space size={10} style={{ minWidth: 0 }}>
+              <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>当前项目</Text>
+              <Select
+                showSearch
+                allowClear
+                placeholder="选择项目"
+                value={currentProject?.id}
+                optionFilterProp="label"
+                onChange={(projectId) => {
+                  const project = projects.find(p => p.id === projectId) || null;
+                  setCurrentProject(project);
+                }}
+                options={projects.map(project => ({
+                  value: project.id,
+                  label: project.name,
+                }))}
+                style={{ width: 260 }}
+                popupMatchSelectWidth={320}
+              />
+            </Space>
+            <Space size={10} style={{ minWidth: 0 }}>
+              <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>当前阶段</Text>
+              <Select
+                showSearch
+                placeholder={currentProject ? '选择阶段' : '先选择项目'}
+                value={currentStageName || undefined}
+                optionFilterProp="label"
+                disabled={!currentProject}
+                onChange={(stageName) => setCurrentStageName(stageName)}
+                options={stageOptions}
+                style={{ width: 220 }}
+                popupMatchSelectWidth={260}
+              />
+            </Space>
+            <Space size={8}>
+              <Button size="small" onClick={() => setSelectedKey('tasks')}>报告工作台</Button>
+              <Button size="small" onClick={() => setSelectedKey('review')}>审查</Button>
+            </Space>
+          </div>
           <div style={{
             width: 30,
             height: 30,

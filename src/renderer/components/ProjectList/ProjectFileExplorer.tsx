@@ -88,6 +88,13 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [filterType, setFilterType] = useState<string | null>(null);
+  const [renamingPath, setRenamingPath] = useState('');
+  const [renameValue, setRenameValue] = useState('');
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [isDraggingFileOut, setIsDraggingFileOut] = useState(false);
+  const [dragOverDirPath, setDragOverDirPath] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string>('');
+  const lastClickRef = React.useRef<{ path: string; time: number } | null>(null);
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const { customStages } = useSettingsStore();
@@ -132,10 +139,63 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     }
   };
 
-  const handleClick = (item: FileItem) => {
-    if (item.isDirectory) {
-      setCurrentPath(item.path);
+  const handleDoubleClick = (item: FileItem) => {
+    setRenamingPath('');
+    setSelectedPath('');
+    handleOpenFile(item);
+  };
+
+  const cancelRename = () => {
+    setRenamingPath('');
+    setRenameValue('');
+  };
+
+  const commitRename = async (item: FileItem) => {
+    const rawName = renameValue.trim();
+    if (!rawName || rawName === item.name) {
+      cancelRename();
+      return;
     }
+    const finalName = !item.isDirectory && !/\.[^/.\\]+$/.test(rawName) && item.ext
+      ? `${rawName}${item.ext}`
+      : rawName;
+    if (/[\\/]/.test(finalName)) {
+      message.warning('文件名不能包含路径分隔符');
+      return;
+    }
+    const result = await window.electronAPI.renameFile({ filePath: item.path, newName: finalName });
+    if (!result.success || !result.filePath) {
+      message.error(result.error || '重命名失败');
+      return;
+    }
+    const oldPath = item.path;
+    const newPath = result.filePath;
+    const relatedDoc = projectDocs.find(doc => doc.sourceFilePath === oldPath);
+    if (relatedDoc) {
+      await updateProjectDoc(relatedDoc.id, {
+        name: finalName,
+        sourceFilePath: newPath,
+        sourceFileModifiedAt: new Date().toISOString(),
+      });
+    }
+    pushUndo({
+      label: `重命名 ${item.name}`,
+      undo: async () => {
+        await window.electronAPI.renameFile({ filePath: newPath, newName: item.name });
+        if (relatedDoc) {
+          await updateProjectDoc(relatedDoc.id, {
+            name: item.name,
+            sourceFilePath: oldPath,
+            sourceFileModifiedAt: item.modifiedAt || new Date().toISOString(),
+          });
+        }
+        loadContents();
+      },
+    });
+    cancelRename();
+    message.success(`已重命名为 ${finalName}`);
+    await loadContents();
+    highlightFile(newPath);
   };
 
   const handleBack = () => {
@@ -318,6 +378,140 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     }
   };
 
+  // 判断是否为外部文件拖拽
+  const isExternalFileDrag = (event: React.DragEvent) => {
+    return event.dataTransfer.types.includes('Files');
+  };
+
+  const getDraggedFilePaths = (event: React.DragEvent) => {
+    const files = Array.from(event.dataTransfer.files);
+    return files
+      .map(file => window.electronAPI.getPathForFile?.(file) || (file as any).path as string | undefined)
+      .filter(Boolean) as string[];
+  };
+
+  const handleDropFiles = async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragOver(false);
+    if (!isExternalFileDrag(event)) return;
+    const filePaths = getDraggedFilePaths(event);
+    if (filePaths.length === 0) {
+      message.warning('未读取到可导入的文件路径');
+      return;
+    }
+    const result = await window.electronAPI.importFiles({ folderPath: currentPath, filePaths });
+    if (!result.success) {
+      message.error(result.error || '导入失败');
+      return;
+    }
+    const imported = result.files || [];
+    if (imported.length === 0) {
+      message.info('没有可导入的文件');
+      return;
+    }
+    message.success(`已导入 ${imported.length} 个文件`);
+    await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, templates, addProjectDoc, updateProjectDoc, allStages });
+    await loadContents();
+    imported.forEach(file => highlightFile(file.path));
+  };
+
+  // 拖出文件：Electron 官方链路要求从 HTML dragstart 事件内触发 webContents.startDrag
+  const handleFileDragStart = (item: FileItem, event: React.DragEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (item.isDirectory || renamingPath === item.path || target.closest('[data-no-file-drag="true"]')) {
+      event.preventDefault();
+      return;
+    }
+    setSelectedPath(item.path);
+    lastClickRef.current = null;
+    setIsDraggingFileOut(true);
+    setIsDragOver(false);
+
+    const fileUrl = `file:///${item.path.replace(/\\/g, '/')}`;
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData('text/plain', item.path);
+    event.dataTransfer.setData('text/uri-list', fileUrl);
+    event.dataTransfer.setData('DownloadURL', `application/octet-stream:${item.name}:${fileUrl}`);
+    event.preventDefault();
+    const result = window.electronAPI.startDrag(item.path);
+    if (!result?.success) {
+      setIsDraggingFileOut(false);
+      message.warning(result?.error || '系统拖拽启动失败');
+    }
+  };
+
+  // 拖入到子文件夹：将外部文件导入到该目录
+  const handleDropToDir = async (event: React.DragEvent<HTMLDivElement>, dirPath: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragOverDirPath(null);
+    if (!isExternalFileDrag(event)) return;
+    const filePaths = getDraggedFilePaths(event);
+    if (filePaths.length === 0) return;
+    const result = await window.electronAPI.importFiles({ folderPath: dirPath, filePaths });
+    if (!result.success) {
+      message.error(result.error || '导入失败');
+      return;
+    }
+    const imported = result.files || [];
+    if (imported.length > 0) {
+      message.success(`已导入 ${imported.length} 个文件到子目录`);
+      await loadContents();
+    }
+  };
+
+  const handleDragOverDir = (event: React.DragEvent<HTMLDivElement>, dirPath: string) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setDragOverDirPath(dirPath);
+  };
+
+  const handleDragLeaveDir = (event: React.DragEvent<HTMLDivElement>, dirPath: string) => {
+    const related = event.relatedTarget as HTMLElement;
+    if (related && event.currentTarget.contains(related)) return;
+    setDragOverDirPath(prev => prev === dirPath ? null : prev);
+  };
+
+  // 资源管理器风格点击：单击选中，慢双击/F2 重命名
+  const handleFileClick = (item: FileItem) => {
+    if (renamingPath === item.path) return;
+    const now = Date.now();
+    const last = lastClickRef.current;
+    if (last && last.path === item.path && now - last.time < 500) {
+      // 慢双击：进入重命名
+      lastClickRef.current = null;
+      setRenamingPath(item.path);
+      setRenameValue(item.name);
+    } else {
+      // 单击：选中
+      setSelectedPath(item.path);
+      lastClickRef.current = { path: item.path, time: now };
+    }
+  };
+
+  // F2 重命名
+  React.useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F2' && selectedPath && !renamingPath) {
+        e.preventDefault();
+        const item = items.find(i => i.path === selectedPath);
+        if (item) {
+          setRenamingPath(item.path);
+          setRenameValue(item.name);
+        }
+      }
+      if (e.key === 'Escape' && renamingPath) {
+        cancelRename();
+      }
+      if (e.key === 'Delete' && selectedPath && !renamingPath) {
+        const item = items.find(i => i.path === selectedPath);
+        if (item) handleDeleteFile(item);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedPath, renamingPath, items]);
+
   // 删除文件
   const handleDeleteFile = async (item: FileItem) => {
     const result = await window.electronAPI.deleteFile(item.path);
@@ -356,7 +550,31 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   ];
 
   return (
-    <div style={{ height: '100%', overflow: 'auto' }}>
+    <div
+      style={{
+        height: '100%',
+        overflow: 'auto',
+        outline: isDragOver ? '2px dashed #1677ff' : '2px dashed transparent',
+        outlineOffset: -8,
+        borderRadius: 8,
+        background: isDragOver ? '#f0f7ff' : 'transparent',
+        transition: 'background 0.15s, outline-color 0.15s',
+      }}
+      onDragOver={(event) => {
+        if (isDraggingFileOut || !isExternalFileDrag(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        setIsDragOver(true);
+      }}
+      onDragLeave={(event) => {
+        if (event.currentTarget === event.target) {
+          setIsDragOver(false);
+          setIsDraggingFileOut(false);
+        }
+      }}
+      onDrop={handleDropFiles}
+      onClick={(e) => { if (e.target === e.currentTarget) setSelectedPath(''); }}
+    >
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
         <Button type="text" icon={<ArrowLeftOutlined />} onClick={isInRoot ? onBack : handleBack} title={isInRoot ? '返回项目列表' : '返回上级'} />
@@ -470,26 +688,64 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
                 : items
           ).map(item => {
             const isHighlighted = highlightedPaths.has(item.path);
+            const isSelected = selectedPath === item.path;
+            const isDirDragOver = item.isDirectory && dragOverDirPath === item.path;
             return (
               <div
                 key={item.path}
+                draggable={!item.isDirectory && renamingPath !== item.path}
+                onDragStart={!item.isDirectory ? (e) => handleFileDragStart(item, e) : undefined}
+                onDragEnd={!item.isDirectory ? () => setIsDraggingFileOut(false) : undefined}
+                onDragOver={item.isDirectory ? (e) => handleDragOverDir(e, item.path) : undefined}
+                onDragLeave={item.isDirectory ? (e) => handleDragLeaveDir(e, item.path) : undefined}
+                onDrop={item.isDirectory ? (e) => handleDropToDir(e, item.path) : undefined}
                 style={{
                   display: 'flex', alignItems: 'center', padding: '8px 12px',
-                  borderRadius: 6, cursor: 'pointer', marginBottom: 2,
-                  background: isHighlighted ? '#e6f7ff' : 'transparent',
-                  border: isHighlighted ? '1px solid #91d5ff' : '1px solid transparent',
-                  transition: 'background 0.5s, border-color 0.5s',
+                  borderRadius: 6, cursor: item.isDirectory ? 'pointer' : 'grab', marginBottom: 2, userSelect: 'none',
+                  background: isDirDragOver ? '#e6f7ff' : isSelected ? '#e6f7ff' : isHighlighted ? '#f0f5ff' : 'transparent',
+                  border: isDirDragOver ? '2px dashed #1890ff' : isSelected ? '1px solid #91d5ff' : '1px solid transparent',
+                  transition: 'background 0.15s, border-color 0.15s',
                 }}
-                onClick={() => handleOpenFile(item)}
-                onMouseEnter={e => { if (!isHighlighted) e.currentTarget.style.background = '#f5f5f5'; }}
-                onMouseLeave={e => { if (!isHighlighted) e.currentTarget.style.background = 'transparent'; }}
+                onClick={() => item.isDirectory ? handleDoubleClick(item) : handleFileClick(item)}
+                onDoubleClick={() => !item.isDirectory && handleDoubleClick(item)}
+                onMouseEnter={e => { if (!isSelected && !isDirDragOver) e.currentTarget.style.background = '#f5f5f5'; }}
+                onMouseLeave={e => { if (!isSelected && !isDirDragOver) e.currentTarget.style.background = 'transparent'; }}
               >
-                {fileIcon(item.ext, item.isDirectory)}
-                <div style={{ flex: 1, marginLeft: 10, minWidth: 0 }}>
-                  <Text style={{ fontSize: 13, fontWeight: isHighlighted ? 600 : 400 }} ellipsis>{item.name}</Text>
-                  {isHighlighted && (
-                    <Tag color="blue" style={{ fontSize: 9, marginLeft: 6, padding: '0 4px' }}>新</Tag>
-                  )}
+                <div
+                  style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 0, userSelect: 'none' }}
+                  title={!item.isDirectory ? '拖动到其他软件发送文件' : undefined}
+                >
+                  {fileIcon(item.ext, item.isDirectory)}
+                  <div style={{ flex: 1, marginLeft: 10, minWidth: 0 }}>
+                    {renamingPath === item.path ? (
+                      <Input
+                        size="small"
+                        value={renameValue}
+                        autoFocus
+                        onChange={e => setRenameValue(e.target.value)}
+                        onClick={e => e.stopPropagation()}
+                        onDoubleClick={e => e.stopPropagation()}
+                        onBlur={() => commitRename(item)}
+                        onPressEnter={() => commitRename(item)}
+                        onKeyDown={e => {
+                          if (e.key === 'Escape') {
+                            e.stopPropagation();
+                            cancelRename();
+                          }
+                        }}
+                      />
+                    ) : (
+                      <Text
+                        style={{ fontSize: 13, fontWeight: isSelected ? 600 : 400 }}
+                        ellipsis
+                      >
+                        {item.name}
+                      </Text>
+                    )}
+                    {isHighlighted && (
+                      <Tag color="blue" style={{ fontSize: 9, marginLeft: 6, padding: '0 4px' }}>新</Tag>
+                    )}
+                  </div>
                 </div>
                 {!item.isDirectory && item.ext && (
                   <Tag color={extColorMap[item.ext] || 'default'} style={{ fontSize: 10, margin: '0 8px' }}>
@@ -502,7 +758,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
                 <Text type="secondary" style={{ width: 140, fontSize: 11, textAlign: 'right' }}>
                   {formatDate(item.modifiedAt)}
                 </Text>
-                <div style={{ width: 70, display: 'flex', justifyContent: 'center', gap: 2 }}>
+                <div data-no-file-drag="true" style={{ width: 70, display: 'flex', justifyContent: 'center', gap: 2 }}>
                   <Button
                     type="text" size="small" icon={<FolderOpenOutlined />}
                     onClick={(e) => { e.stopPropagation(); window.electronAPI.openInExplorer(item.path); }}

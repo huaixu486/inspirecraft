@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Card, List, Tag, Typography, Empty, Button, Space, message, Switch } from 'antd';
 import { FileTextOutlined, FilePdfOutlined, UploadOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
-import { DocumentVersion } from '../../shared/types';
+import { DocumentVersion } from '../../../shared/types';
 
 const { Text, Paragraph } = Typography;
 

@@ -1,8 +1,9 @@
-﻿import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+﻿import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } from 'electron';
 import { net } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
+import * as zlib from 'zlib';
 import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, AIModelConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode } from './types';
 import * as mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
@@ -274,48 +275,258 @@ const cnNumMap: Record<string, number> = { '一': 1, '二': 2, '三': 3, '四': 
 // 检测标题行
 function isHeadingLine(line: string): boolean {
   const trimmed = line.trim();
-  if (!trimmed || trimmed.length > 80) return false;
-  // 匹配：一、 二、 第一章 1. 1、 (一) （1） 等
-  return /^([一二三四五六七八九十十一十二]+[、.．）\)]|第[一-龥]{1,4}[章节部篇]|[\d]+[、.．）\)]|[\(（][\d一-龥]+[）\)])\s*\S/.test(trimmed);
+  if (!trimmed || trimmed.length > 120) return false;
+  return /^([一二三四五六七八九十百千万零〇两]+[、.．）)]|第[一二三四五六七八九十百千万零〇两\d]+[章节部分篇]|\d+(?:[.．-]\d+)*[、.．）)]?|[（(][一二三四五六七八九十百千万零〇两\d]+[）)])\s*\S/.test(trimmed);
 }
 
-// 从内容中提取章节
-function extractSections(content: string): { title: string; content: string; startPos: number }[] {
-  const lines = content.split('\n');
-  const sections: { title: string; content: string; startPos: number }[] = [];
-  let currentTitle = '';
-  let currentContent = '';
-  let currentStart = 0;
+function getHeadingLevel(line: string): number {
+  const trimmed = line.trim();
+  if (/^第[一二三四五六七八九十百千万零〇两\d]+[章篇部分]/.test(trimmed)) return 1;
+  if (/^[一二三四五六七八九十百千万零〇两]+[、.．）)]/.test(trimmed)) return 1;
+  const decimal = trimmed.match(/^\d+(?:[.．-]\d+)+/);
+  if (decimal) return Math.min(decimal[0].split(/[.．-]/).length, 4);
+  if (/^\d+[、.．）)]/.test(trimmed)) return 2;
+  if (/^[（(][一二三四五六七八九十百千万零〇两\d]+[）)]/.test(trimmed)) return 3;
+  return 2;
+}
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (isHeadingLine(line)) {
-      // 保存上一个章节
-      if (currentTitle) {
-        sections.push({ title: currentTitle.trim(), content: currentContent.trim(), startPos: currentStart });
-      }
-      currentTitle = line.trim();
-      currentContent = '';
-      currentStart = i;
-    } else if (currentTitle) {
-      currentContent += line + '\n';
-    }
-  }
-  // 保存最后一个章节
-  if (currentTitle) {
-    sections.push({ title: currentTitle.trim(), content: currentContent.trim(), startPos: currentStart });
-  }
-  return sections;
+function stripHeadingPrefix(value: string): string {
+  return String(value || '')
+    .trim()
+    .replace(/^第[一二三四五六七八九十百千万零〇两\d]+[章节部分篇][、.．：:\s]*/, '')
+    .replace(/^[一二三四五六七八九十百千万零〇两]+[、.．）)]\s*/, '')
+    .replace(/^\d+(?:[.．-]\d+)*[、.．）)]?\s*/, '')
+    .replace(/^[（(][一二三四五六七八九十百千万零〇两\d]+[）)]\s*/, '');
+}
+
+function escapeRegExp(value: string): string {
+  return String(value || '').replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+}
+
+function startsWithHeadingPattern(line: string): boolean {
+  const trimmed = String(line || '').trim();
+  return /^([一二三四五六七八九十百千万零〇两]+[、.．）)]|第[一二三四五六七八九十百千万零〇两\d]+[章节部分篇]|\d+(?:[.．-]\d+)*[、.．）)]?|[（(][一二三四五六七八九十百千万零〇两\d]+[）)])\s*\S/.test(trimmed);
+}
+
+function normalizeHeadingForMatch(value: string): string {
+  return stripHeadingPrefix(value)
+    .replace(/[\s　：:；;，,。.【】\[\]（）()《》<>]/g, '')
+    .toLowerCase();
+}
+
+// 从内容中提取章节。一级章节会包含其下属子标题和正文，直到下一个同级/上级标题。
+function extractSections(content: string): { title: string; content: string; startPos: number; level: number }[] {
+  const lines = content.split('\n');
+  const headings = lines
+    .map((line, index) => ({ line: line.trim(), index, level: getHeadingLevel(line) }))
+    .filter(item => isHeadingLine(item.line));
+
+  return headings.map((heading, headingIndex) => {
+    const nextSameOrHigher = headings
+      .slice(headingIndex + 1)
+      .find(item => item.level <= heading.level);
+    const end = nextSameOrHigher ? nextSameOrHigher.index : lines.length;
+    return {
+      title: heading.line,
+      content: lines.slice(heading.index + 1, end).join('\n').trim(),
+      startPos: heading.index,
+      level: heading.level,
+    };
+  });
 }
 
 // 模糊匹配章节标题
 function matchHeading(extracted: string, templateTitle: string): boolean {
-  const a = extracted.replace(/[\s　]/g, '').toLowerCase();
-  const b = templateTitle.replace(/[\s　]/g, '').toLowerCase();
+  const a = normalizeHeadingForMatch(extracted);
+  const b = normalizeHeadingForMatch(templateTitle);
+  if (!a || !b) return false;
   return a.includes(b) || b.includes(a) || a === b;
 }
 
-// 递归获取所有模板节点（扁平化）
+function normalizeContentForSectionMatch(value: string): string {
+  return String(value || '')
+    .replace(/[\s　：:；;，,。.【】\[\]（）()《》<>“”\"'‘’、.．]/g, '')
+    .toLowerCase();
+}
+
+function countContentChars(value: string): number {
+  return String(value || '').replace(/\s/g, '').length;
+}
+
+function parseWordLengthRequirement(text = ''): { minComplete: number; source: string } | null {
+  const normalized = String(text || '').replace(/\s+/g, '');
+  if (!normalized) return null;
+
+  const rangeMatch = normalized.match(/(\d{1,5})[~\-\u2014\uff0d\u81f3\u5230](\d{1,5})\u5b57/);
+  if (rangeMatch) {
+    const low = Math.min(Number(rangeMatch[1]), Number(rangeMatch[2]));
+    if (low > 0) return { minComplete: Math.max(1, Math.floor(low * 0.85)), source: rangeMatch[0] };
+  }
+
+  const minMatch = normalized.match(/(?:\u4e0d\u5c11\u4e8e|\u4e0d\u4f4e\u4e8e|\u81f3\u5c11|\u5927\u4e8e|\u8d85\u8fc7)(\d{1,5})\u5b57/);
+  if (minMatch) {
+    const min = Number(minMatch[1]);
+    if (min > 0) return { minComplete: Math.max(1, Math.floor(min * 0.9)), source: minMatch[0] };
+  }
+
+  const aroundMatch = normalized.match(/(?:\u7ea6|\u5927\u7ea6|\u5de6\u53f3)?(\d{1,5})\u5b57(?:\u5de6\u53f3|\u4e0a\u4e0b)?/);
+  if (aroundMatch && !/(\u4e0d\u8d85\u8fc7|\u4e0d\u591a\u4e8e|\u4ee5\u5185|\u4ee5\u4e0b|\u4e4b\u5185)/.test(normalized.slice(Math.max(0, aroundMatch.index || 0) - 8, (aroundMatch.index || 0) + aroundMatch[0].length + 8))) {
+    const target = Number(aroundMatch[1]);
+    if (target > 0) return { minComplete: Math.max(1, Math.floor(target * 0.75)), source: aroundMatch[0] };
+  }
+
+  const maxMatch = normalized.match(/(?:\u4e0d\u8d85\u8fc7|\u4e0d\u591a\u4e8e|\u4ee5\u5185|\u4ee5\u4e0b|\u4e4b\u5185)(\d{1,5})\u5b57/);
+  if (maxMatch) return { minComplete: 1, source: maxMatch[0] };
+
+  return null;
+}
+
+function getSectionLengthRequirement(node: TemplateNode, template?: WritingTemplate): { minComplete: number; minPartial: number; source: string } {
+  const textSources = [node.requirementText, node.description, template?.requirementText].filter(Boolean) as string[];
+  for (const text of textSources) {
+    const parsed = parseWordLengthRequirement(text);
+    if (parsed) return { minComplete: parsed.minComplete, minPartial: Math.max(1, Math.floor(parsed.minComplete * 0.35)), source: '\u6a21\u677f\u8981\u6c42\uff1a' + parsed.source };
+  }
+
+  const exampleCount = countContentChars(node.exampleText || '');
+  if (exampleCount > 0) {
+    const minComplete = exampleCount <= 20 ? Math.max(1, Math.floor(exampleCount * 0.6)) : Math.max(10, Math.floor(exampleCount * 0.65));
+    return { minComplete, minPartial: Math.max(1, Math.floor(minComplete * 0.35)), source: '\u8303\u6587\u53c2\u8003\u7ea6 ' + exampleCount + ' \u5b57' };
+  }
+
+  const title = node.title || '';
+  if (/\u671f\u9650|\u65f6\u95f4|\u65e5\u671f|\u7ecf\u8d39|\u9650\u989d|\u5173\u952e\u8bcd|\u8054\u7cfb\u4eba|\u7535\u8bdd|\u90ae\u7bb1|\u7f16\u53f7|\u540d\u79f0|\u5355\u4f4d|\u91d1\u989d/.test(title)) {
+    return { minComplete: 1, minPartial: 1, source: '\u77ed\u5b57\u6bb5\u7ae0\u8282' };
+  }
+
+  return { minComplete: 30, minPartial: 1, source: '\u9ed8\u8ba4\u77ed\u7ae0\u8282\u9608\u503c' };
+}
+
+function getSectionStatusByLength(wordCount: number, requirement: { minComplete: number; minPartial: number }): SectionAnalysis['status'] {
+  if (wordCount <= 0) return 'missing';
+  if (wordCount >= requirement.minComplete) return 'completed';
+  if (wordCount >= requirement.minPartial) return 'partial';
+  return 'missing';
+}
+function collectReviewEvidenceTerms(node: TemplateNode): string[] {
+  const source = [node.title, node.requirementText, node.description]
+    .filter(Boolean)
+    .join(' ');
+  const normalized = normalizeContentForSectionMatch(source);
+  const terms = new Set<string>();
+
+  const preferredTerms = [
+    '技术需求', '技术现状', '研究工作', '研究内容', '项目需求', '对应性', '应用场景', '典型场景',
+    '移相器', '潮流控制', '运行策略', '工程经济性', '考核指标', '关键技术', '实施期限',
+    '支持经费', '预期成果', '国内外', '创新', '示范应用', '电网', '新能源', '轻量化', '直驱浮空风力发电',
+  ];
+  preferredTerms.forEach(term => {
+    const normalizedTerm = normalizeContentForSectionMatch(term);
+    if (normalizedTerm && normalized.includes(normalizedTerm)) terms.add(normalizedTerm);
+  });
+
+  for (let size = 6; size >= 2; size--) {
+    for (let index = 0; index <= normalized.length - size; index++) {
+      const term = normalized.slice(index, index + size);
+      if (/^\d+$/.test(term)) continue;
+      if (/^(分析|研究|项目|内容|技术|需求|工作|说明|章节)$/.test(term)) continue;
+      terms.add(term);
+      if (terms.size >= 18) return [...terms];
+    }
+  }
+  return [...terms];
+}
+
+function findEvidenceInContent(node: TemplateNode, normalizedContent: string) {
+  const normalizedTitle = normalizeHeadingForMatch(node.title);
+  if (normalizedTitle && normalizedContent.includes(normalizedTitle)) {
+    return { matched: true, confidence: 1, terms: [normalizedTitle] };
+  }
+
+  const terms = collectReviewEvidenceTerms(node);
+  const hitTerms = terms.filter(term => term.length >= 2 && normalizedContent.includes(term));
+  const strongHits = hitTerms.filter(term => term.length >= 4);
+  const confidence = terms.length ? hitTerms.length / Math.min(terms.length, 12) : 0;
+
+  return {
+    matched: strongHits.length >= 2 || hitTerms.length >= 4 || confidence >= 0.35,
+    confidence,
+    terms: hitTerms.slice(0, 6),
+  };
+}
+
+function findLooseSectionContent(content: string, node: TemplateNode): string {
+  const lines = content.split('\n');
+  const strippedTemplateTitle = stripHeadingPrefix(node.title).trim();
+  const normalizedTemplateTitle = normalizeHeadingForMatch(node.title);
+  if (!normalizedTemplateTitle) return '';
+
+  const startIndex = lines.findIndex(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    const preview = trimmed.slice(0, 180);
+    return matchHeading(preview, node.title)
+      || normalizeContentForSectionMatch(preview).startsWith(normalizedTemplateTitle);
+  });
+  if (startIndex < 0) return '';
+
+  const startLevel = startsWithHeadingPattern(lines[startIndex]) ? getHeadingLevel(lines[startIndex]) : node.level;
+  let endIndex = lines.length;
+  for (let index = startIndex + 1; index < lines.length; index++) {
+    if (startsWithHeadingPattern(lines[index]) && getHeadingLevel(lines[index]) <= startLevel) {
+      endIndex = index;
+      break;
+    }
+  }
+
+  const firstLine = lines[startIndex].trim();
+  const firstLineWithoutPrefix = stripHeadingPrefix(firstLine);
+  const startTitlePattern = strippedTemplateTitle
+    ? new RegExp('^' + escapeRegExp(strippedTemplateTitle) + '[：:\\s　]*')
+    : null;
+  const sameLineContent = startTitlePattern
+    ? firstLineWithoutPrefix.replace(startTitlePattern, '')
+    : firstLineWithoutPrefix;
+  return [sameLineContent, ...lines.slice(startIndex + 1, endIndex)].join('\n').trim();
+}
+
+function findSectionForTemplateNode(
+  node: TemplateNode,
+  extracted: { title: string; content: string; startPos: number; level: number }[],
+  normalizedContent: string,
+  rawContent = '',
+): { title: string; content: string; startPos: number; level: number; matchedBy: 'heading' | 'content' | 'evidence'; evidenceTerms?: string[]; confidence?: number } | null {
+  const headingMatch = extracted.find(section => matchHeading(section.title, node.title));
+  if (headingMatch) return { ...headingMatch, matchedBy: 'heading', confidence: 1 };
+
+  const looseContent = rawContent ? findLooseSectionContent(rawContent, node) : '';
+  if (looseContent) {
+    return {
+      title: node.title,
+      content: looseContent,
+      startPos: -1,
+      level: node.level,
+      matchedBy: 'content',
+      confidence: 0.9,
+    };
+  }
+
+  const evidence = findEvidenceInContent(node, normalizedContent);
+  if (evidence.matched) {
+    return {
+      title: node.title,
+      content: '',
+      startPos: -1,
+      level: node.level,
+      matchedBy: evidence.terms.length === 1 && evidence.confidence === 1 ? 'content' : 'evidence',
+      evidenceTerms: evidence.terms,
+      confidence: evidence.confidence,
+    };
+  }
+
+  return null;
+}
+
 function flattenNodes(nodes: TemplateNode[]): TemplateNode[] {
   const result: TemplateNode[] = [];
   for (const node of nodes) {
@@ -330,18 +541,39 @@ function flattenNodes(nodes: TemplateNode[]): TemplateNode[] {
 // 基础分析（正则，无 AI）
 function analyzeBasic(content: string, template: WritingTemplate): SectionAnalysis[] {
   const extracted = extractSections(content);
+  const normalizedContent = normalizeContentForSectionMatch(content);
   const allNodes = flattenNodes(template.nodes);
   const results: SectionAnalysis[] = [];
 
   for (const node of allNodes) {
-    const matched = extracted.find(e => matchHeading(e.title, node.title));
+    const matched = findSectionForTemplateNode(node, extracted, normalizedContent, content);
     if (matched) {
-      const wordCount = matched.content.replace(/\s/g, '').length;
+      let wordCount = countContentChars(matched.content);
+      const lengthRequirement = getSectionLengthRequirement(node, template);
+      let status: SectionAnalysis['status'] = getSectionStatusByLength(wordCount, lengthRequirement);
+      let aiComment: string | undefined;
+
+      if (matched.matchedBy !== 'heading' && wordCount === 0) {
+        wordCount = Math.max(1, Math.round((matched.confidence || 0.35) * 80));
+        status = getSectionStatusByLength(wordCount, lengthRequirement);
+        aiComment = matched.matchedBy === 'evidence'
+          ? '依据关键词识别到对应内容：' + ((matched.evidenceTerms || []).join('、') || '相关内容')
+          : '已在正文中识别到对应章节标题或内容。';
+      } else if (matched.matchedBy !== 'heading') {
+        aiComment = '\u5df2\u901a\u8fc7\u6b63\u6587\u5185\u5bb9\u5339\u914d\u5230\u8be5\u6a21\u677f\u7ae0\u8282\u3002';
+      }
+      if (status === 'partial') {
+        aiComment = aiComment || '\u5f53\u524d\u7ea6 ' + wordCount + ' \u5b57\uff0c\u53c2\u8003\u6807\u51c6\uff1a' + lengthRequirement.source + '\uff0c\u5efa\u8bae\u8865\u81f3\u7ea6 ' + lengthRequirement.minComplete + ' \u5b57\u3002';
+      } else if (status === 'completed' && lengthRequirement.source !== '\u9ed8\u8ba4\u77ed\u7ae0\u8282\u9608\u503c') {
+        aiComment = aiComment || '\u5df2\u6ee1\u8db3\u5b57\u6570\u5224\u65ad\uff1a' + lengthRequirement.source + '\u3002';
+      }
+
       results.push({
         nodeId: node.id,
         title: node.title,
-        status: wordCount >= 50 ? 'completed' : wordCount > 0 ? 'partial' : 'missing',
+        status,
         wordCount,
+        aiComment,
       });
     } else {
       results.push({
@@ -640,8 +872,20 @@ ipcMain.handle('dialog:openFolder', async () => {
   return result.filePaths[0];
 });
 
-ipcMain.handle('file:openInExplorer', async (_event: any, folderPath: string) => {
-  await shell.openPath(folderPath);
+ipcMain.handle('file:openInExplorer', async (_event: any, targetPath: string) => {
+  try {
+    if (!fs.existsSync(targetPath)) return { success: false, error: '路径不存在' };
+    const stat = fs.statSync(targetPath);
+    if (stat.isFile()) {
+      shell.showItemInFolder(targetPath);
+    } else {
+      const error = await shell.openPath(targetPath);
+      if (error) return { success: false, error };
+    }
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
 });
 
 // 用默认程序打开文件
@@ -649,6 +893,140 @@ ipcMain.handle('file:openWithDefaultApp', async (_event: any, filePath: string) 
   try {
     await shell.openPath(filePath);
     return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+let dragFileIconImage: ReturnType<typeof nativeImage.createFromBuffer> | null = null;
+
+function crc32(buffer: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBuffer = Buffer.from(type, 'ascii');
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 0);
+  return Buffer.concat([length, typeBuffer, data, checksum]);
+}
+
+function createDragIconPng(): Buffer {
+  const width = 32;
+  const height = 32;
+  const rowSize = width * 4 + 1;
+  const pixels = Buffer.alloc(rowSize * height);
+
+  for (let y = 0; y < height; y++) {
+    const rowOffset = y * rowSize;
+    pixels[rowOffset] = 0; // PNG filter type: none
+    for (let x = 0; x < width; x++) {
+      const offset = rowOffset + 1 + x * 4;
+      const border = x < 3 || y < 3 || x >= width - 3 || y >= height - 3;
+      pixels[offset] = border ? 0x16 : 0xff;
+      pixels[offset + 1] = border ? 0x77 : 0xff;
+      pixels[offset + 2] = border ? 0xff : 0xff;
+      pixels[offset + 3] = 0xff;
+    }
+  }
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // RGBA
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(pixels)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+function getDragFileIcon() {
+  if (dragFileIconImage && !dragFileIconImage.isEmpty()) return dragFileIconImage;
+  dragFileIconImage = nativeImage.createFromBuffer(createDragIconPng());
+  if (dragFileIconImage.isEmpty()) {
+    throw new Error('拖拽图标创建失败');
+  }
+  return dragFileIconImage;
+}
+
+// 原生文件拖拽：同步 IPC 保证 startDrag 在 renderer dragstart 事件结束前执行
+ipcMain.on('shell:startDrag', (event: any, filePath: string) => {
+  try {
+    if (!filePath) {
+      event.returnValue = { success: false, error: '文件路径为空' };
+      return;
+    }
+    const resolvedPath = path.resolve(filePath);
+    if (!fs.existsSync(resolvedPath)) {
+      event.returnValue = { success: false, error: '文件不存在' };
+      return;
+    }
+    event.sender.startDrag({
+      file: resolvedPath,
+      icon: getDragFileIcon(),
+    });
+    event.returnValue = { success: true };
+  } catch (error: any) {
+    console.warn('Native file drag failed:', error);
+    event.returnValue = { success: false, error: error?.message || '系统拖拽启动失败' };
+  }
+});
+
+ipcMain.handle('file:rename', async (_event: any, params: { filePath: string; newName: string }) => {
+  try {
+    const { filePath, newName } = params;
+    if (!fs.existsSync(filePath)) return { success: false, error: '文件不存在' };
+    const safeName = path.basename(newName.trim());
+    if (!safeName) return { success: false, error: '文件名不能为空' };
+    if (safeName !== newName.trim()) return { success: false, error: '文件名不能包含路径' };
+    const destPath = path.join(path.dirname(filePath), safeName);
+    if (destPath === filePath) return { success: true, filePath };
+    if (fs.existsSync(destPath)) return { success: false, error: '同名文件已存在' };
+    fs.renameSync(filePath, destPath);
+    return { success: true, filePath: destPath };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('file:importFiles', async (_event: any, params: { folderPath: string; filePaths: string[] }) => {
+  try {
+    const { folderPath, filePaths } = params;
+    if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
+    const imported: { name: string; path: string }[] = [];
+    for (const sourcePath of filePaths) {
+      if (!sourcePath || !fs.existsSync(sourcePath)) continue;
+      const stat = fs.statSync(sourcePath);
+      if (!stat.isFile()) continue;
+      const ext = path.extname(sourcePath);
+      const base = path.basename(sourcePath, ext);
+      let destPath = path.join(folderPath, path.basename(sourcePath));
+      let index = 1;
+      while (fs.existsSync(destPath) && path.resolve(destPath) !== path.resolve(sourcePath)) {
+        destPath = path.join(folderPath, `${base} (${index})${ext}`);
+        index += 1;
+      }
+      if (path.resolve(destPath) === path.resolve(sourcePath)) continue;
+      fs.copyFileSync(sourcePath, destPath);
+      imported.push({ name: path.basename(destPath), path: destPath });
+    }
+    return { success: true, files: imported };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
@@ -986,6 +1364,212 @@ async function extractDocxTextWithNumbering(buffer: Buffer): Promise<string> {
     return '';
   }
 }
+type ExtractedTemplateStyleKey = 'heading1' | 'heading2' | 'heading3' | 'heading4' | 'body' | 'caption' | 'tableTitle' | 'tableHeader';
+
+interface ExtractedTemplateStyleSample {
+  key: ExtractedTemplateStyleKey;
+  text: string;
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: 'normal' | 'bold';
+  alignment?: 'left' | 'center' | 'right' | 'justify';
+  lineHeight?: number;
+}
+
+const styleKeyNames: Record<ExtractedTemplateStyleKey, string> = {
+  heading1: '一级标题',
+  heading2: '二级标题',
+  heading3: '三级标题',
+  heading4: '四级标题',
+  body: '正文',
+  caption: '图题/图例',
+  tableTitle: '表题',
+  tableHeader: '表头',
+};
+
+function xmlTextFromBlock(block: string): string {
+  return normalizeExtractedText(
+    Array.from(block.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g) as Iterable<RegExpMatchArray>)
+      .map(match => decodeXmlText(match[1]))
+      .join('')
+  );
+}
+
+function parseStylePropsFromXml(xml: string): any {
+  const fontFamily =
+    xml.match(/<w:rFonts\b[^>]*(?:w:eastAsia|w:ascii|w:hAnsi)="([^"]+)"/)?.[1];
+  const fontSizeRaw = xml.match(/<w:sz\b[^>]*w:val="(\d+)"/)?.[1];
+  const lineRaw = xml.match(/<w:spacing\b[^>]*w:line="(\d+)"/)?.[1];
+  const alignmentRaw = xml.match(/<w:jc\b[^>]*w:val="([^"]+)"/)?.[1];
+  const alignmentMap: Record<string, string> = { both: 'justify', distribute: 'justify', center: 'center', right: 'right', left: 'left' };
+  return {
+    fontFamily,
+    fontSize: fontSizeRaw ? Number(fontSizeRaw) / 2 : undefined,
+    fontWeight: /<w:b\b/.test(xml) ? 'bold' : undefined,
+    alignment: alignmentRaw ? alignmentMap[alignmentRaw] : undefined,
+    lineHeight: lineRaw ? Math.round((Number(lineRaw) / 240) * 100) / 100 : undefined,
+  };
+}
+
+function parseStyleDefinitions(stylesXml?: string): Map<string, any> {
+  const styles = new Map<string, any>();
+  if (!stylesXml) return styles;
+  for (const match of stylesXml.matchAll(/<w:style\b[\s\S]*?<\/w:style>/g)) {
+    const block = match[0];
+    const start = block.match(/<w:style\b[^>]*>/)?.[0] || '';
+    const styleId = getXmlAttr(start, 'w:styleId');
+    if (!styleId) continue;
+    const name = decodeXmlText(getWordVal(block, 'name'));
+    styles.set(styleId, { styleId, name, ...parseStylePropsFromXml(block) });
+  }
+  return styles;
+}
+
+function mergeStyleProps(base: any = {}, override: any = {}) {
+  return {
+    fontFamily: override.fontFamily || base.fontFamily,
+    fontSize: override.fontSize || base.fontSize,
+    fontWeight: override.fontWeight || base.fontWeight,
+    alignment: override.alignment || base.alignment,
+    lineHeight: override.lineHeight || base.lineHeight,
+  };
+}
+
+function classifyTemplateText(text: string, styleId?: string, styleName?: string): ExtractedTemplateStyleKey {
+  const normalized = text.trim();
+  const styleText = `${styleId || ''} ${styleName || ''}`.toLowerCase();
+  if (/heading\s*1|标题\s*1|标题 1|heading1/.test(styleText)) return 'heading1';
+  if (/heading\s*2|标题\s*2|标题 2|heading2/.test(styleText)) return 'heading2';
+  if (/heading\s*3|标题\s*3|标题 3|heading3/.test(styleText)) return 'heading3';
+  if (/heading\s*4|标题\s*4|标题 4|heading4/.test(styleText)) return 'heading4';
+  if (/caption|题注/.test(styleText)) return /^表/.test(normalized) ? 'tableTitle' : 'caption';
+  if (/^(表|表格)\s*[\d一二三四五六七八九十]/.test(normalized)) return 'tableTitle';
+  if (/^(图|图表|图例)\s*[\d一二三四五六七八九十]/.test(normalized)) return 'caption';
+  if (/^(第[一二三四五六七八九十\d]+[章节]|[一二三四五六七八九十]+[、.．])/.test(normalized)) return 'heading1';
+  if (/^[（(][一二三四五六七八九十\d]+[）)]/.test(normalized)) return 'heading2';
+  if (/^\d+(?:[.．]\d+)+/.test(normalized)) return normalized.split(/[.．]/).length >= 3 ? 'heading3' : 'heading2';
+  if (/^\d+[、.．)]/.test(normalized) && normalized.length < 80) return 'heading3';
+  return 'body';
+}
+
+function mostCommon<T>(values: Array<T | undefined>): T | undefined {
+  const counts = new Map<T, number>();
+  values.filter(Boolean).forEach(value => counts.set(value as T, (counts.get(value as T) || 0) + 1));
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+}
+
+function buildTemplateFormatRulesFromSamples(samples: ExtractedTemplateStyleSample[]) {
+  const rules: Record<string, any> = {};
+  const evidence: string[] = [];
+  const keys: ExtractedTemplateStyleKey[] = ['heading1', 'heading2', 'heading3', 'heading4', 'body', 'caption', 'tableTitle', 'tableHeader'];
+  keys.forEach(key => {
+    const group = samples.filter(sample => sample.key === key);
+    if (!group.length) return;
+    const fontFamily = mostCommon(group.map(item => item.fontFamily));
+    const fontSize = mostCommon(group.map(item => item.fontSize));
+    const fontWeight = mostCommon(group.map(item => item.fontWeight));
+    const alignment = mostCommon(group.map(item => item.alignment));
+    const lineHeight = mostCommon(group.map(item => item.lineHeight));
+    rules[key] = {
+      fontRequirement: { fontFamily, fontSize, fontWeight, lineHeight },
+      paragraphRequirement: { alignment },
+    };
+    evidence.push(`${styleKeyNames[key]}：${fontFamily || '未知字体'} ${fontSize || '未知字号'}pt${fontWeight === 'bold' ? ' 加粗' : ''}；样本「${group[0].text.slice(0, 36)}」`);
+  });
+  return { rules, evidence };
+}
+
+function describeTemplateStyleRule(rule: any): string {
+  const font = rule?.fontRequirement || {};
+  return [
+    font.fontFamily,
+    font.fontSize ? `${font.fontSize}pt` : '',
+    font.fontWeight === 'bold' ? '加粗' : font.fontWeight === 'normal' ? '常规' : '',
+  ].filter(Boolean).join(' ');
+}
+
+function compareTemplateFormatRules(expected: any = {}, actual: any = {}) {
+  const labels: Record<string, string> = {
+    heading1: '一级标题',
+    heading2: '二级标题',
+    heading3: '三级标题',
+    heading4: '四级标题',
+    body: '正文',
+    caption: '图题/图例',
+    tableTitle: '表题',
+    tableHeader: '表头',
+  };
+  const issues: ReviewIssue[] = [];
+  Object.entries(expected).forEach(([key, expectedRule]: [string, any]) => {
+    const actualRule = actual?.[key];
+    if (!actualRule) return;
+    const expectedFont = expectedRule?.fontRequirement || {};
+    const actualFont = actualRule?.fontRequirement || {};
+    const mismatches: string[] = [];
+    if (expectedFont.fontFamily && actualFont.fontFamily && expectedFont.fontFamily !== actualFont.fontFamily) {
+      mismatches.push(`字体应为 ${expectedFont.fontFamily}，当前识别为 ${actualFont.fontFamily}`);
+    }
+    if (expectedFont.fontSize && actualFont.fontSize && Math.abs(Number(expectedFont.fontSize) - Number(actualFont.fontSize)) >= 0.5) {
+      mismatches.push(`字号应为 ${expectedFont.fontSize}pt，当前识别为 ${actualFont.fontSize}pt`);
+    }
+    if (expectedFont.fontWeight && actualFont.fontWeight && expectedFont.fontWeight !== actualFont.fontWeight) {
+      mismatches.push(`字重应为 ${expectedFont.fontWeight === 'bold' ? '加粗' : '常规'}，当前识别为 ${actualFont.fontWeight === 'bold' ? '加粗' : '常规'}`);
+    }
+    if (!mismatches.length) return;
+    issues.push({
+      id: `format_${key}_${issues.length}`,
+      type: 'wrong_format',
+      severity: key === 'body' ? 'warning' : 'info',
+      sectionTitle: labels[key] || key,
+      message: `${labels[key] || key}格式可能不一致：${mismatches.join('；')}`,
+      suggestion: `模板要求：${describeTemplateStyleRule(expectedRule)}。请检查文档中${labels[key] || key}的实际格式。`,
+    });
+  });
+  return issues;
+}
+async function extractDocxTemplateFormatRules(filePath: string) {
+  const ext = path.extname(filePath).toLowerCase();
+  const sourcePath = ext === '.doc' ? convertLegacyDocToDocx(filePath) : filePath;
+  if (!sourcePath || path.extname(sourcePath).toLowerCase() !== '.docx') {
+    return { success: false, error: ext === '.doc' ? '旧版 .doc 自动转换为 .docx 失败，请确认本机安装了 Microsoft Word 或 LibreOffice。' : '仅 .docx 支持读取实际段落和表格格式' };
+  }
+  const buffer = fs.readFileSync(sourcePath);
+  const zip = await JSZip.loadAsync(buffer);
+  const documentXml = await zip.file('word/document.xml')?.async('string');
+  if (!documentXml) return { success: false, error: '未找到 word/document.xml' };
+  const stylesXml = await zip.file('word/styles.xml')?.async('string');
+  const styles = parseStyleDefinitions(stylesXml);
+  const samples: ExtractedTemplateStyleSample[] = [];
+
+  for (const match of documentXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
+    const paragraph = match[0];
+    const text = xmlTextFromBlock(paragraph);
+    if (!text || text.length > 600) continue;
+    const pPr = paragraph.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] || '';
+    const styleId = getWordVal(pPr, 'pStyle');
+    const style = styleId ? styles.get(styleId) : undefined;
+    const runPr = paragraph.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] || '';
+    const props = mergeStyleProps(style, mergeStyleProps(parseStylePropsFromXml(pPr), parseStylePropsFromXml(runPr)));
+    const key = classifyTemplateText(text, styleId, style?.name);
+    if (key === 'body' && (text.length < 30 || samples.filter(sample => sample.key === 'body').length >= 12)) continue;
+    samples.push({ key, text, ...props });
+  }
+
+  for (const tableMatch of documentXml.matchAll(/<w:tbl\b[\s\S]*?<\/w:tbl>/g)) {
+    const firstRow = tableMatch[0].match(/<w:tr\b[\s\S]*?<\/w:tr>/)?.[0];
+    if (!firstRow) continue;
+    for (const cellMatch of firstRow.matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)) {
+      const cell = cellMatch[0];
+      const text = xmlTextFromBlock(cell);
+      if (!text) continue;
+      const runPr = cell.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] || '';
+      samples.push({ key: 'tableHeader', text, ...parseStylePropsFromXml(runPr) });
+    }
+  }
+
+  const { rules, evidence } = buildTemplateFormatRulesFromSamples(samples);
+  return { success: true, formatRules: rules, evidence, sampleCount: samples.length };
+}
 
 function stripRtf(value: string): string {
   return normalizeExtractedText(
@@ -997,6 +1581,93 @@ function stripRtf(value: string): string {
   );
 }
 
+function quotePowerShellString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function convertedDocxPathFor(filePath: string): string {
+  ensureDataDir();
+  const convertedDir = path.join(dataDir, 'converted-docx');
+  if (!fs.existsSync(convertedDir)) fs.mkdirSync(convertedDir, { recursive: true });
+  const stat = fs.existsSync(filePath) ? fs.statSync(filePath) : null;
+  const safeBase = path.basename(filePath, path.extname(filePath)).replace(/[<>:"/\\|?*]+/g, '_').slice(0, 80);
+  const stamp = stat ? `${Math.round(stat.mtimeMs)}-${stat.size}` : String(Date.now());
+  return path.join(convertedDir, `${safeBase}-${stamp}.docx`);
+}
+
+function findLibreOfficeExecutable(): string | null {
+  const candidates = [
+    process.env.LIBREOFFICE_PATH,
+    'soffice.exe',
+    'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+    'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
+  ].filter(Boolean) as string[];
+  for (const candidate of candidates) {
+    if (candidate === 'soffice.exe' || fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function convertDocWithWordCom(filePath: string, targetPath: string): boolean {
+  const command = `
+$ErrorActionPreference = 'Stop'
+$source = ${quotePowerShellString(filePath)}
+$target = ${quotePowerShellString(targetPath)}
+$word = $null
+$doc = $null
+try {
+  $word = New-Object -ComObject Word.Application
+  $word.Visible = $false
+  $word.DisplayAlerts = 0
+  $doc = $word.Documents.Open($source, $false, $true)
+  $doc.SaveAs2($target, 16)
+} finally {
+  if ($doc -ne $null) { $doc.Close($false) }
+  if ($word -ne $null) { $word.Quit() }
+}
+`;
+  try {
+    execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 90_000,
+    });
+    return fs.existsSync(targetPath) && fs.statSync(targetPath).size > 0;
+  } catch (error) {
+    console.warn('Word COM doc conversion failed:', error);
+    return false;
+  }
+}
+
+function convertDocWithLibreOffice(filePath: string, targetPath: string): boolean {
+  const soffice = findLibreOfficeExecutable();
+  if (!soffice) return false;
+  const outDir = path.dirname(targetPath);
+  try {
+    execFileSync(soffice, ['--headless', '--convert-to', 'docx', '--outdir', outDir, filePath], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 90_000,
+    });
+    const generatedPath = path.join(outDir, `${path.basename(filePath, path.extname(filePath))}.docx`);
+    if (fs.existsSync(generatedPath) && generatedPath !== targetPath) {
+      fs.copyFileSync(generatedPath, targetPath);
+    }
+    return fs.existsSync(targetPath) && fs.statSync(targetPath).size > 0;
+  } catch (error) {
+    console.warn('LibreOffice doc conversion failed:', error);
+    return false;
+  }
+}
+
+function convertLegacyDocToDocx(filePath: string): string | null {
+  if (path.extname(filePath).toLowerCase() !== '.doc') return null;
+  const targetPath = convertedDocxPathFor(filePath);
+  if (fs.existsSync(targetPath) && fs.statSync(targetPath).size > 0) return targetPath;
+  if (convertDocWithWordCom(filePath, targetPath)) return targetPath;
+  if (convertDocWithLibreOffice(filePath, targetPath)) return targetPath;
+  return null;
+}
 function extractLegacyDocText(buffer: Buffer): string {
   const utf16 = normalizeExtractedText(buffer.toString('utf16le'));
   const utf8 = normalizeExtractedText(buffer.toString('utf8'));
@@ -1044,6 +1715,13 @@ ipcMain.handle('file:parseWord', async (_event: any, filePath: string) => {
   }
 });
 
+ipcMain.handle('file:extractTemplateFormatRules', async (_event: any, filePath: string) => {
+  try {
+    return await extractDocxTemplateFormatRules(filePath);
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
 ipcMain.handle('file:parseDocument', async (_event: any, filePath: string) => {
   try {
     const ext = path.extname(filePath).toLowerCase();
@@ -1058,6 +1736,12 @@ ipcMain.handle('file:parseDocument', async (_event: any, filePath: string) => {
     }
 
     if (ext === '.doc') {
+      const convertedPath = convertLegacyDocToDocx(filePath);
+      if (convertedPath) {
+        const convertedBuffer = fs.readFileSync(convertedPath);
+        const docxContent = await extractDocxTextWithNumbering(convertedBuffer);
+        if (docxContent) return { success: true, content: docxContent, fileName, convertedFilePath: convertedPath };
+      }
       try {
         const result = await mammoth.extractRawText({ buffer });
         const content = normalizeExtractedText(result.value);
@@ -1066,7 +1750,7 @@ ipcMain.handle('file:parseDocument', async (_event: any, filePath: string) => {
 
       const content = extractLegacyDocText(buffer);
       if (!content || !isReadableExtractedText(content)) {
-        return { success: false, error: '旧版 .doc 已关联；为避免打开 Word，未自动解析内容。请将文件另存为 .docx 后导入章节' };
+        return { success: false, error: '旧版 .doc 自动转换失败，且未提取到可读文本。请确认本机安装了 Microsoft Word 或 LibreOffice，或手动另存为 .docx。' };
       }
       return { success: true, content, fileName };
     }
@@ -1125,6 +1809,12 @@ ipcMain.handle('file:parseDocumentSilent', async (_event: any, filePath: string)
     }
 
     if (ext === '.doc') {
+      const convertedPath = convertLegacyDocToDocx(filePath);
+      if (convertedPath) {
+        const convertedBuffer = fs.readFileSync(convertedPath);
+        const docxContent = await extractDocxTextWithNumbering(convertedBuffer);
+        if (docxContent) return { success: true, content: docxContent, fileName, convertedFilePath: convertedPath };
+      }
       try {
         const result = await mammoth.extractRawText({ buffer });
         const content = normalizeExtractedText(result.value);
@@ -1135,7 +1825,7 @@ ipcMain.handle('file:parseDocumentSilent', async (_event: any, filePath: string)
       if (content && isReadableExtractedText(content)) {
         return { success: true, content, fileName };
       }
-      return { success: false, error: '旧版 .doc 已关联；为避免打开 Word，未自动解析内容。请将文件另存为 .docx 后导入章节' };
+      return { success: false, error: '旧版 .doc 自动转换失败，且未提取到可读文本。请确认本机安装了 Microsoft Word 或 LibreOffice，或手动另存为 .docx。' };
     }
 
     if (ext === '.pdf') {
@@ -1275,22 +1965,76 @@ ipcMain.handle('review:execute', async (_event: any, params: {
   const issues: ReviewIssue[] = [];
   const content = version.content;
   const allTemplateNodes = flattenNodes(template.nodes);
+  const extractedSections = extractSections(content);
+  const normalizedContent = normalizeContentForSectionMatch(content);
+  const sectionMatches = new Map<string, ReturnType<typeof findSectionForTemplateNode>>();
+  const getSectionMatch = (node: TemplateNode) => {
+    if (!sectionMatches.has(node.id)) {
+      sectionMatches.set(node.id, findSectionForTemplateNode(node, extractedSections, normalizedContent, content));
+    }
+    return sectionMatches.get(node.id) || null;
+  };
 
-  // 检查缺失章节
+  // 检查缺失章节：复用项目文档完成度的章节提取与模糊匹配，避免因编号、空格、标点或 Word 解析换行误判。
   if (params.config.checkMissingSections) {
     for (const node of allTemplateNodes) {
-      const found = content.includes(node.title);
-      if (node.isRequired && !found) {
+      if (!node.isRequired) continue;
+      const matched = getSectionMatch(node);
+      if (!matched) {
         issues.push({
           id: `missing_${node.id}`,
           type: 'missing_section',
           severity: 'error',
           nodeId: node.id,
           sectionTitle: node.title,
-          message: `缺少必需章节：${node.title}`,
-          suggestion: `请添加"${node.title}"章节${node.description ? '，' + node.description : ''}`,
+          message: `未识别到必需章节：${node.title}`,
+          suggestion: `请确认正文中是否有"${node.title}"对应标题或内容；如已有内容，请检查标题编号、标题文字是否与模板结构可对应。${node.description ? ' ' + node.description : ''}`,
+        });
+      } else if (matched.matchedBy === 'evidence') {
+        issues.push({
+          id: `section_mapping_${node.id}`,
+          type: 'suggestion',
+          severity: 'info',
+          nodeId: node.id,
+          sectionTitle: node.title,
+          message: `正文中发现与「${node.title}」相关的内容证据，未按缺失处理。`,
+          suggestion: `建议人工确认该内容是否对应模板章节。匹配关键词：${(matched.evidenceTerms || []).join('、') || '相关内容'}。`,
         });
       }
+    }
+  }
+
+  if (params.config.checkContentDeviation) {
+    for (const node of allTemplateNodes) {
+      if (!node.isRequired) continue;
+      const matched = getSectionMatch(node);
+      if (!matched || matched.matchedBy !== 'heading') continue;
+      const wordCount = countContentChars(matched.content);
+      const lengthRequirement = getSectionLengthRequirement(node, template);
+      if (wordCount > 0 && wordCount < lengthRequirement.minComplete) {
+        issues.push({
+          id: `content_short_${node.id}`,
+          type: 'content_deviation',
+          severity: 'warning',
+          nodeId: node.id,
+          sectionTitle: node.title,
+          message: `\u7ae0\u8282\u5185\u5bb9\u53ef\u80fd\u504f\u5c11\uff1a${node.title}\uff08\u7ea6 ${wordCount} \u5b57\uff0c\u53c2\u8003\u6807\u51c6\uff1a${lengthRequirement.source}\uff0c\u5efa\u8bae\u7ea6 ${lengthRequirement.minComplete} \u5b57\uff09`,
+          suggestion: node.requirementText || node.description
+            ? `请对照模板要求补充该章节：${node.requirementText || node.description}`
+            : `\u8bf7\u786e\u8ba4\u8be5\u7ae0\u8282\u662f\u5426\u9700\u8981\u8865\u5145\u4e8b\u5b9e\u3001\u6570\u636e\u3001\u4f9d\u636e\u6216\u5c55\u5f00\u8bf4\u660e\uff1b\u5f53\u524d\u53c2\u8003\u6807\u51c6\u4e3a\uff1a${lengthRequirement.source}\u3002`,
+        });
+      }
+    }
+  }
+
+  if (params.config.checkFormatting && template.formatRules && ['.docx', '.doc'].includes(path.extname(version.filePath || '').toLowerCase())) {
+    try {
+      const formatResult: any = await extractDocxTemplateFormatRules(version.filePath);
+      if (formatResult.success && formatResult.formatRules) {
+        issues.push(...compareTemplateFormatRules(template.formatRules, formatResult.formatRules));
+      }
+    } catch (error) {
+      console.warn('Format review failed:', error);
     }
   }
 
@@ -1309,6 +2053,22 @@ ipcMain.handle('review:execute', async (_event: any, params: {
     summary = `发现 ${issues.length} 个问题，其中 ${missingCount} 个必需章节缺失。`;
   }
 
+  let aiSuggestions: string | undefined;
+  if (params.config.enableAI && getActiveAIModel(loadAIConfigFromDisk())) {
+    try {
+      const issueText = issues.length
+        ? issues.map(issue => `- [${issue.severity}] ${issue.sectionTitle || ''}：${issue.message}${issue.suggestion ? `；建议：${issue.suggestion}` : ''}`).join('\n')
+        : '当前未发现结构性问题。';
+      const requiredOutline = allTemplateNodes
+        .filter(node => node.isRequired)
+        .map(node => `- ${node.title}${node.requirementText || node.description ? `：${node.requirementText || node.description}` : ''}`)
+        .join('\n');
+      aiSuggestions = await callDefaultAI(`你是文档审查与改稿助手。请严格按模板章节输出审查建议。\n\n目标：模板里有多个结构章节，例如“一、总体目标”“二、研究内容”。只输出存在问题或需要优化的章节；没有问题的章节不要输出。每个章节下面固定包含“问题”和“建议”。\n\n输出格式（必须严格遵守，不要添加其他标题、总体评估、寒暄或结尾）：\n## 一、章节名称\n问题：\n- 用一句话说明该章节的核心问题。\n- 如有第二个问题，再用一句话说明。\n建议：\n- 给出一条可执行修改建议。\n- 如需补写正文，给出一条简短参考句式；缺少事实数据时写“需人工补充：...”。\n\n规则：\n1. 只输出有问题或需要优化的模板章节。\n2. 章节标题必须尽量使用模板中的原始章节名。\n3. 每个章节必须同时包含“问题：”和“建议：”。\n4. 每个章节的问题最多 2 条，建议最多 3 条，每条不超过 80 字。\n5. 不要把程序已经模糊匹配到的章节重新判定为缺失；如果标题写法不同，只说明它与模板章节如何对应。\n6. 建议要围绕当前正文和模板要求，避免泛泛而谈。\n7. 不要输出长段落、引用块、成段示例、总体评估、“以下是建议”“好的”等非章节内容。\n\n模板必需章节：\n${requiredOutline || '无'}\n\n程序审查结果：\n${issueText}\n\n正文摘录：\n${content.slice(0, 6000)}`);
+    } catch (error) {
+      console.warn('AI review suggestion failed:', error);
+    }
+  }
+
   const reviewResult: ReviewResult = {
     id: Date.now().toString(),
     projectId: version.projectId,
@@ -1317,6 +2077,7 @@ ipcMain.handle('review:execute', async (_event: any, params: {
     issues,
     score,
     summary,
+    aiSuggestions,
     createdAt: new Date().toISOString(),
   };
 
@@ -1937,7 +2698,14 @@ function buildWordDocumentXml(template?: WritingTemplate): string {
   const paragraphs = nodes.length > 0
     ? nodes.map(node => {
       const level = Math.min(Math.max(node.level || 1, 1), 4);
-      return `<w:p><w:pPr><w:pStyle w:val="Heading${level}"/></w:pPr><w:r><w:t>${escapeXml(node.title)}</w:t></w:r></w:p>`;
+      const headingXml = `<w:p><w:pPr><w:pStyle w:val="Heading${level}"/></w:pPr><w:r><w:t>${escapeXml(node.title)}</w:t></w:r></w:p>`;
+      // 输出节点的描述/原始内容作为正文段落
+      const bodyText = node.description || node.requirementText || '';
+      if (!bodyText) return headingXml;
+      const bodyParagraphs = bodyText.split('\n').filter(line => line.trim()).map(line =>
+        `<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>${escapeXml(line.trim())}</w:t></w:r></w:p>`
+      ).join('');
+      return headingXml + bodyParagraphs;
     }).join('')
     : '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>新建文档</w:t></w:r></w:p>';
 

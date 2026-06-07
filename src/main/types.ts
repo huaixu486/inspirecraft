@@ -1,4 +1,4 @@
-﻿// 项目类型定义
+// 项目类型定义
 export interface Project {
   id: string;
   name: string;
@@ -44,6 +44,19 @@ export interface TaskItem {
   type: 'ai' | 'manual'; // AI处理或人工处理
   status: 'pending' | 'in_progress' | 'completed';
   priority: 'high' | 'medium' | 'low';
+  source?: 'manual' | 'review' | 'stage' | 'report';
+  relatedDocId?: string;
+  relatedReviewId?: string;
+  relatedIssueId?: string;
+  sectionTitle?: string;
+  stageName?: string;
+  workflowId?: string;
+  workflowName?: string;
+  workflowOrder?: number;
+  dependsOnTaskId?: string;
+  assigneeName?: string;
+  dueAt?: string;
+  completedAt?: string;
   result?: string; // AI执行结果
   createdAt: string;
 }
@@ -106,6 +119,9 @@ export interface TemplateFormatRules {
   heading3?: TemplateStyleRule;
   heading4?: TemplateStyleRule;
   body?: TemplateStyleRule;
+  caption?: TemplateStyleRule;
+  tableTitle?: TemplateStyleRule;
+  tableHeader?: TemplateStyleRule;
 }
 
 // 模板节点（支持层级结构）
@@ -114,6 +130,8 @@ export interface TemplateNode {
   title: string; // 节点标题，如 "一、项目背景"
   level: number; // 层级，1=一级标题，2=二级标题
   description?: string; // 写作提示/说明
+  requirementText?: string; // 从模板中识别出的硬性要求/填写说明
+  exampleText?: string; // 从模板中识别出的范文或示例写法，不作为硬性要求
   isRequired: boolean; // 是否必需
   fontRequirement?: FontRequirement; // 字体格式要求
   paragraphRequirement?: ParagraphRequirement; // 段落格式要求
@@ -125,6 +143,8 @@ export interface WritingTemplate {
   id: string;
   name: string; // 模板名称，如 "可研报告模板"
   description: string; // 模板说明
+  requirementText?: string; // 模板中的硬性要求、填写说明、格式/内容约束
+  exampleText?: string; // 模板中的范文、样例或参考写法，只用于提取结构和表达特征
   category: string; // 分类，如 "可研报告"、"提案表"
   outputFileType?: TemplateOutputFileType; // 使用模板创建文件时的默认文件类型
   titleFontRequirement?: FontRequirement; // 标题字体规则

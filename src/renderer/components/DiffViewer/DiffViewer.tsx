@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { Card, Typography, Empty, Button, Space, Tag, Input, Tooltip, Drawer, Divider, List } from 'antd';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Card, Typography, Empty, Button, Space, Tag, Input, Tooltip, Divider, Spin } from 'antd';
 import {
   LeftOutlined,
   RightOutlined,
@@ -10,6 +10,7 @@ import {
   FlagOutlined,
   PlusOutlined,
   CalendarOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 
 const { Text, Title } = Typography;
@@ -24,6 +25,13 @@ interface CalendarEvent {
   description?: string;
 }
 
+interface HolidayInfo {
+  name: string;
+  date: string;
+  rest: string[];   // 假期日期列表
+  work: string[];   // 调休上班日期列表
+}
+
 const dayTypeConfig: Record<DayType, { color: string; label: string; icon: React.ReactNode }> = {
   work: { color: '#1890ff', label: '工作日', icon: <ClockCircleOutlined /> },
   rest: { color: '#52c41a', label: '休息日', icon: <RestOutlined /> },
@@ -35,36 +43,83 @@ const dayTypeConfig: Record<DayType, { color: string; label: string; icon: React
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
 const MONTHS = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
 
+// 缓存已获取的节假日数据
+const holidayCache: Record<number, { holidays: Set<string>; makeupDays: Set<string>; holidayNames: Record<string, string> }> = {};
+
+async function fetchHolidayData(year: number): Promise<{ holidays: Set<string>; makeupDays: Set<string>; holidayNames: Record<string, string> }> {
+  if (holidayCache[year]) return holidayCache[year];
+
+  try {
+    const resp = await fetch(`https://timor.tech/api/holiday/year/${year}`);
+    const data = await resp.json();
+
+    const holidays = new Set<string>();
+    const makeupDays = new Set<string>();
+    const holidayNames: Record<string, string> = {};
+
+    if (data && data.holiday) {
+      // 遍历每个节假日
+      Object.values(data.holiday as Record<string, HolidayInfo>).forEach((info) => {
+        info.rest.forEach(d => {
+          const dateStr = d.replace(/\//g, '-');
+          holidays.add(dateStr);
+          holidayNames[dateStr] = info.name;
+        });
+        info.work.forEach(d => {
+          const dateStr = d.replace(/\//g, '-');
+          makeupDays.add(dateStr);
+          holidayNames[dateStr] = '调休上班';
+        });
+      });
+    }
+
+    holidayCache[year] = { holidays, makeupDays, holidayNames };
+    return holidayCache[year];
+  } catch {
+    // API 失败时返回空数据
+    const empty = { holidays: new Set<string>(), makeupDays: new Set<string>(), holidayNames: {} as Record<string, string> };
+    holidayCache[year] = empty;
+    return empty;
+  }
+}
+
 const DiffViewer: React.FC = () => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newType, setNewType] = useState<DayType>('work');
-
-  const holidays = useMemo(() => new Set([
-    '2024-01-01', '2024-02-10', '2024-02-11', '2024-02-12', '2024-02-13', '2024-02-14', '2024-02-15', '2024-02-16', '2024-02-17',
-    '2024-04-04', '2024-04-05', '2024-04-06',
-    '2024-05-01', '2024-05-02', '2024-05-03', '2024-05-04', '2024-05-05',
-    '2024-06-08', '2024-06-09', '2024-06-10',
-    '2024-09-15', '2024-09-16', '2024-09-17',
-    '2024-10-01', '2024-10-02', '2024-10-03', '2024-10-04', '2024-10-05', '2024-10-06', '2024-10-07',
-    '2025-01-01', '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31', '2025-02-01', '2025-02-02', '2025-02-03', '2025-02-04',
-    '2025-04-04', '2025-04-05', '2025-04-06',
-    '2025-05-01', '2025-05-02', '2025-05-03', '2025-05-04', '2025-05-05',
-    '2025-05-31', '2025-06-01', '2025-06-02',
-    '2025-10-01', '2025-10-02', '2025-10-03', '2025-10-04', '2025-10-05', '2025-10-06', '2025-10-07',
-  ]), []);
-
-  const makeupDays = useMemo(() => new Set([
-    '2024-02-04', '2024-02-18', '2024-04-07', '2024-04-28', '2024-05-11', '2024-09-14', '2024-09-29', '2024-10-12',
-    '2025-01-26', '2025-02-08', '2025-04-27', '2025-05-10', '2025-06-02', '2025-09-28', '2025-10-11',
-  ]), []);
+  const [holidayData, setHolidayData] = useState<{ holidays: Set<string>; makeupDays: Set<string>; holidayNames: Record<string, string> }>({ holidays: new Set(), makeupDays: new Set(), holidayNames: {} });
+  const [holidayLoading, setHolidayLoading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
+
+  // 加载法定节假日数据
+  useEffect(() => {
+    let cancelled = false;
+    setHolidayLoading(true);
+    // 同时加载当年和跨年节假日（如春节可能跨年）
+    Promise.all([
+      fetchHolidayData(year),
+      month === 0 ? fetchHolidayData(year - 1) : Promise.resolve(null),
+      month === 11 ? fetchHolidayData(year + 1) : Promise.resolve(null),
+    ]).then(results => {
+      if (cancelled) return;
+      const merged = { holidays: new Set<string>(), makeupDays: new Set<string>(), holidayNames: {} as Record<string, string> };
+      results.forEach(r => {
+        if (!r) return;
+        r.holidays.forEach(d => merged.holidays.add(d));
+        r.makeupDays.forEach(d => merged.makeupDays.add(d));
+        Object.assign(merged.holidayNames, r.holidayNames);
+      });
+      setHolidayData(merged);
+      setHolidayLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [year, refreshKey]);
 
   const calendarDays = useMemo(() => {
     const firstDay = new Date(year, month, 1);
@@ -96,11 +151,15 @@ const DiffViewer: React.FC = () => {
     const dateStr = formatDate(date);
     const event = events.find(e => e.date === dateStr);
     if (event) return event.type;
-    if (holidays.has(dateStr)) return 'holiday';
-    if (makeupDays.has(dateStr)) return 'work';
+    if (holidayData.holidays.has(dateStr)) return 'holiday';
+    if (holidayData.makeupDays.has(dateStr)) return 'work';
     const day = date.getDay();
     if (day === 0 || day === 6) return 'rest';
     return 'work';
+  };
+
+  const getHolidayName = (dateStr: string): string | null => {
+    return holidayData.holidayNames[dateStr] || null;
   };
 
   const getEventsForDate = (dateStr: string) => events.filter(e => e.date === dateStr);
@@ -124,18 +183,35 @@ const DiffViewer: React.FC = () => {
     setEvents(events.filter(e => e.id !== id));
   };
 
-  const openDateDrawer = (dateStr: string) => {
+  const selectDate = (dateStr: string) => {
     setSelectedDate(dateStr);
-    setDrawerOpen(true);
     setNewTitle('');
     setNewDesc('');
     setNewType(getDayType(new Date(dateStr)));
   };
 
+  const markDateType = (type: DayType) => {
+    if (!selectedDate) return;
+    setNewType(type);
+    // 如果当前日期已经是该类型且无用户事件，不做操作
+    const currentType = getDayType(new Date(selectedDate));
+    const hasUserEvent = events.some(e => e.date === selectedDate && e.title);
+    if (currentType === type && !hasUserEvent) return;
+    // 移除该日期已有的自动标记事件（无标题），保留用户事件
+    const filtered = events.filter(e => !(e.date === selectedDate && !e.title));
+    const autoEvent: CalendarEvent = {
+      id: Date.now().toString(),
+      date: selectedDate,
+      type,
+      title: '',
+    };
+    setEvents([...filtered, autoEvent]);
+  };
+
   const today = formatDate(new Date());
   const selectedDateType = selectedDate ? getDayType(new Date(selectedDate)) : 'work';
   const selectedDateConfig = dayTypeConfig[selectedDateType];
-  const selectedDateEvents = selectedDate ? getEventsForDate(selectedDate) : [];
+  const selectedDateEvents = selectedDate ? getEventsForDate(selectedDate).filter(e => e.title) : [];
 
   const monthStats = useMemo(() => {
     let workDays = 0, restDays = 0, holidaysCount = 0;
@@ -147,19 +223,28 @@ const DiffViewer: React.FC = () => {
       else if (type === 'holiday') holidaysCount++;
     }
     return { workDays, restDays, holidays: holidaysCount };
-  }, [year, month, events, holidays, makeupDays]);
+  }, [year, month, events, holidayData]);
 
   return (
     <div style={{ display: 'flex', height: '100%', gap: 16 }}>
       {/* 左侧：日历主体 */}
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <Title level={4} style={{ margin: 0 }}>工作日历</Title>
           <Space>
-            <Tag color="blue">工作日 {monthStats.workDays} 天</Tag>
-            <Tag color="green">休息日 {monthStats.restDays} 天</Tag>
-            <Tag color="gold">节假日 {monthStats.holidays} 天</Tag>
+            <Title level={4} style={{ margin: 0 }}>工作日历</Title>
+            {holidayLoading && <Spin size="small" />}
           </Space>
+          <Tooltip title="刷新节假日数据">
+            <Button
+              type="text"
+              size="small"
+              icon={<ReloadOutlined spin={holidayLoading} />}
+              onClick={() => {
+                delete holidayCache[year];
+                setRefreshKey(k => k + 1);
+              }}
+            />
+          </Tooltip>
         </div>
 
         <Card
@@ -194,15 +279,20 @@ const DiffViewer: React.FC = () => {
             {calendarDays.map(({ date, isCurrentMonth }, index) => {
               const dateStr = formatDate(date);
               const dayType = getDayType(date);
-              const dayEvents = getEventsForDate(dateStr);
+              const dayEvents = getEventsForDate(dateStr).filter(e => e.title);
               const isToday = dateStr === today;
               const isSelected = selectedDate === dateStr;
               const config = dayTypeConfig[dayType];
+              const holidayName = getHolidayName(dateStr);
+              // 节假日显示具体名称，调休上班显示"班"，其他显示类型标签
+              const cellLabel = dayType === 'holiday' ? (holidayName || config.label)
+                : holidayData.makeupDays.has(dateStr) ? '班'
+                : config.label;
 
               return (
                 <div
                   key={index}
-                  onClick={() => openDateDrawer(dateStr)}
+                  onClick={() => selectDate(dateStr)}
                   style={{
                     minHeight: 72,
                     padding: '4px 6px',
@@ -231,9 +321,9 @@ const DiffViewer: React.FC = () => {
                     <span style={{ fontSize: 13, fontWeight: isToday ? 700 : 500, color: isToday ? '#1890ff' : isCurrentMonth ? '#333' : '#999' }}>
                       {date.getDate()}
                     </span>
-                    {dayType !== 'work' && (
-                      <span style={{ fontSize: 8, padding: '1px 3px', borderRadius: 2, background: `${config.color}15`, color: config.color, fontWeight: 600 }}>
-                        {config.label}
+                    {cellLabel !== '工作日' && (
+                      <span style={{ fontSize: 8, padding: '1px 3px', borderRadius: 2, background: `${config.color}15`, color: config.color, fontWeight: 600, maxWidth: 48, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {cellLabel}
                       </span>
                     )}
                   </div>
@@ -255,99 +345,161 @@ const DiffViewer: React.FC = () => {
         </Card>
       </div>
 
-      {/* 右侧：日期详情抽屉 */}
-      <Drawer
-        title={
-          selectedDate ? (
+      {/* 右侧：日期详情常驻面板 */}
+      <div style={{
+        width: 320,
+        flexShrink: 0,
+        background: '#fff',
+        borderRadius: 8,
+        border: '1px solid #f0f0f0',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+      }}>
+        {/* 面板标题 */}
+        <div style={{
+          padding: '12px 16px',
+          borderBottom: '1px solid #f0f0f0',
+          background: '#fafafa',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}>
+          {selectedDate ? (
+            <>
+              <Space>
+                <CalendarOutlined />
+                <span style={{ fontWeight: 600 }}>{formatDateDisplay(selectedDate)}</span>
+                <Tag color={selectedDateConfig.color}>{selectedDateConfig.label}</Tag>
+              </Space>
+              <Button type="text" size="small" onClick={() => setSelectedDate(null)}>← 返回</Button>
+            </>
+          ) : (
             <Space>
               <CalendarOutlined />
-              <span>{formatDateDisplay(selectedDate)}</span>
-              <Tag color={selectedDateConfig.color}>{selectedDateConfig.label}</Tag>
+              <span style={{ fontWeight: 600 }}>{year}年{month + 1}月 统计</span>
             </Space>
-          ) : '日期详情'
-        }
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        width={320}
-        styles={{ body: { padding: '12px 16px' } }}
-      >
-        {selectedDate && (
-          <>
-            {/* 添加日程表单 */}
-            <div style={{ marginBottom: 16 }}>
-              <Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>添加日程</Text>
-              <Space direction="vertical" style={{ width: '100%' }} size={8}>
-                <select
-                  value={newType}
-                  onChange={e => setNewType(e.target.value as DayType)}
-                  style={{
-                    width: '100%', padding: '6px 10px', borderRadius: 6,
-                    border: '1px solid #d9d9d9', fontSize: 13, cursor: 'pointer',
-                    background: '#fff',
-                  }}
-                >
-                  {Object.entries(dayTypeConfig).map(([type, config]) => (
-                    <option key={type} value={type}>{config.label}</option>
-                  ))}
-                </select>
-                <Input
-                  placeholder="日程标题"
-                  value={newTitle}
-                  onChange={e => setNewTitle(e.target.value)}
-                  onPressEnter={addEvent}
-                />
-                <Input.TextArea
-                  placeholder="备注（可选）"
-                  rows={2}
-                  value={newDesc}
-                  onChange={e => setNewDesc(e.target.value)}
-                />
-                <Button type="primary" icon={<PlusOutlined />} block onClick={addEvent} disabled={!newTitle.trim()}>
-                  添加
-                </Button>
-              </Space>
-            </div>
+          )}
+        </div>
 
-            <Divider style={{ margin: '12px 0' }} />
-
-            {/* 已有日程列表 */}
+        {/* 面板内容 */}
+        <div style={{ flex: 1, overflow: 'auto', padding: '12px 16px' }}>
+          {!selectedDate ? (
             <div>
-              <Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>日程列表 ({selectedDateEvents.length})</Text>
-              {selectedDateEvents.length === 0 ? (
-                <Text type="secondary" style={{ fontSize: 12 }}>暂无日程</Text>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {selectedDateEvents.map(event => {
-                    const cfg = dayTypeConfig[event.type];
-                    return (
-                      <div key={event.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: '#fafafa', borderRadius: 6, border: `1px solid ${cfg.color}20` }}>
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: cfg.color, flexShrink: 0 }} />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <Text style={{ fontSize: 13, display: 'block' }}>{event.title}</Text>
-                          {event.description && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>{event.description}</Text>}
-                        </div>
-                        <Tag color={cfg.color} style={{ margin: 0, fontSize: 10 }}>{cfg.label}</Tag>
-                        <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => deleteEvent(event.id)} />
-                      </div>
-                    );
-                  })}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px', background: '#e6f7ff', borderRadius: 8 }}>
+                  <ClockCircleOutlined style={{ fontSize: 20, color: '#1890ff' }} />
+                  <div>
+                    <Text style={{ fontSize: 20, fontWeight: 700, color: '#1890ff' }}>{monthStats.workDays}</Text>
+                    <Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>个工作日</Text>
+                  </div>
                 </div>
-              )}
-            </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px', background: '#f6ffed', borderRadius: 8 }}>
+                  <RestOutlined style={{ fontSize: 20, color: '#52c41a' }} />
+                  <div>
+                    <Text style={{ fontSize: 20, fontWeight: 700, color: '#52c41a' }}>{monthStats.restDays}</Text>
+                    <Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>个休息日</Text>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px', background: '#fffbe6', borderRadius: 8 }}>
+                  <FlagOutlined style={{ fontSize: 20, color: '#faad14' }} />
+                  <div>
+                    <Text style={{ fontSize: 20, fontWeight: 700, color: '#faad14' }}>{monthStats.holidays}</Text>
+                    <Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>个节假日</Text>
+                  </div>
+                </div>
+              </div>
 
-            {/* 该日期自动类型说明 */}
-            <Divider style={{ margin: '12px 0' }} />
-            <div style={{ padding: '8px 10px', background: '#f6f8fa', borderRadius: 6 }}>
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                该日期类型：<Tag color={selectedDateConfig.color} style={{ margin: 0 }}>{selectedDateConfig.label}</Tag>
-                {selectedDateType === 'holiday' && '（法定节假日）'}
-                {selectedDateType === 'rest' && '（周末休息）'}
-                {selectedDateType === 'work' && '（正常工作日）'}
-              </Text>
+              <Divider style={{ margin: '16px 0' }} />
+
+              <Text type="secondary" style={{ fontSize: 12 }}>点击日历中的日期可添加日程</Text>
             </div>
-          </>
-        )}
-      </Drawer>
+          ) : (
+            <>
+              {/* 添加日程表单 */}
+              <div style={{ marginBottom: 16 }}>
+                <Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>添加日程</Text>
+                <Space direction="vertical" style={{ width: '100%' }} size={8}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {Object.entries(dayTypeConfig).map(([type, config]) => (
+                      <Tag
+                        key={type}
+                        color={newType === type ? config.color : undefined}
+                        style={{
+                          cursor: 'pointer',
+                          margin: 0,
+                          padding: '2px 10px',
+                          border: newType === type ? undefined : `1px solid ${config.color}40`,
+                          color: newType === type ? '#fff' : config.color,
+                          background: newType === type ? config.color : `${config.color}08`,
+                          borderRadius: 4,
+                        }}
+                        onClick={() => markDateType(type as DayType)}
+                      >
+                        {config.icon} {config.label}
+                      </Tag>
+                    ))}
+                  </div>
+                  <Input
+                    placeholder="日程标题"
+                    value={newTitle}
+                    onChange={e => setNewTitle(e.target.value)}
+                    onPressEnter={addEvent}
+                  />
+                  <Input.TextArea
+                    placeholder="备注（可选）"
+                    rows={2}
+                    value={newDesc}
+                    onChange={e => setNewDesc(e.target.value)}
+                  />
+                  <Button type="primary" icon={<PlusOutlined />} block onClick={addEvent} disabled={!newTitle.trim()}>
+                    添加
+                  </Button>
+                </Space>
+              </div>
+
+              <Divider style={{ margin: '12px 0' }} />
+
+              {/* 已有日程列表 */}
+              <div>
+                <Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>日程列表 ({selectedDateEvents.length})</Text>
+                {selectedDateEvents.length === 0 ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>暂无日程</Text>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {selectedDateEvents.map(event => {
+                      const cfg = dayTypeConfig[event.type];
+                      return (
+                        <div key={event.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: '#fafafa', borderRadius: 6, border: `1px solid ${cfg.color}20` }}>
+                          <div style={{ width: 6, height: 6, borderRadius: '50%', background: cfg.color, flexShrink: 0 }} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={{ fontSize: 13, display: 'block' }}>{event.title}</Text>
+                            {event.description && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>{event.description}</Text>}
+                          </div>
+                          <Tag color={cfg.color} style={{ margin: 0, fontSize: 10 }}>{cfg.label}</Tag>
+                          <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => deleteEvent(event.id)} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* 该日期自动类型说明 */}
+              <Divider style={{ margin: '12px 0' }} />
+              <div style={{ padding: '8px 10px', background: '#f6f8fa', borderRadius: 6 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  该日期类型：<Tag color={selectedDateConfig.color} style={{ margin: 0 }}>{selectedDateConfig.label}</Tag>
+                  {selectedDateType === 'holiday' && `（${getHolidayName(selectedDate!) || '法定节假日'}）`}
+                  {holidayData.makeupDays.has(selectedDate!) && '（调休上班）'}
+                  {selectedDateType === 'rest' && !holidayData.makeupDays.has(selectedDate!) && '（周末休息）'}
+                  {selectedDateType === 'work' && !holidayData.makeupDays.has(selectedDate!) && '（正常工作日）'}
+                </Text>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 };

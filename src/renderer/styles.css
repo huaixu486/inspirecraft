@@ -741,7 +741,7 @@ body.template-editor-modal-open {
 .template-format-head,
 .template-format-row {
   display: grid;
-  grid-template-columns: 70px minmax(0, 1fr) 118px 112px 92px;
+  grid-template-columns: 86px minmax(0, 1fr) 118px 104px 92px 92px;
   gap: 8px;
   align-items: center;
 }
@@ -1262,4 +1262,145 @@ body.template-editor-modal-open {
 /* List item styles */
 .ant-list-item {
   border-color: #f0f0f0 !important;
+}
+
+
+/* Template editor modal scroll fix */
+.template-editor-modal .ant-modal-body {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  padding-bottom: 16px;
+}
+
+.template-editor-form {
+  height: auto;
+  min-height: 100%;
+}
+
+.template-editor-grid {
+  height: auto;
+  min-height: 100%;
+  max-height: none;
+  align-items: start;
+  overflow: visible;
+}
+
+.template-editor-main {
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
+}
+
+.template-editor-side {
+  position: sticky;
+  top: 0;
+  height: calc(100vh - 132px);
+  max-height: calc(100vh - 132px);
+}
+
+.template-node-editor {
+  flex: 0 0 auto;
+  max-height: none;
+}
+
+.template-node-list {
+  max-height: min(46vh, 520px);
+}
+
+@media (max-width: 980px) {
+  .template-editor-side {
+    position: static;
+    height: 320px;
+    max-height: 320px;
+  }
+}
+
+
+/* Template editor split scroll fix */
+.template-editor-modal .ant-modal-body {
+  overflow: hidden !important;
+}
+
+.template-editor-form {
+  height: 100% !important;
+  min-height: 0 !important;
+}
+
+.template-editor-grid {
+  height: 100% !important;
+  max-height: 100% !important;
+  min-height: 0 !important;
+  align-items: stretch !important;
+  overflow: hidden !important;
+}
+
+.template-editor-main {
+  height: 100% !important;
+  max-height: 100% !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  padding-right: 8px;
+  scrollbar-gutter: stable;
+}
+
+.template-editor-side {
+  position: static !important;
+  height: 100% !important;
+  max-height: 100% !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+.template-node-preview {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+.template-node-editor {
+  flex: 0 0 auto !important;
+  max-height: none !important;
+}
+
+.template-node-list {
+  max-height: min(46vh, 520px) !important;
+}
+
+@media (max-width: 980px) {
+  .template-editor-modal .ant-modal-body {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+  }
+
+  .template-editor-grid,
+  .template-editor-main {
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  .template-editor-side {
+    height: 320px !important;
+    max-height: 320px !important;
+  }
+}
+
+
+/* Template node editor natural height */
+.template-editor-main .template-node-editor {
+  flex: 0 0 auto !important;
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+}
+
+.template-editor-main .template-node-list {
+  flex: 0 0 auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow: visible !important;
+  padding-right: 0 !important;
 }

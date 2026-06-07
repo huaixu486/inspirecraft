@@ -164,6 +164,26 @@ const DetailPanel: React.FC = () => {
     return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
+  const getVersionForDoc = (doc: ProjectDocument) =>
+    versions.find(v => v.id === doc.versionId);
+
+  const getDocDisplayName = (doc: ProjectDocument) =>
+    getVersionForDoc(doc)?.fileName || doc.name;
+
+  const getDocActivityAt = (doc: ProjectDocument) =>
+    doc.sourceFileModifiedAt || doc.analyzedAt || getVersionForDoc(doc)?.createdAt || doc.sourceFileCreatedAt || doc.createdAt;
+
+  const getDocActivityMs = (doc: ProjectDocument) => {
+    const ms = new Date(getDocActivityAt(doc)).getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  };
+
+  const sortDocsByLatestActivity = (docs: ProjectDocument[]) =>
+    [...docs].sort((a, b) => getDocActivityMs(b) - getDocActivityMs(a));
+
+  const getProgressColor = (progress: number) =>
+    progress >= 80 ? '#52c41a' : progress >= 40 ? '#1890ff' : progress > 0 ? '#faad14' : '#8c8c8c';
+
   // 按模板分组（未关联模板的文件通过关键字自动匹配）
   const groupedByTemplate = () => {
     const map = new Map<string, ProjectDocument[]>();
@@ -466,20 +486,20 @@ const DetailPanel: React.FC = () => {
           {projectDocsList.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {groupedByTemplate().map(group => {
-                const avgProgress = group.docs.length > 0
-                  ? Math.round(group.docs.reduce((acc, d) => acc + d.overallProgress, 0) / group.docs.length)
-                  : 0;
+                const sortedDocs = sortDocsByLatestActivity(group.docs);
+                const latestDoc = sortedDocs[0];
+                const latestProgress = latestDoc?.overallProgress ?? 0;
                 const isExpanded = expandedTemplate === group.templateId;
                 return (
                   <div
                     key={group.templateId}
                     style={{
-                      border: `1px solid ${isExpanded ? '#1890ff' : '#f0f0f0'}`,
+                      border: '1px solid #edf0f5',
+                      borderLeft: `3px solid ${isExpanded ? '#1890ff' : '#edf0f5'}`,
                       borderRadius: 8,
                       background: '#fff',
                       overflow: 'hidden',
-                      transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
-                      boxShadow: isExpanded ? '0 2px 8px rgba(24, 144, 255, 0.08)' : 'none',
+                      transition: 'border-color 0.2s ease, background 0.2s ease',
                     }}
                   >
                     {/* 模板标题行 */}
@@ -493,9 +513,9 @@ const DetailPanel: React.FC = () => {
                       }}
                       style={{
                         padding: '8px 10px',
-                        background: isExpanded ? '#fafafa' : '#fff',
+                        background: isExpanded ? '#f8fbff' : '#fff',
                         cursor: 'pointer',
-                        borderBottom: isExpanded ? '1px solid #e6f4ff' : '1px solid transparent',
+                        borderBottom: isExpanded ? '1px solid #eef4ff' : '1px solid transparent',
                         transition: 'background 0.2s ease, border-color 0.2s ease',
                       }}
                     >
@@ -507,15 +527,18 @@ const DetailPanel: React.FC = () => {
                         </Space>
                         <DownOutlined style={{ fontSize: 10, color: '#999', transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, paddingLeft: 19 }}>
-                        <Progress percent={avgProgress} size="small" showInfo={false} style={{ flex: 1, marginBottom: 0 }} strokeColor={avgProgress >= 80 ? '#52c41a' : '#1890ff'} />
-                        <Text style={{ fontSize: 11, minWidth: 32 }}>{avgProgress}%</Text>
-                      </div>
+                      {latestDoc && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, paddingLeft: 19 }}>
+                          <Text type="secondary" style={{ fontSize: 11, flex: 1, minWidth: 0 }} ellipsis={{ tooltip: getDocDisplayName(latestDoc) }}>
+                            最新编辑：{getDocDisplayName(latestDoc)}
+                          </Text>
+                          <Text style={{ fontSize: 11, minWidth: 32, color: getProgressColor(latestProgress), fontWeight: 600 }}>{latestProgress}%</Text>
+                        </div>
+                      )}
                     </div>
                     {/* 展开的文档列表 */}
                     <AnimatedExpand open={isExpanded} borderColor="transparent">
                       <div style={{
-                        borderRadius: '0 0 8px 8px',
                         padding: '8px 10px',
                         background: '#fff',
                       }}>
@@ -528,8 +551,8 @@ const DetailPanel: React.FC = () => {
                             添加文件
                           </Button>
                         </div>
-                        {group.docs.map(doc => {
-                          const version = versions.find(v => v.id === doc.versionId);
+                        {sortedDocs.map(doc => {
+                          const isLatest = latestDoc?.id === doc.id;
                           return (
                             <div
                               key={doc.id}
@@ -540,21 +563,26 @@ const DetailPanel: React.FC = () => {
                                 background: '#fafafa',
                               }}
                             >
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
-                                <Text style={{ fontSize: 11 }} ellipsis={{ tooltip: version?.fileName || doc.name, style: { maxWidth: 130 } }}>
-                                  {version?.fileName || doc.name}
+                              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                                <Text style={{ display: 'block', flex: 1, minWidth: 0, fontSize: 11, lineHeight: '20px' }} ellipsis={{ tooltip: getDocDisplayName(doc) }}>
+                                  {getDocDisplayName(doc)}
                                 </Text>
-                                <Space size={2}>
-                                  <Button type="text" size="small" icon={<ReloadOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(doc, false)} style={{ padding: '0 4px' }} />
-                                  <Button type="text" size="small" icon={<ExperimentOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(doc, true)} style={{ padding: '0 4px' }} />
+                                <Space size={2} style={{ flexShrink: 0 }}>
+                                  <Button type="text" size="small" icon={<ReloadOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(doc, false)} style={{ padding: '0 3px' }} />
+                                  <Button type="text" size="small" icon={<ExperimentOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(doc, true)} style={{ padding: '0 3px' }} />
                                   <Popconfirm title="确定删除？" onConfirm={() => deleteProjectDoc(doc.id)}>
-                                    <Button type="text" size="small" danger icon={<DeleteOutlined />} style={{ padding: '0 4px' }} />
+                                    <Button type="text" size="small" danger icon={<DeleteOutlined />} style={{ padding: '0 3px' }} />
                                   </Popconfirm>
                                 </Space>
                               </div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                <Progress percent={doc.overallProgress} size="small" showInfo={false} style={{ flex: 1, marginBottom: 0 }} />
-                                <Text style={{ fontSize: 10, minWidth: 28 }}>{doc.overallProgress}%</Text>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginTop: 3 }}>
+                                <Text type="secondary" style={{ fontSize: 10, flex: 1, minWidth: 0 }}>
+                                  更新：{formatDateTime(getDocActivityAt(doc))}
+                                </Text>
+                                <Space size={4} style={{ flexShrink: 0 }}>
+                                  {isLatest && <Tag color="blue" style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }}>最新</Tag>}
+                                  <Tag color={doc.overallProgress >= 80 ? 'green' : doc.overallProgress > 0 ? 'orange' : 'default'} style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }}>{doc.overallProgress}%</Tag>
+                                </Space>
                               </div>
                             </div>
                           );
@@ -710,13 +738,23 @@ const DetailPanel: React.FC = () => {
                 const color = stageMeta[segment.stage]?.color || '#8c8c8c';
                 const isCompleted = Boolean(segment.completedAt);
                 const isExpanded = expandedStage === segment.stage;
-                const latestDocName = segment.sourceDocNames[segment.sourceDocNames.length - 1] || '';
-                const docsInStage = projectDocsList.filter(d => segment.sourceDocIds.includes(d.id));
-                const latestDoc = docsInStage[docsInStage.length - 1];
+                const docsInStage = sortDocsByLatestActivity(projectDocsList.filter(d => segment.sourceDocIds.includes(d.id)));
+                const latestDoc = docsInStage[0];
+                const latestDocName = latestDoc ? getDocDisplayName(latestDoc) : '';
 
                 const borderVisible = stageBorderVisible[segment.stage] || isExpanded;
                 return (
-                  <div key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}>
+                  <div
+                    key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}
+                    style={{
+                      border: '1px solid #edf0f5',
+                      borderLeft: `3px solid ${borderVisible ? color : '#edf0f5'}`,
+                      borderRadius: 8,
+                      background: '#fff',
+                      overflow: 'hidden',
+                      transition: 'border-color 0.2s ease, background 0.2s ease',
+                    }}
+                  >
                     {/* 阶段标题行 */}
                     <div
                       onClick={() => {
@@ -730,11 +768,10 @@ const DetailPanel: React.FC = () => {
                       }}
                       style={{
                         padding: '8px 10px',
-                        border: `1px solid ${borderVisible ? color : '#f0f0f0'}`,
-                        borderRadius: isExpanded ? '8px 8px 0 0' : 8,
-                        background: isExpanded ? '#fafafa' : '#fff',
+                        background: isExpanded ? '#fbfdff' : '#fff',
                         cursor: 'pointer',
-                        transition: 'border-color 0.3s ease-in-out',
+                        borderBottom: isExpanded ? '1px solid #eef4ff' : '1px solid transparent',
+                        transition: 'background 0.2s ease, border-color 0.2s ease',
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -750,25 +787,25 @@ const DetailPanel: React.FC = () => {
                         <DownOutlined style={{ fontSize: 10, color: '#999', transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
                       </div>
                       {latestDoc && (
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, paddingLeft: 14 }}>
-                          <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: latestDocName, style: { maxWidth: 160 } }}>
-                            最新：{latestDocName}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, paddingLeft: 14 }}>
+                          <Text type="secondary" style={{ fontSize: 11, flex: 1, minWidth: 0 }} ellipsis={{ tooltip: latestDocName }}>
+                            最新编辑：{latestDocName}
                           </Text>
-                          <Text style={{ fontSize: 11, color: latestDoc.overallProgress >= 80 ? '#52c41a' : '#1890ff', fontWeight: 600 }}>
+                          <Text style={{ fontSize: 11, color: getProgressColor(latestDoc.overallProgress), fontWeight: 600, flexShrink: 0, whiteSpace: 'nowrap' }}>
                             {latestDoc.overallProgress}%
                           </Text>
                         </div>
                       )}
                     </div>
                     {/* 展开的文档列表 */}
-                    <AnimatedExpand open={isExpanded} borderColor={color}>
+                    <AnimatedExpand open={isExpanded} borderColor="transparent">
                       <div style={{
                         borderRadius: '0 0 8px 8px',
                         padding: '8px 10px',
                         background: '#fff',
                       }}>
                         {docsInStage.length > 0 ? docsInStage.map((doc, idx) => {
-                          const isLatest = idx === docsInStage.length - 1;
+                          const isLatest = idx === 0;
                           return (
                             <div
                               key={doc.id}
@@ -777,18 +814,23 @@ const DetailPanel: React.FC = () => {
                                 padding: '6px 8px',
                                 borderRadius: 6,
                                 marginBottom: idx < docsInStage.length - 1 ? 4 : 0,
-                                background: selectedDocId === doc.id ? '#e6f7ff' : '#fafafa',
+                                background: selectedDocId === doc.id ? '#f5faff' : '#fafafa',
+                                border: `1px solid ${selectedDocId === doc.id ? '#d6eaff' : 'transparent'}`,
                                 cursor: 'pointer',
                               }}
                             >
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
-                                <Space size={4}>
-                                  <Text style={{ fontSize: 11 }} ellipsis={{ tooltip: doc.name, style: { maxWidth: 130 } }}>{doc.name}</Text>
+                              <Text style={{ display: 'block', fontSize: 11, lineHeight: '20px' }} ellipsis={{ tooltip: getDocDisplayName(doc) }}>
+                                {getDocDisplayName(doc)}
+                              </Text>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginTop: 3 }}>
+                                <Text type="secondary" style={{ fontSize: 10, flex: 1, minWidth: 0 }}>
+                                  更新：{formatDateTime(getDocActivityAt(doc))}
+                                </Text>
+                                <Space size={4} style={{ flexShrink: 0 }}>
                                   {isLatest && <Tag color="blue" style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }}>最新</Tag>}
+                                  <Tag color={doc.overallProgress >= 80 ? 'green' : doc.overallProgress > 0 ? 'orange' : 'default'} style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }}>{doc.overallProgress}%</Tag>
                                 </Space>
-                                <Text style={{ fontSize: 10, fontWeight: 600 }}>{doc.overallProgress}%</Text>
                               </div>
-                              <Progress percent={doc.overallProgress} size="small" showInfo={false} style={{ marginBottom: 0 }} />
                             </div>
                           );
                         }) : (

@@ -51,6 +51,8 @@ const ProjectList: React.FC = () => {
   const allStages = getAllStages(customStages);
   const stageMeta = getStageMeta(allStages);
 
+  const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
+
   // 使用统一的进度计算函数
   const getProjectProgress = (projectId: string): number => {
     const project = projects.find(p => p.id === projectId);
@@ -308,6 +310,48 @@ const ProjectList: React.FC = () => {
     paused: '已暂停',
   };
 
+  // 拖入文件到项目卡片：导入到项目文件夹
+  const handleDropToProject = async (event: React.DragEvent<HTMLDivElement>, project: Project) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragOverProjectId(null);
+    if (!project.folderPath) return;
+    if (!event.dataTransfer.types.includes('Files')) return;
+    const filePaths = Array.from(event.dataTransfer.files)
+      .map(file => (file as any).path as string | undefined)
+      .filter(Boolean) as string[];
+    if (filePaths.length === 0) return;
+    const result = await window.electronAPI.importFiles({ folderPath: project.folderPath, filePaths });
+    if (!result.success) {
+      message.error(result.error || '导入失败');
+      return;
+    }
+    const imported = result.files || [];
+    if (imported.length > 0) {
+      message.success(`已导入 ${imported.length} 个文件到「${project.name}」`);
+      await syncProjectStageFiles(project, {
+        allStages,
+        projectDocs: useProjectDocStore.getState().projectDocs,
+        templates,
+        addProjectDoc,
+        updateProjectDoc,
+      });
+    }
+  };
+
+  const handleDragOverProject = (event: React.DragEvent<HTMLDivElement>, project: Project) => {
+    if (!project.folderPath) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setDragOverProjectId(project.id);
+  };
+
+  const handleDragLeaveProject = (event: React.DragEvent<HTMLDivElement>) => {
+    const related = event.relatedTarget as HTMLElement;
+    if (related && event.currentTarget.contains(related)) return;
+    setDragOverProjectId(null);
+  };
+
   if (browsingProject) {
     return <ProjectFileExplorer project={browsingProject} onBack={() => setBrowsingProject(null)} />;
   }
@@ -354,6 +398,17 @@ const ProjectList: React.FC = () => {
         dataSource={projects}
         renderItem={(project) => (
           <List.Item>
+            <div
+              onDragOver={(e) => handleDragOverProject(e, project)}
+              onDragLeave={handleDragLeaveProject}
+              onDrop={(e) => handleDropToProject(e, project)}
+              style={{
+                borderRadius: 12,
+                border: dragOverProjectId === project.id ? '2px dashed #1890ff' : '2px solid transparent',
+                background: dragOverProjectId === project.id ? '#f0f7ff' : 'transparent',
+                transition: 'all 0.15s',
+              }}
+            >
             <Card
               hoverable
               onClick={() => setCurrentProject(project)}
@@ -412,6 +467,7 @@ const ProjectList: React.FC = () => {
                 />
               </div>
             </Card>
+            </div>
           </List.Item>
         )}
       />

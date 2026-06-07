@@ -4,6 +4,7 @@ import { Project, DocumentVersion } from '../../shared/types';
 interface ProjectState {
   projects: Project[];
   currentProject: Project | null;
+  currentStageName: string;
   versions: DocumentVersion[];
   isLoading: boolean;
 
@@ -11,6 +12,7 @@ interface ProjectState {
   loadProjects: () => Promise<void>;
   addProject: (project: Project) => Promise<void>;
   setCurrentProject: (project: Project | null) => void;
+  setCurrentStageName: (stageName: string) => void;
   updateProject: (id: string, updates: Partial<Project>) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
 
@@ -23,6 +25,7 @@ interface ProjectState {
 export const useProjectStore = create<ProjectState>((set, get) => ({
   projects: [],
   currentProject: null,
+  currentStageName: '',
   versions: [],
   isLoading: false,
 
@@ -47,7 +50,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
-  setCurrentProject: (project) => set({ currentProject: project }),
+  setCurrentProject: (project) => set((state) => ({
+    currentProject: project,
+    currentStageName: project ? state.currentStageName : '',
+  })),
+
+  setCurrentStageName: (stageName) => set({ currentStageName: stageName }),
 
   updateProject: async (id, updates) => {
     const projects = get().projects.map((p) =>
