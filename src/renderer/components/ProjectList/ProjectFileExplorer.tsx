@@ -97,6 +97,8 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const lastClickRef = React.useRef<{ path: string; time: number } | null>(null);
   const lastSelectedPathRef = useRef<string>('');
+  const renameTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isDoubleClickRef = useRef(false);
   const [internalDragPaths, setInternalDragPaths] = useState<Set<string>>(new Set());
   const [internalDragOverPath, setInternalDragOverPath] = useState<string | null>(null);
 
@@ -152,6 +154,12 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   };
 
   const handleDoubleClick = (item: FileItem) => {
+    // 标记为双击，取消慢双击重命名
+    isDoubleClickRef.current = true;
+    if (renameTimerRef.current) {
+      clearTimeout(renameTimerRef.current);
+      renameTimerRef.current = null;
+    }
     setRenamingPath('');
     if (item.isDirectory) {
       setSelectedPaths(new Set());
@@ -596,20 +604,9 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   // 资源管理器风格点击：单击选中，Ctrl+点击多选，Shift+点击范围选，慢双击重命名
   const handleFileClick = (item: FileItem, event: React.MouseEvent) => {
     if (renamingPath === item.path) return;
-    const now = Date.now();
-    const last = lastClickRef.current;
 
-    // 慢双击检测
-    if (last && last.path === item.path && now - last.time < 500) {
-      lastClickRef.current = null;
-      setRenamingPath(item.path);
-      setRenameValue(item.name);
-      return;
-    }
-    lastClickRef.current = { path: item.path, time: now };
-
+    // 多选逻辑
     if (event.shiftKey && lastSelectedPathRef.current) {
-      // Shift+点击：范围选择
       const lastIdx = items.findIndex(i => i.path === lastSelectedPathRef.current);
       const curIdx = items.findIndex(i => i.path === item.path);
       if (lastIdx >= 0 && curIdx >= 0) {
@@ -618,7 +615,6 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
         setSelectedPaths(prev => new Set([...prev, ...rangePaths]));
       }
     } else if (event.ctrlKey || event.metaKey) {
-      // Ctrl+点击：切换选中
       setSelectedPaths(prev => {
         const next = new Set(prev);
         if (next.has(item.path)) next.delete(item.path);
@@ -627,9 +623,26 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       });
       lastSelectedPathRef.current = item.path;
     } else {
-      // 普通点击：单选
-      setSelectedPaths(new Set([item.path]));
-      lastSelectedPathRef.current = item.path;
+      // 普通点击
+      const isAlreadySelected = selectedPaths.has(item.path) && selectedPaths.size === 1;
+
+      if (isAlreadySelected) {
+        // 已选中状态下再次点击：延迟进入重命名
+        // 如果是快双击，onDoubleClick 会取消这个定时器
+        if (renameTimerRef.current) clearTimeout(renameTimerRef.current);
+        isDoubleClickRef.current = false;
+        renameTimerRef.current = setTimeout(() => {
+          if (!isDoubleClickRef.current) {
+            setRenamingPath(item.path);
+            setRenameValue(item.name);
+          }
+          renameTimerRef.current = null;
+        }, 300);
+      } else {
+        // 首次点击：选中
+        setSelectedPaths(new Set([item.path]));
+        lastSelectedPathRef.current = item.path;
+      }
     }
   };
 
