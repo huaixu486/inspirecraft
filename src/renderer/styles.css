@@ -982,6 +982,52 @@ body.template-editor-modal-open {
   background: linear-gradient(135deg, rgba(22, 119, 255, 0.07), rgba(255, 255, 255, 0.82));
 }
 
+.template-import-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.template-ai-running-button.ant-btn {
+  border-color: rgba(22, 119, 255, 0.42);
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.08);
+}
+
+.template-ai-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  padding: 3px 8px;
+  border: 1px solid rgba(22, 119, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(239, 246, 255, 0.92);
+  color: #2563eb;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.template-ai-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #1677ff;
+  box-shadow: 0 0 0 0 rgba(22, 119, 255, 0.32);
+  animation: templateAiStatusPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes templateAiStatusPulse {
+  0%, 100% {
+    opacity: 0.68;
+    box-shadow: 0 0 0 0 rgba(22, 119, 255, 0.3);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 0 5px rgba(22, 119, 255, 0);
+  }
+}
+
 .template-editor-side {
   min-height: 0;
   height: 100%;
@@ -1080,12 +1126,19 @@ body.template-editor-modal-open {
     linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.9));
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.035);
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+  scroll-margin: 80px;
   flex-shrink: 0;
 }
 
 .template-node-card.active {
   border-color: rgba(22, 119, 255, 0.55);
   box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.08), 0 12px 26px rgba(15, 23, 42, 0.055);
+}
+
+.template-node-card.selected {
+  border-color: rgba(22, 119, 255, 0.38);
+  background:
+    linear-gradient(180deg, rgba(239, 246, 255, 0.92), rgba(255, 255, 255, 0.96));
 }
 
 .template-node-card.filtered-context {
@@ -1337,7 +1390,33 @@ body.template-editor-modal-open {
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.86);
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
   transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.template-node-preview-row * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.template-node-preview-row.selected {
+  border-color: rgba(22, 119, 255, 0.46);
+  background: rgba(22, 119, 255, 0.075);
+}
+
+.template-node-preview-selectbox {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  margin: 0;
+  accent-color: #1677ff;
+  cursor: pointer;
+}
+
+.template-node-preview-selectbox:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
 }
 
 .template-node-preview-children {

@@ -527,10 +527,43 @@ const normalizeStringEvidence = (value: unknown): string[] => {
   return [];
 };
 
+
+function cleanAiTemplateNodeTitle(value: string): string {
+  const lines = String(value || '')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  const firstLine = lines.find(line => matchHeadingLine(line)) || lines[0] || '';
+  let title = firstLine.replace(/\s+/g, ' ').trim();
+  if (title.length > 80) {
+    title = title
+      .split(/[。；;]|(?<=.{36})[，,]/)[0]
+      .trim();
+  }
+  return title
+    .replace(/[：:；;，,。.\s]+$/, '')
+    .slice(0, 80)
+    .trim();
+}
+
+function cleanAiTemplateNodes(nodes: TemplateNode[]): TemplateNode[] {
+  return nodes
+    .map(node => {
+      const children = node.children?.length ? cleanAiTemplateNodes(node.children) : undefined;
+      return {
+        ...node,
+        title: cleanAiTemplateNodeTitle(node.title),
+        children: children?.length ? children : undefined,
+      };
+    })
+    .filter(node => Boolean(node.title));
+}
 function nodesFromHeadingItems(items: AiTemplateHeadingItem[]): TemplateNode[] {
   const nodes: TemplateNode[] = [];
   const stack: TemplateNode[] = [];
   items
+    .map(item => ({ ...item, title: cleanAiTemplateNodeTitle(item.title) }))
     .filter(item => item.title && !isLikelyGarbledText(item.title))
     .forEach((item, index) => {
       const rawDescription = String(item.description || '').trim();
@@ -549,7 +582,7 @@ function nodesFromHeadingItems(items: AiTemplateHeadingItem[]): TemplateNode[] {
       ]).join('\n');
       const node: TemplateNode = {
         id: `${Date.now()}-${index}`,
-        title: item.title.trim(),
+        title: item.title,
         level: Math.min(Math.max(Number(item.level) || 1, 1), 4),
         description: requirementText || undefined,
         requirementText: requirementText || undefined,
@@ -801,7 +834,7 @@ function parseAiHeadingResponse(response: string): AiTemplateExtractionResult {
       '标题', '名称', '章节标题', '标题名称', '章标题', '节标题'
     ]);
     return {
-      title: title.trim(),
+      title: cleanAiTemplateNodeTitle(title),
       level: normalizeAiHeadingLevel(item.level ?? item.headingLevel ?? item.depth ?? item.type ?? item['level'] ?? item['层级'] ?? item['标题级别'], title),
       description: firstStringValue(item, ['description', 'tips', 'note', 'notes', 'summary', '说明', '描述', '备注', '写作说明']).trim(),
       requirementText: firstStringValue(item, [
@@ -1003,18 +1036,247 @@ function filterNodesByCommonExampleHeadings(
   });
 }
 
+function classifyExampleWritingDirection(title: string): string {
+  const key = normalizeTemplateHeadingTitle(title);
+  if (!key) return '';
+  if (/项目|概述|概况|背景|总体|简介|建设内容/.test(key)) return 'overview';
+  if (/总结|展望|结论|成效|启示/.test(key)) return 'summary';
+  if (/应用|试点|试验|测试|验证|运行|使用情况|示范/.test(key)) return 'application';
+  if (/系统|技术|方案|路线|架构|平台|算法|模型|识别|检测|监测|机器人|功能|模块|装置/.test(key)) {
+    return `technical:${key}`;
+  }
+  return `section:${key}`;
+}
+
+function cloneTemplateNodeWithFreshIds(node: TemplateNode, idPrefix: string, counter: { value: number }): TemplateNode {
+  counter.value += 1;
+  const clonedChildren = node.children?.map(child => cloneTemplateNodeWithFreshIds(child, idPrefix, counter));
+  return {
+    ...node,
+    id: `${idPrefix}-${counter.value}`,
+    children: clonedChildren?.length ? clonedChildren : undefined,
+  };
+}
+
+function mergeExampleDirectionGuidance(node: TemplateNode, extracted: TemplateNode[][]): TemplateNode {
+  const direction = classifyExampleWritingDirection(node.title);
+  const exactKey = normalizeTemplateHeadingTitle(node.title);
+  const candidates = extracted
+    .flatMap(nodes => nodes)
+    .filter(item => {
+      const itemKey = normalizeTemplateHeadingTitle(item.title);
+      if (itemKey && itemKey === exactKey) return true;
+      const itemDirection = classifyExampleWritingDirection(item.title);
+      return direction && itemDirection === direction && ['overview', 'summary', 'application'].includes(direction);
+    });
+  const descriptions = uniqueTextLines([
+    node.description || '',
+    ...candidates.map(item => item.description || ''),
+  ]).join('\n\n');
+  const requirementText = uniqueTextLines([
+    node.requirementText || '',
+    ...candidates.map(item => item.requirementText || ''),
+  ]).join('\n\n');
+  const exampleText = uniqueTextLines([
+    node.exampleText || '',
+    ...candidates.map(item => item.exampleText || ''),
+  ]).join('\n\n');
+  return {
+    ...node,
+    description: descriptions || node.description,
+    requirementText: requirementText || node.requirementText,
+    exampleText: exampleText || node.exampleText,
+  };
+}
+
+
+const genericExampleOutlineNumbers = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+
+function formatGenericExampleOutlineTitle(index: number): string {
+  return `${genericExampleOutlineNumbers[index] || String(index + 1)}、`;
+}
+
+function getExampleDirectionNamingGuide(title: string, index: number): string {
+  const direction = classifyExampleWritingDirection(title);
+  const cleanTitle = cleanAiTemplateNodeTitle(title).replace(/^[一二三四五六七八九十百千万\d]+[、.．）\)]\s*/, '');
+  if (direction === 'overview') {
+    return '标题命名方向：项目整体概述、背景、建设内容或总体情况。';
+  }
+  if (direction === 'summary') {
+    return '标题命名方向：总结、成效、结论或后续展望。';
+  }
+  if (direction === 'application') {
+    return '标题命名方向：试验验证、应用情况、运行效果或示范推广。';
+  }
+  if (direction.startsWith('technical:')) {
+    return `标题命名方向：围绕当前项目的核心技术、系统组成、关键功能或技术路线命名；参考方向为“${cleanTitle || `技术章节${index + 1}`}”。`;
+  }
+  return `标题命名方向：结合当前项目内容自拟一级标题；参考方向为“${cleanTitle || `章节${index + 1}`}”。`;
+}
+
+function buildDefaultExampleWritingDirectionNodes(): TemplateNode[] {
+  const guides = [
+    '标题命名方向：项目整体概述、背景、建设内容或总体情况。写作功能：先交代项目是什么、为什么做、整体目标和技术报告范围。',
+    '标题命名方向：围绕当前项目的总体技术方案、系统架构、技术路线或核心系统组成命名。写作功能：从整体到局部说明技术实现框架。',
+    '标题命名方向：围绕关键技术、关键功能、算法模型、设备模块或创新点命名。写作功能：展开项目最核心的技术细节和能力特点。',
+    '标题命名方向：试验验证、应用情况、运行效果、测试结果或示范推广。写作功能：说明技术如何落地、验证效果和应用价值。',
+    '标题命名方向：总结、成效、结论或后续展望。写作功能：概括成果、经验、不足和下一步方向。',
+  ];
+  return guides.map((guide, index) => ({
+    id: `example-default-${index + 1}`,
+    title: formatGenericExampleOutlineTitle(index),
+    level: 1,
+    isRequired: true,
+    description: guide,
+    requirementText: guide,
+  }));
+}
+
+function dedupeExampleNodesByTitle(nodes: TemplateNode[]): TemplateNode[] {
+  const seen = new Set<string>();
+  return nodes.flatMap(node => {
+    const key = `${node.level || 1}:${normalizeTemplateHeadingTitle(node.title)}`;
+    if (!key || seen.has(key)) return [];
+    seen.add(key);
+    const children = node.children?.length ? dedupeExampleNodesByTitle(node.children) : undefined;
+    return [{
+      ...node,
+      children: children?.length ? children : undefined,
+    }];
+  });
+}
+
+function countUniqueExampleTitles(nodes: TemplateNode[]): number {
+  const keys = new Set<string>();
+  flattenTemplateNodesForMatch(nodes).forEach(node => {
+    const key = normalizeTemplateHeadingTitle(node.title);
+    if (key) keys.add(key);
+  });
+  return keys.size;
+}
+function buildExampleWritingDirectionNodes(sourceNodes: TemplateNode[], extracted: TemplateNode[][]): TemplateNode[] {
+  const baseNodes = sourceNodes.length ? sourceNodes : (extracted[0] || []);
+  const topLevelNodes = baseNodes.filter(node => (node.level || 1) <= 1);
+  const representativeNodes = topLevelNodes.length ? topLevelNodes : baseNodes;
+  const seenDirections = new Set<string>();
+  const counter = { value: 0 };
+  const nodes = representativeNodes.flatMap(node => {
+    const direction = classifyExampleWritingDirection(node.title) || normalizeTemplateHeadingTitle(node.title);
+    if (!direction || seenDirections.has(direction)) return [];
+    seenDirections.add(direction);
+    const merged = mergeExampleDirectionGuidance(node, extracted);
+    const namingGuide = getExampleDirectionNamingGuide(node.title, counter.value);
+    const writingGuide = uniqueTextLines([
+      namingGuide,
+      merged.description || '',
+      merged.requirementText || '',
+    ]).join('\n\n');
+    counter.value += 1;
+    return [{
+      ...merged,
+      id: `example-direction-${counter.value}`,
+      title: formatGenericExampleOutlineTitle(counter.value - 1),
+      level: 1,
+      description: writingGuide || namingGuide,
+      requirementText: writingGuide || namingGuide,
+      children: undefined,
+    }];
+  });
+  return nodes.length > 1 ? nodes : buildDefaultExampleWritingDirectionNodes();
+}
+
+function getExampleTitleChars(title: string): Set<string> {
+  const key = normalizeTemplateHeadingTitle(title)
+    .replace(/[的和及与在中为之其该本各类一种以及通过基于关于]/g, '');
+  return new Set(Array.from(key));
+}
+
+function getBroadExampleDirection(title: string): string {
+  const direction = classifyExampleWritingDirection(title);
+  if (['overview', 'summary', 'application'].includes(direction)) return direction;
+  if (direction.startsWith('technical:')) return 'technical';
+  return 'section';
+}
+
+function calculateExampleTitleSimilarity(a: string, b: string): number {
+  const aKey = normalizeTemplateHeadingTitle(a);
+  const bKey = normalizeTemplateHeadingTitle(b);
+  if (!aKey || !bKey) return 0;
+  if (aKey === bKey) return 1;
+  const aChars = getExampleTitleChars(a);
+  const bChars = getExampleTitleChars(b);
+  if (aChars.size === 0 || bChars.size === 0) return 0;
+  const intersection = [...aChars].filter(ch => bChars.has(ch)).length;
+  const union = new Set([...aChars, ...bChars]).size;
+  return union > 0 ? intersection / union : 0;
+}
+
+function areSamePositionExampleHeadingsSimilar(nodes: TemplateNode[]): boolean {
+  if (nodes.length < 2) return false;
+  const base = nodes[0];
+  return nodes.slice(1).every(node => {
+    if ((node.level || 1) !== (base.level || 1)) return false;
+    const similarity = calculateExampleTitleSimilarity(base.title, node.title);
+    const baseDirection = getBroadExampleDirection(base.title);
+    const nodeDirection = getBroadExampleDirection(node.title);
+    return similarity >= 0.18 || (baseDirection !== 'section' && baseDirection === nodeDirection);
+  });
+}
+
+function mergeSamePositionExampleNode(nodes: TemplateNode[], id: string): TemplateNode {
+  const base = nodes[0];
+  const otherTitles = uniqueTextLines(nodes.slice(1).map(node => cleanAiTemplateNodeTitle(node.title)));
+  const namingGuide = otherTitles.length
+    ? `同位置相似标题：${[cleanAiTemplateNodeTitle(base.title), ...otherTitles].join(' / ')}`
+    : '';
+  const descriptions = uniqueTextLines([
+    namingGuide,
+    ...nodes.map(node => node.description || ''),
+    ...nodes.map(node => node.requirementText || ''),
+  ]).join('\n\n');
+  const exampleText = uniqueTextLines(nodes.map(node => node.exampleText || '')).join('\n\n');
+  return {
+    ...base,
+    id,
+    title: cleanAiTemplateNodeTitle(base.title),
+    description: descriptions || base.description,
+    requirementText: descriptions || base.requirementText,
+    exampleText: exampleText || base.exampleText,
+    children: undefined,
+  };
+}
+
+function buildMergedExampleSiblingNodes(siblingGroups: TemplateNode[][], counter: { value: number }): TemplateNode[] {
+  if (siblingGroups.length < 2 || siblingGroups.some(group => group.length === 0)) return [];
+  const length = Math.min(...siblingGroups.map(group => group.length));
+  const merged: TemplateNode[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const samePositionNodes = siblingGroups.map(group => group[index]).filter(Boolean);
+    if (samePositionNodes.length !== siblingGroups.length) continue;
+    if (!areSamePositionExampleHeadingsSimilar(samePositionNodes)) continue;
+    counter.value += 1;
+    const node = mergeSamePositionExampleNode(samePositionNodes, `example-merged-${counter.value}`);
+    const childGroups = samePositionNodes.map(item => item.children || []);
+    const children = buildMergedExampleSiblingNodes(childGroups, counter);
+    merged.push({
+      ...node,
+      children: children.length ? children : undefined,
+    });
+  }
+  return merged;
+}
 function buildCommonExampleTemplateNodes(sourceNodes: TemplateNode[], files: ImportedTemplateFile[]) {
   if (files.length < 2) {
     return { nodes: sourceNodes, evidence: '' };
   }
-  const { commonKeys, extracted } = getCommonExampleHeadingKeys(files);
-  let nodes = filterNodesByCommonExampleHeadings(sourceNodes, commonKeys, extracted);
-  if (nodes.length === 0 && extracted[0]?.length) {
-    nodes = filterNodesByCommonExampleHeadings(extracted[0], commonKeys, extracted);
-  }
+  const extracted = files.map(file => extractTemplateNodes(file.text));
+  const counter = { value: 0 };
+  const nodes = buildMergedExampleSiblingNodes(extracted, counter);
   return {
     nodes,
-    evidence: `已按 ${files.length} 篇范文取共同标题，保留 ${flattenTemplateNodesForMatch(nodes).length} 个共同章节`,
+    evidence: nodes.length > 0
+      ? `已按 ${files.length} 篇范文的同级同位置标题相似度合并，保留 ${flattenTemplateNodesForMatch(nodes).length} 个共同结构节点`
+      : `未发现 ${files.length} 篇范文在同级同位置上足够相似的共同章节，可切换查看单篇范文结构`,
   };
 }
 
@@ -1153,6 +1415,15 @@ function findEmptyNodeTitle(nodes: TemplateNode[]): TemplateNode | undefined {
   return undefined;
 }
 
+const AI_EXTRACT_STALE_SECONDS = 300;
+
+const getAiExtractWaitingStatus = (seconds: number) => {
+  if (seconds >= 180) return 'AI 仍在处理，等待时间较长；若无响应会自动释放按钮';
+  if (seconds >= 60) return 'AI 仍在处理，较大的范文可能需要几分钟';
+  if (seconds >= 15) return '请求已发送，正在等待 AI 生成结构和格式规则';
+  return '请求已发送，等待 AI 返回';
+};
+
 const TemplateManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const templates = useTemplateStore(state => state.templates);
   const loadTemplates = useTemplateStore(state => state.loadTemplates);
@@ -1167,7 +1438,11 @@ const TemplateManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [deletingTemplate, setDeletingTemplate] = useState<WritingTemplate | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isAiExtracting, setIsAiExtracting] = useState(false);
+  const [aiExtractStatus, setAiExtractStatus] = useState('');
+  const [aiExtractStartedAt, setAiExtractStartedAt] = useState<number | null>(null);
+  const [aiExtractElapsedSeconds, setAiExtractElapsedSeconds] = useState(0);
   const [importedFiles, setImportedFiles] = useState<Array<{ filePath: string; text: string; fileName?: string }>>([]);
+  const [exampleStructureView, setExampleStructureView] = useState('merged');
   const [formatRuleEvidence, setFormatRuleEvidence] = useState<string[]>([]);
   const [fontOptions, setFontOptions] = useState(fallbackFontNames.map(font => ({ value: font })));
   const [headingLevelFilter, setHeadingLevelFilter] = useState<number[]>([1, 2, 3, 4]);
@@ -1175,6 +1450,7 @@ const TemplateManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [isStageSectionExpanded, setIsStageSectionExpanded] = useState(false);
   const hasRequestedTemplateRefreshRef = useRef(false);
   const hasRequestedFontsRef = useRef(false);
+  const aiExtractStaleNotifiedRef = useRef(false);
   const [form] = Form.useForm();
   const enableFormatRules = Form.useWatch('enableFormatRules', form);
   const templateType = Form.useWatch('templateType', form);
@@ -1183,6 +1459,57 @@ const TemplateManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const importedDocumentText = useMemo(() => importedFiles.map(f => f.text).join('\n\n'), [importedFiles]);
   const importedFilePath = importedFiles[0]?.filePath || '';
 
+  const resetAiExtractState = (status = 'AI 识别状态已重置，可以重新点击识别') => {
+    aiExtractStaleNotifiedRef.current = false;
+    setIsAiExtracting(false);
+    setAiExtractStartedAt(null);
+    setAiExtractElapsedSeconds(0);
+    setAiExtractStatus(status);
+  };
+
+  useEffect(() => {
+    if (!isAiExtracting || !aiExtractStartedAt) return;
+    aiExtractStaleNotifiedRef.current = false;
+    const updateElapsed = () => {
+      const seconds = Math.max(0, Math.floor((Date.now() - aiExtractStartedAt) / 1000));
+      setAiExtractElapsedSeconds(seconds);
+      if (seconds >= AI_EXTRACT_STALE_SECONDS && !aiExtractStaleNotifiedRef.current) {
+        aiExtractStaleNotifiedRef.current = true;
+        setIsAiExtracting(false);
+        setAiExtractStartedAt(null);
+        setAiExtractStatus('AI 识别等待过久，已自动重置，请重新点击识别');
+        message.warning('AI 识别等待过久，已自动重置；请重新点击识别。', 6);
+        return;
+      }
+      setAiExtractStatus(getAiExtractWaitingStatus(seconds));
+    };
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timer);
+  }, [aiExtractStartedAt, isAiExtracting]);
+
+
+  const buildExampleStructureResult = (view: string, files = importedFiles) => {
+    if (files.length === 0) return { nodes: [] as TemplateNode[], evidence: '' };
+    if (view.startsWith('file:')) {
+      const index = Math.min(Math.max(Number(view.split(':')[1]) || 0, 0), files.length - 1);
+      const nodes = extractTemplateNodes(files[index]?.text || '');
+      return {
+        nodes,
+        evidence: `当前显示范文${index + 1}的原始章节结构`,
+      };
+    }
+    return buildCommonExampleTemplateNodes(extractTemplateNodes(files[0]?.text || ''), files);
+  };
+
+  const applyExampleStructureView = (view: string, files = importedFiles) => {
+    setExampleStructureView(view);
+    const result = buildExampleStructureResult(view, files);
+    setTemplateNodes(result.nodes);
+    if (result.evidence) {
+      setFormatRuleEvidence(prev => [result.evidence, ...prev.filter(item => !/当前显示范文|同级同位置|未发现 .*共同章节/.test(item))].slice(0, 12));
+    }
+  };
   useEffect(() => {
     document.body.classList.toggle('template-editor-modal-open', isModalOpen);
     return () => document.body.classList.remove('template-editor-modal-open');
@@ -1688,10 +2015,11 @@ const TemplateManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 规则：
 1. level 只允许 1-4。
 2. description 要写具体的写作方法和技巧，不是直接复制范文原文，而是分析总结。
-3. requirementText 只写建议字数，不要写硬性要求。
-4. 格式规则要从范文中实际使用的格式推断，如果范文使用了某种字体/字号/行距，请提取出来。
-5. 目录、页码、页眉页脚、乱码不要作为标题。
-6. 多篇范文中只在某一篇出现的小标题、项目名称、实施地点、金额、时间、单位名称等个性化标题，不要放入 nodes。
+3. title 只能是干净的章节标题或写作方向名称，不能包含正文句子、段落、事实描述或换行内容。
+4. requirementText 只写建议字数，不要写硬性要求。
+5. 格式规则要从范文中实际使用的格式推断，如果范文使用了某种字体/字号/行距，请提取出来。
+6. 目录、页码、页眉页脚、乱码不要作为标题。
+7. 多篇范文中只在某一篇出现的小标题、项目名称、实施地点、金额、时间、单位名称等个性化标题，不要放入 nodes。
 
 范文内容：
 ${content.slice(0, 22000)}`;
@@ -1777,9 +2105,10 @@ ${content.slice(0, 22000)}`;
     }
 
     const currentType = form.getFieldValue('templateType') || 'direct';
+    const cleanResultNodes = cleanAiTemplateNodes(result.nodes);
     const commonResult = currentType === 'example'
-      ? buildCommonExampleTemplateNodes(result.nodes, importedFiles)
-      : { nodes: result.nodes, evidence: '' };
+      ? { nodes: cleanResultNodes, evidence: '已使用 AI 分析结果覆盖范文模板章节结构' }
+      : { nodes: cleanResultNodes, evidence: '' };
     if (currentType === 'example' && importedFiles.length > 1 && commonResult.nodes.length === 0) {
       message.warning('多篇范文未识别到共同章节标题，请检查标题命名是否一致，或保留一篇范文后再识别。');
       return false;
@@ -1839,13 +2168,25 @@ ${content.slice(0, 22000)}`;
   };
 
   const handleAiExtract = async () => {
+    if (isAiExtracting) {
+      message.info(aiExtractStatus || 'AI 识别仍在运行，请稍等或点击重置');
+      return;
+    }
+    if (isExtracting) {
+      message.info('文件仍在解析，请稍等片刻再识别');
+      return;
+    }
 
     if (!importedDocumentText) {
       message.warning('请先选择并解析一个文件');
       return;
     }
 
+    aiExtractStaleNotifiedRef.current = false;
     setIsAiExtracting(true);
+    setAiExtractStartedAt(Date.now());
+    setAiExtractElapsedSeconds(0);
+    setAiExtractStatus(getAiExtractWaitingStatus(0));
     try {
       const aiResult = await enrichAiResultWithSourceFormat(await extractNodesWithAi(importedDocumentText));
       if (aiResult.nodes.length === 0) {
@@ -1880,6 +2221,7 @@ ${content.slice(0, 22000)}`;
       message.error(formatTemplateAiError(error), 7);
     } finally {
       setIsAiExtracting(false);
+      setAiExtractStartedAt(null);
     }
   };
 
@@ -1976,6 +2318,7 @@ ${content.slice(0, 22000)}`;
     setIsModalOpen(true);
     window.requestAnimationFrame(() => {
       setImportedFiles([]);
+      setExampleStructureView('merged');
       setFormatRuleEvidence([]);
       setHeadingLevelFilter([1, 2, 3, 4]);
       setSelectedNodeIds(new Set());
@@ -2000,6 +2343,7 @@ ${content.slice(0, 22000)}`;
     setIsModalOpen(true);
     window.requestAnimationFrame(() => {
       setImportedFiles([]);
+      setExampleStructureView('merged');
       setFormatRuleEvidence([]);
       setHeadingLevelFilter([1, 2, 3, 4]);
       setSelectedNodeIds(new Set());
@@ -2177,8 +2521,12 @@ ${content.slice(0, 22000)}`;
       );
       // 从最新文件提取章节结构
       const extractedNodes = extractTemplateNodes(result.content);
+      const nextExampleView = currentType === 'example' && newFiles.length > 1 ? 'merged' : 'file:0';
+      if (currentType === 'example') {
+        setExampleStructureView(nextExampleView);
+      }
       const commonImportResult = currentType === 'example'
-        ? buildCommonExampleTemplateNodes(extractedNodes, newFiles)
+        ? buildExampleStructureResult(nextExampleView, newFiles)
         : { nodes: extractedNodes, evidence: '' };
       const nodes = commonImportResult.nodes;
       const evidence = [
@@ -2443,7 +2791,7 @@ ${content.slice(0, 22000)}`;
                   <Text strong>从文件导入结构</Text>
                   <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 2 }}>
                     {templateType === 'example'
-                      ? '支持导入多个范文文件；多篇范文会只保留共同标题，差异化小标题用于分析写作特征。'
+                      ? '支持导入多个范文文件；可切换查看单篇范文结构，也可查看按同级同位置相似度生成的合并结构。'
                       : '支持 .doc/.docx/.ppt/.pptx/.xls/.xlsx/.pdf/.txt/.md/.rtf，自动识别章节标题并保留源文件用于后续创建文件。'}
                   </Text>
                   {importedFiles.length > 0 && (
@@ -2464,19 +2812,34 @@ ${content.slice(0, 22000)}`;
                               if (templateType === 'example') {
                                 if (newFiles.length === 0) {
                                   setTemplateNodes([]);
+                                  setExampleStructureView('merged');
                                 } else {
-                                  const baseNodes = extractTemplateNodes(newFiles[0].text);
-                                  const commonResult = buildCommonExampleTemplateNodes(baseNodes, newFiles);
-                                  setTemplateNodes(commonResult.nodes);
-                                  if (commonResult.evidence) {
-                                    setFormatRuleEvidence(prev => [commonResult.evidence, ...prev].slice(0, 12));
-                                  }
+                                  const nextView = newFiles.length > 1 ? 'merged' : 'file:0';
+                                  applyExampleStructureView(nextView, newFiles);
                                 }
                               }
                             }}
                           />
                         </div>
                       ))}
+                    </div>
+                  )}
+                  {templateType === 'example' && importedFiles.length > 0 && (
+                    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>结构视图</Text>
+                      <Select
+                        size="small"
+                        value={exampleStructureView}
+                        style={{ minWidth: 150 }}
+                        onChange={(value) => applyExampleStructureView(value)}
+                        options={[
+                          ...(importedFiles.length > 1 ? [{ value: 'merged', label: '合并结构' }] : []),
+                          ...importedFiles.map((file, index) => ({
+                            value: `file:${index}`,
+                            label: `范文${index + 1}结构`,
+                          })),
+                        ]}
+                      />
                     </div>
                   )}
                 </div>
@@ -2489,13 +2852,35 @@ ${content.slice(0, 22000)}`;
                     {templateType === 'example' && importedFiles.length > 0 ? '继续添加文件' : '选择文件'}
                   </Button>
                   <Button
+                    className={isAiExtracting ? 'template-ai-running-button' : undefined}
                     disabled={importedFiles.length === 0}
                     loading={isAiExtracting}
                     onClick={handleAiExtract}
                   >
-                    {templateType === 'example' ? 'AI识别结构/分析范文' : 'AI识别结构/要求/格式'}
+                    {isAiExtracting
+                      ? `AI识别中 ${aiExtractElapsedSeconds}s`
+                      : (templateType === 'example' ? 'AI识别结构/分析范文' : 'AI识别结构/要求/格式')}
                   </Button>
                 </Space>
+                {(isAiExtracting || aiExtractStatus) && (
+                  <div className="template-ai-status">
+                    {isAiExtracting && <span className="template-ai-status-dot" />}
+                    <span>{aiExtractStatus || 'AI 正在运行'}</span>
+                    {isAiExtracting && (
+                      <Button
+                        type="link"
+                        size="small"
+                        className="template-ai-status-reset"
+                        onClick={() => {
+                          resetAiExtractState();
+                          message.info('已重置 AI 识别状态，可以重新点击识别');
+                        }}
+                      >
+                        重置
+                      </Button>
+                    )}
+                  </div>
+                )}
               </div>
 
           {/* 模板结构编辑器 */}

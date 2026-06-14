@@ -26,6 +26,49 @@ const tasksFile = path.join(dataDir, 'tasks.json');
 const settingsFile = path.join(dataDir, 'settings.json');
 const projectDocsFile = path.join(dataDir, 'project-documents.json');
 const templateFilesDir = path.join(dataDir, 'template-files');
+const logsDir = path.join(userDataPath, 'logs');
+const aiLogFile = path.join(logsDir, 'ai.log');
+
+function createSafeLogReplacer() {
+  const seen = new WeakSet<object>();
+  return (key: string, value: any) => {
+    if (/api[-_]?key|authorization|token|secret/i.test(key)) return '[redacted]';
+    if (value instanceof Error) {
+      return {
+        name: value.name,
+        message: value.message,
+        stack: value.stack?.split('\n').slice(0, 6).join('\n'),
+      };
+    }
+    if (typeof value === 'string') {
+      return value.length > 1200 ? value.slice(0, 1200) + '...[truncated]' : value;
+    }
+    if (value && typeof value === 'object') {
+      if (seen.has(value)) return '[circular]';
+      seen.add(value);
+    }
+    return value;
+  };
+}
+
+function formatAiLogValue(value: any, maxLength = 2400): string {
+  try {
+    const raw = typeof value === 'string' ? value : JSON.stringify(value, createSafeLogReplacer());
+    return String(raw || '').replace(/\s+/g, ' ').slice(0, maxLength);
+  } catch {
+    return String(value || '').replace(/\s+/g, ' ').slice(0, maxLength);
+  }
+}
+
+function appendAiLog(event: string, data?: any) {
+  try {
+    fs.mkdirSync(logsDir, { recursive: true });
+    const payload = data === undefined ? '' : ' ' + formatAiLogValue(data);
+    fs.appendFileSync(aiLogFile, '[' + new Date().toISOString() + '] ' + event + payload + '\n', 'utf-8');
+  } catch {
+    // Logging must never break the AI request flow.
+  }
+}
 
 // 确保数据目录存在
 function ensureDataDir() {
@@ -382,6 +425,9 @@ function parseWordLengthRequirement(text = ''): { minComplete: number; source: s
 }
 
 function getSectionLengthRequirement(node: TemplateNode, template?: WritingTemplate): { minComplete: number; minPartial: number; source: string } {
+  if (template?.templateType === 'example') {
+    return { minComplete: 1, minPartial: 1, source: '范文模板仅作写作方向参考' };
+  }
   const textSources = [node.requirementText, node.description, template?.requirementText].filter(Boolean) as string[];
   for (const text of textSources) {
     const parsed = parseWordLengthRequirement(text);
@@ -543,6 +589,7 @@ function analyzeBasic(content: string, template: WritingTemplate): SectionAnalys
   const extracted = extractSections(content);
   const normalizedContent = normalizeContentForSectionMatch(content);
   const allNodes = flattenNodes(template.nodes);
+  const isExampleTemplate = template.templateType === 'example';
   const results: SectionAnalysis[] = [];
 
   for (const node of allNodes) {
@@ -579,8 +626,9 @@ function analyzeBasic(content: string, template: WritingTemplate): SectionAnalys
       results.push({
         nodeId: node.id,
         title: node.title,
-        status: 'missing',
+        status: isExampleTemplate ? 'partial' : 'missing',
         wordCount: 0,
+        aiComment: isExampleTemplate ? '范文模板节点仅代表写作方向，未按固定标题判定缺失。' : undefined,
       });
     }
   }
@@ -588,7 +636,7 @@ function analyzeBasic(content: string, template: WritingTemplate): SectionAnalys
 }
 
 // HTTP 请求函数
-const AI_REQUEST_TIMEOUT_MS = 120000;
+const AI_REQUEST_TIMEOUT_MS = 240000;
 const AI_REQUEST_RETRY_DELAY_MS = 900;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -622,6 +670,7 @@ async function makeRequest(url: string, options: any, body?: string): Promise<an
     } catch (error: any) {
       lastError = error;
       if (attempt < maxAttempts && isRetryableAIRequestError(error)) {
+        appendAiLog('Request failed; retrying', { attempt, maxAttempts, error });
         console.warn(`[AI] Request failed, retrying (${attempt}/${maxAttempts}): ${error?.message || error}`);
         await sleep(AI_REQUEST_RETRY_DELAY_MS);
         continue;
@@ -635,6 +684,12 @@ async function makeRequest(url: string, options: any, body?: string): Promise<an
 
 function makeSingleRequest(url: string, options: any, body: string | undefined, attempt: number): Promise<any> {
   return new Promise((resolve, reject) => {
+    appendAiLog('Request start', {
+      method: options?.method || 'GET',
+      url,
+      attempt,
+      bodyLength: body?.length || 0,
+    });
     console.log(`[AI] Request: ${options?.method || 'GET'} ${url} (attempt ${attempt})`);
     const request = net.request({
       url,
@@ -650,6 +705,12 @@ function makeSingleRequest(url: string, options: any, body: string | undefined, 
     };
 
     const timeout = setTimeout(() => {
+      appendAiLog('Request timeout', {
+        url,
+        attempt,
+        timeoutMs: AI_REQUEST_TIMEOUT_MS,
+        bodyLength: body?.length || 0,
+      });
       try {
         request.abort();
       } catch {}
@@ -664,11 +725,19 @@ function makeSingleRequest(url: string, options: any, body: string | undefined, 
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('error', (err) => {
+        appendAiLog('Response stream error', { url, attempt, error: err });
         console.error('[AI] Response stream error:', err);
         finish(() => reject(err));
       });
       res.on('end', () => {
         finish(() => {
+          appendAiLog('Response end', {
+            url,
+            attempt,
+            statusCode: res.statusCode,
+            responseLength: data.length,
+            responsePreview: data.substring(0, 500),
+          });
           console.log(`[AI] Response: ${res.statusCode} ${data.substring(0, 200)}`);
           let parsed: any = data;
           try {
@@ -687,11 +756,13 @@ function makeSingleRequest(url: string, options: any, body: string | undefined, 
     });
 
     request.on('error', (err) => {
+      appendAiLog('Request error', { url, attempt, error: err });
       console.error('[AI] Request error:', err);
       finish(() => reject(err));
     });
 
     request.on('abort', () => {
+      appendAiLog('Request abort', { url, attempt });
       finish(() => reject(new Error('AI 请求已中止')));
     });
 
@@ -864,6 +935,7 @@ async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<str
 // 调用 OpenAI API
 async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<string> {
   const url = normalizeOpenAIEndpoint(config.endpoint);
+  appendAiLog('OpenAI call', { url, model: config.model || 'gpt-3.5-turbo', endpoint: config.endpoint });
   console.log(`[AI] OpenAI call: url=${url}, model=${config.model || 'gpt-3.5-turbo'}, endpoint=${config.endpoint}`);
   const body = JSON.stringify({
     model: config.model || 'gpt-3.5-turbo',
@@ -880,6 +952,7 @@ async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<str
   };
 
   const result = await makeRequest(url, options, body);
+  appendAiLog('OpenAI result parsed', { preview: compactResponse(result, 500) });
   console.log(`[AI] OpenAI result:`, JSON.stringify(result).substring(0, 500));
   const text = extractAIText(result);
   if (text) return text;
@@ -1756,6 +1829,8 @@ function previewParagraphText(text: string) {
 function compareTemplateFormatRules(expected: any = {}, actual: any = {}, actualParagraphs: ExtractedTemplateParagraphStyle[] = []) {
   const issues: ReviewIssue[] = [];
   const detailedLimit = 20;
+  const formatSeverity = (key: string): ReviewIssue['severity'] =>
+    ['heading1', 'heading2', 'heading3', 'heading4', 'body'].includes(key) ? 'error' : 'warning';
 
   if (actualParagraphs.length > 0) {
     for (const paragraph of actualParagraphs) {
@@ -1769,18 +1844,18 @@ function compareTemplateFormatRules(expected: any = {}, actual: any = {}, actual
       issues.push({
         id: `format_para_${paragraph.index}_${issues.length}`,
         type: 'wrong_format',
-        severity: paragraph.key === 'body' ? 'warning' : 'info',
+        severity: formatSeverity(paragraph.key),
         sectionTitle: label,
         lineNumber: paragraph.index + 1,
         message: `第 ${paragraph.index + 1} 段「${previewParagraphText(paragraph.text)}」${label}格式不一致：${mismatches.slice(0, 4).join('；')}`,
-        suggestion: `模板要求：${describeTemplateStyleRule(expectedRule)}。请按${label}格式调整该段。`,
+        suggestion: `格式规则为硬性要求：${describeTemplateStyleRule(expectedRule)}。请严格按${label}格式调整该段。`,
       });
     }
     if (issues.length >= detailedLimit) {
       issues.push({
         id: `format_more_${issues.length}`,
         type: 'wrong_format',
-        severity: 'info',
+        severity: 'warning',
         sectionTitle: '格式检查',
         message: `已列出前 ${detailedLimit} 个段落格式问题，其余相同类型问题请按模板规则继续检查。`,
         suggestion: '建议先统一修改标题样式和正文样式，再重新运行模板审查。',
@@ -1797,10 +1872,10 @@ function compareTemplateFormatRules(expected: any = {}, actual: any = {}, actual
     issues.push({
       id: `format_${key}_${issues.length}`,
       type: 'wrong_format',
-      severity: key === 'body' ? 'warning' : 'info',
+      severity: formatSeverity(key),
       sectionTitle: templateStyleLabels[key] || key,
       message: `${templateStyleLabels[key] || key}格式可能不一致：${mismatches.join('；')}`,
-      suggestion: `模板要求：${describeTemplateStyleRule(expectedRule)}。请检查文档中${templateStyleLabels[key] || key}的实际格式。`,
+      suggestion: `格式规则为硬性要求：${describeTemplateStyleRule(expectedRule)}。请检查并严格统一文档中${templateStyleLabels[key] || key}的实际格式。`,
     });
   });
   return issues;
@@ -2361,6 +2436,7 @@ ipcMain.handle('review:execute', async (_event: any, params: {
 
   const issues: ReviewIssue[] = [];
   const content = version.content;
+  const isExampleTemplate = template.templateType === 'example';
   const allTemplateNodes = flattenNodes(template.nodes);
   const extractedSections = extractSections(content);
   const normalizedContent = normalizeContentForSectionMatch(content);
@@ -2373,7 +2449,7 @@ ipcMain.handle('review:execute', async (_event: any, params: {
   };
 
   // 检查缺失章节：复用项目文档完成度的章节提取与模糊匹配，避免因编号、空格、标点或 Word 解析换行误判。
-  if (params.config.checkMissingSections) {
+  if (params.config.checkMissingSections && !isExampleTemplate) {
     for (const node of allTemplateNodes) {
       if (!node.isRequired) continue;
       const matched = getSectionMatch(node);
@@ -2391,7 +2467,7 @@ ipcMain.handle('review:execute', async (_event: any, params: {
         issues.push({
           id: `section_mapping_${node.id}`,
           type: 'suggestion',
-          severity: 'info',
+          severity: 'warning',
           nodeId: node.id,
           sectionTitle: node.title,
           message: `正文中发现与「${node.title}」相关的内容证据，未按缺失处理。`,
@@ -2440,23 +2516,27 @@ ipcMain.handle('review:execute', async (_event: any, params: {
     }
   }
 
-  // 计算得分
-  const requiredNodes = allTemplateNodes.filter(n => n.isRequired);
+  // 计算得分：范文模板不因标题不一致扣分，但格式规则一旦配置/识别出来就是硬性要求。
+  const requiredNodes = isExampleTemplate ? [] : allTemplateNodes.filter(n => n.isRequired);
   const missingCount = issues.filter(i => i.type === 'missing_section').length;
-  const score = requiredNodes.length > 0
+  const formatErrorCount = issues.filter(i => i.type === 'wrong_format' && i.severity === 'error').length;
+  const formatWarningCount = issues.filter(i => i.type === 'wrong_format' && i.severity === 'warning').length;
+  const contentWarningCount = issues.filter(i => i.type === 'content_deviation').length;
+  const structureScore = requiredNodes.length > 0
     ? Math.round(((requiredNodes.length - missingCount) / requiredNodes.length) * 100)
     : 100;
+  const score = Math.max(0, structureScore - formatErrorCount * 8 - formatWarningCount * 4 - contentWarningCount * 2);
 
   // 生成总结
   let summary = '';
-  const isExampleTemplate = template.templateType === 'example';
   if (issues.length === 0) {
-    summary = isExampleTemplate ? '文档结构完整，符合范文模板参考要求。' : '文档结构完整，符合模板要求。';
+    summary = isExampleTemplate ? '文档可按范文模板继续优化；范文标题仅作写作方向参考，格式规则仍按硬性要求审查。' : '文档结构完整，符合模板要求。';
   } else {
     const advisoryCount = isExampleTemplate ? issues.filter(i => i.type === 'content_deviation').length : 0;
-    summary = isExampleTemplate && advisoryCount > 0
-      ? `发现 ${issues.length} 个问题，其中 ${missingCount} 个必需章节缺失，${advisoryCount} 个字数参考建议。`
-      : `发现 ${issues.length} 个问题，其中 ${missingCount} 个必需章节缺失。`;
+    const formatCount = formatErrorCount + formatWarningCount;
+    summary = isExampleTemplate
+      ? `发现 ${issues.length} 个问题，其中 ${formatCount} 个格式硬性问题，${advisoryCount} 个内容参考建议；范文标题未按固定标题判缺失。`
+      : `发现 ${issues.length} 个问题，其中 ${missingCount} 个必需章节缺失，${formatCount} 个格式问题。`;
   }
 
   let aiSuggestions: string | undefined;
@@ -2466,14 +2546,20 @@ ipcMain.handle('review:execute', async (_event: any, params: {
         ? issues.map(issue => `- [${issue.severity}] ${issue.sectionTitle || ''}：${issue.message}${issue.suggestion ? `；建议：${issue.suggestion}` : ''}`).join('\n')
         : '当前未发现结构性问题。';
       const requiredOutline = allTemplateNodes
-        .filter(node => node.isRequired)
+        .filter(node => !isExampleTemplate && node.isRequired)
         .map(node => `- ${node.title}${node.requirementText || node.description ? `：${node.requirementText || node.description}` : ''}`)
         .join('\n');
+      const exampleDirections = isExampleTemplate
+        ? allTemplateNodes.map(node => `- ${node.title}${node.description || node.exampleText ? `：${node.description || node.exampleText}` : ''}`).join('\n')
+        : '';
       const analysisContext = isExampleTemplate && template.exampleAnalysis
         ? `\n范文分析摘要：\n${template.exampleAnalysis.slice(0, 2000)}\n`
         : '';
-      aiSuggestions = await callDefaultAI(`你是文档审查与改稿助手。请严格按模板章节输出审查建议。\n\n目标：模板里有多个结构章节，例如“一、总体目标”“二、研究内容”。只输出存在问题或需要优化的章节；没有问题的章节不要输出。每个章节下面固定包含“问题”和“建议”。\n\n输出格式（必须严格遵守，不要添加其他标题、总体评估、寒暄或结尾）：\n## 一、章节名称\n问题：\n- 用一句话说明该章节的核心问题。\n- 如有第二个问题，再用一句话说明。\n建议：\n- 给出一条可执行修改建议。\n- 如需补写正文，给出一条简短参考句式；缺少事实数据时写“需人工补充：...”。\n\n规则：\n1. 只输出有问题或需要优化的模板章节。\n2. 章节标题必须尽量使用模板中的原始章节名。\n3. 每个章节必须同时包含“问题：”和“建议：”。\n4. 每个章节的问题最多 2 条，建议最多 3 条，每条不超过 80 字。\n5. 不要把程序已经模糊匹配到的章节重新判定为缺失；如果标题写法不同，只说明它与模板章节如何对应。\n6. 建议要围绕当前正文和模板要求，避免泛泛而谈。\n7. 不要输出长段落、引用块、成段示例、总体评估、“以下是建议”“好的”等非章节内容。\n\n模板必需章节：\n${requiredOutline || '无'}\n\n
-${analysisContext}程序审查结果：\n${issueText}\n\n正文摘录：\n${content.slice(0, 6000)}`);
+      const reviewPrompt = isExampleTemplate
+        ? `你是文档审查与改稿助手。当前使用的是“范文模板”，范文标题不是固定标题，不要按标题逐字判定缺失。\n\n目标：根据范文体现的写作方向、技术展开顺序、材料组织方式和表达风格，指出当前正文可以如何优化。只输出需要优化的方向；不要打分，不要说某个范文标题缺失。\n\n输出格式：\n## 写作方向名称\n问题：\n- 当前正文在该方向上的不足，最多 2 条。\n建议：\n- 下一步如何补材料、展开技术、调整顺序或润色表达，最多 3 条。\n\n规则：\n1. 范文标题仅作参考方向，可以改写成更适合当前项目的标题。\n2. 只关注“整体概述 -> 技术层面由浅入深展开 -> 试验/应用 -> 总结展望”等写作路径是否完整。\n3. 不要把范文里的项目事实、数据、时间、设备名称当成当前项目必须满足的要求。\n4. 如果程序审查结果包含格式问题，必须明确说明格式规则是硬性要求，不能按范文参考放宽。\n5. 不要输出长段落、总体评估或寒暄。\n\n范文写作方向：\n${exampleDirections || '无'}\n\n${analysisContext}程序审查结果：\n${issueText}\n\n正文摘录：\n${content.slice(0, 6000)}`
+        : `你是文档审查与改稿助手。请严格按模板章节输出审查建议。\n\n目标：模板里有多个结构章节，例如“一、总体目标”“二、研究内容”。只输出存在问题或需要优化的章节；没有问题的章节不要输出。每个章节下面固定包含“问题”和“建议”。\n\n输出格式（必须严格遵守，不要添加其他标题、总体评估、寒暄或结尾）：\n## 一、章节名称\n问题：\n- 用一句话说明该章节的核心问题。\n- 如有第二个问题，再用一句话说明。\n建议：\n- 给出一条可执行修改建议。\n- 如需补写正文，给出一条简短参考句式；缺少事实数据时写“需人工补充：...”。\n\n规则：\n1. 只输出有问题或需要优化的模板章节。\n2. 章节标题必须尽量使用模板中的原始章节名。\n3. 每个章节必须同时包含“问题：”和“建议：”。\n4. 每个章节的问题最多 2 条，建议最多 3 条，每条不超过 80 字。\n5. 不要把程序已经模糊匹配到的章节重新判定为缺失；如果标题写法不同，只说明它与模板章节如何对应。\n6. 建议要围绕当前正文和模板要求，避免泛泛而谈。\n7. 不要输出长段落、引用块、成段示例、总体评估、“以下是建议”“好的”等非章节内容。\n\n模板必需章节：\n${requiredOutline || '无'}\n\n
+${analysisContext}程序审查结果：\n${issueText}\n\n正文摘录：\n${content.slice(0, 6000)}`;
+      aiSuggestions = await callDefaultAI(reviewPrompt);
     } catch (error) {
       console.warn('AI review suggestion failed:', error);
     }
@@ -3589,4 +3675,6 @@ app.on('activate', () => {
     createWindow();
   }
 });
+
+
 

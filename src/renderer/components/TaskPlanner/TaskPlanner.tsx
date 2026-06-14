@@ -264,16 +264,16 @@ interface NextActionDraftItem {
   priority: TaskItem['priority'];
 }
 
-const flattenTemplateNodesForPrompt = (nodes: any[] = [], depth = 0): string[] => nodes.flatMap((node) => {
+const flattenTemplateNodesForPrompt = (nodes: any[] = [], depth = 0, isExampleTemplate = false): string[] => nodes.flatMap((node) => {
   const prefix = `${'  '.repeat(depth)}- ${node.title || '未命名章节'}`;
   const details = [
-    (node.requirementText || node.description) ? `写作要求：${node.requirementText || node.description}` : '',
-    node.isRequired === false ? '可选章节' : '必需章节',
+    (node.requirementText || node.description) ? `${isExampleTemplate ? '参考方向' : '写作要求'}：${node.requirementText || node.description}` : '',
+    isExampleTemplate ? '范文标题非固定，仅作写作方向参考' : (node.isRequired === false ? '可选章节' : '必需章节'),
     node.fontRequirement ? `字体要求：${JSON.stringify(node.fontRequirement)}` : '',
     node.paragraphRequirement ? `段落要求：${JSON.stringify(node.paragraphRequirement)}` : '',
     node.exampleText ? `范文写法参考：${String(node.exampleText).slice(0, 500)}` : '',
   ].filter(Boolean).join('；');
-  return [`${prefix}${details ? `（${details}）` : ''}`, ...flattenTemplateNodesForPrompt(node.children || [], depth + 1)];
+  return [`${prefix}${details ? `（${details}）` : ''}`, ...flattenTemplateNodesForPrompt(node.children || [], depth + 1, isExampleTemplate)];
 });
 
 
@@ -493,9 +493,21 @@ const parseAiStageReport = (value: string): AiStageReport => {
       reportSummary: cleanText || 'AI 返回内容无法解析，请重试',
     };
   }
+
+  // 从 parsed 中提取 reportSummary，如果是对象则取其摘要字段
+  let reportSummary = '';
+  if (typeof parsed.reportSummary === 'string') {
+    reportSummary = parsed.reportSummary;
+  } else if (typeof parsed.summary === 'string') {
+    reportSummary = parsed.summary;
+  } else if (parsed.reportSummary && typeof parsed.reportSummary === 'object') {
+    // 如果 reportSummary 是对象，尝试提取文本
+    reportSummary = parsed.reportSummary.text || parsed.reportSummary.content || JSON.stringify(parsed.reportSummary);
+  }
+
   return {
     reportTitle: String(parsed.reportTitle || parsed.title || '').trim(),
-    reportSummary: String(parsed.reportSummary || parsed.summary || '').trim(),
+    reportSummary: String(reportSummary).trim(),
     qualityAssessment: normalizeStringList(parsed.qualityAssessment),
     templateFit: normalizeStringList(parsed.templateFit),
     writingStyleNotes: normalizeStringList(parsed.writingStyleNotes),
@@ -835,6 +847,16 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     if (selectedReportDoc?.aiReport) {
       try {
         const saved = JSON.parse(selectedReportDoc.aiReport);
+        // 修复 reportSummary 字段：如果包含 JSON 字符串则提取摘要
+        if (saved.reportSummary && typeof saved.reportSummary === 'string') {
+          const trimmed = saved.reportSummary.trim();
+          if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+            try {
+              const innerParsed = JSON.parse(trimmed);
+              saved.reportSummary = innerParsed.reportSummary || innerParsed.summary || '';
+            } catch {}
+          }
+        }
         setAiStageReport(saved);
         setWorkflowDraftItems(createWorkflowDraftItemsFromReport(saved));
       } catch {
@@ -1201,10 +1223,11 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
     setIsGeneratingAiReport(true);
     try {
+      const isExampleTemplate = selectedDocTemplate.templateType === 'example';
       const templateGuidance = extractTemplateGuidanceText(selectedDocTemplate);
-      const templateRequirementText = templateGuidance.requirementText;
+      const templateRequirementText = isExampleTemplate ? '' : templateGuidance.requirementText;
       const templateExample = await loadTemplateExampleContent();
-      const templateNodes = flattenTemplateNodesForPrompt(selectedDocTemplate.nodes).join('\n');
+      const templateNodes = flattenTemplateNodesForPrompt(selectedDocTemplate.nodes, 0, isExampleTemplate).join('\n');
       const formatRules = JSON.stringify(selectedDocTemplate.formatRules || {
         titleFontRequirement: selectedDocTemplate.titleFontRequirement,
         bodyFontRequirement: selectedDocTemplate.bodyFontRequirement,
@@ -1234,15 +1257,16 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 1. 必须围绕当前阶段和当前文档，不要写整个项目总报告。
 2. 模板硬性要求/填写说明只能来自“模板硬性要求/填写说明”和章节写作要求；不要把范文中的事实、案例、金额、时间、项目背景当作当前文档必须满足的要求。
 3. 如果模板范文/参考写法存在，只提取它的写作结构、表达方法、组织方式和格式特征，并转化为当前文档的写作框架；不得照搬范文事实，不得把范文内容放入 templateFit。
-4. 下一步任务必须针对“写作产出”：框架、提纲、章节展开、材料清单、初稿/扩写/润色，不输出审查结论、质量评分或风险判定。
+4. 模板格式要求一旦存在就是硬性要求；即使当前是范文模板，也必须把标题/正文/图表格式作为严格约束，不得按“参考方向”放宽。
+5. 下一步任务必须针对“写作产出”：框架、提纲、章节展开、材料清单、初稿/扩写/润色，不输出审查结论、质量评分或风险判定。
 5. 输出必须是 JSON 对象，不要输出 Markdown，不要包裹代码块。
 6. humanTasks 强调补资料、确认数据/口径、提供附件依据、决定领导审核时机。
 7. aiTasks 强调搭框架、列提纲、生成初稿、按范文结构扩写、润色、整理材料引用路径。
 8. workflowPlan 必须按真实写作流转排序；通常优先 AI 框架/初稿，然后人工补资料确认，再 AI 扩写/润色，再人工成稿确认。
 9. 每个任务要具体、可执行，避免空泛建议。
 10. 审查Tab已有结果只能作为背景参考，不能在这里重新做审查或下结论。
-11. 前台主要展示 sectionAdvice。必须按模板一级标题逐项输出；每个一级标题只包含 problems 和 suggestions 两类内容。有问题才输出，没有问题的一级标题可以省略。
-12. “遵循模板硬性规定的七章节结构：一、总体目标；二、研究内容；三、预期成果；四、考核指标；五、成果应用与转化；六、项目实施期限；七、支持经费限额”属于全局结构约束，不要重复写入每个章节的 suggestions。只有当当前文档缺少某个一级标题、标题顺序错误或结构明显错乱时，才在对应章节的 problems/suggestions 中提一次。
+11. 前台主要展示 sectionAdvice。${isExampleTemplate ? '当前是范文模板：sectionAdvice 按写作方向输出，不要求使用范文原始标题，也不要判定范文标题缺失。' : '当前是直接套用模板：必须按模板一级标题逐项输出；有问题才输出，没有问题的一级标题可以省略。'}
+12. ${isExampleTemplate ? '范文模板只参考“整体概述 -> 技术层面由浅入深展开 -> 试验/应用 -> 总结展望”等路径，不把范文事实或标题当硬约束。' : '直接套用模板的全局结构约束不要重复写入每个章节的 suggestions；只有缺少标题、顺序错误或结构错乱时才指出。'}
 
 JSON 字段：
 {
@@ -1276,10 +1300,10 @@ JSON 字段：
 模板硬性要求/填写说明：
 ${templateRequirementText || '无'}
 
-模板章节结构与章节写作要求：
+${isExampleTemplate ? '范文参考方向与结构路径（标题非固定）' : '模板章节结构与章节写作要求'}：
 ${templateNodes || '无'}
 
-模板格式要求：
+模板格式要求（硬性规则，范文模板也必须严格执行）：
 ${formatRules}
 
 模板范文/参考写法（只用于提取结构、方法、表达风格，不作为当前文档硬性要求）：

@@ -298,14 +298,16 @@ const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: Project
     const sectionStatus = sections.map(section =>
       `- ${section.title || '未命名章节'}：${section.status || 'unknown'}，字数 ${section.wordCount || 0}${section.aiComment ? `，说明：${section.aiComment}` : ''}`
     ).join('\n');
+    const isExampleTemplate = template.templateType === 'example';
     const templateNodes = flattenTemplateNodesForSidePanelPrompt((template as any).nodes || []).join('\n');
     const fallbackTitle = `${stage}阶段写作报告：${getDocDisplayName(doc)}`;
     const prompt = `你是项目阶段文档的写作框架助手。请基于当前文档、关联模板、模板章节要求和范文写法，生成“报告详情页”可展示的 AI 写作框架报告。
 
 注意：
 1. 这不是审查结论，不要打分，不要泛泛说风险。
-2. 如果模板里有范文，只提取范文的结构、写法、段落组织和表达特征，不要把范文事实当作当前项目要求。
-3. 输出必须是 JSON 对象，不要 Markdown，不要代码块。
+2. 如果模板里有范文，只提取范文的结构、写法、段落组织和表达特征，不要把范文事实当作当前项目要求；范文模板的标题只代表写作方向，不作为固定标题。
+3. 模板格式要求是硬性规则；即使是范文模板，也必须把标题/正文/图表格式作为严格约束。
+4. 输出必须是 JSON 对象，不要 Markdown，不要代码块。
 4. 任务建议要贴合“AI先写初稿/人工补资料/AI再优化/人工确认/再审查”的工作流。
 5. 七章节结构属于全局模板约束，不要在每个章节建议里反复输出；只有章节缺失、顺序错误或结构错乱时，才在对应章节提一次。
 
@@ -336,7 +338,7 @@ JSON 字段：
 模板分类：${template.category || '无'}
 模板说明：${template.description || '无'}
 
-模板章节和写作要求：
+${isExampleTemplate ? '范文参考方向与结构路径（标题非固定）：' : '模板章节和写作要求：'}
 ${templateNodes || '无'}
 
 当前章节分析：
