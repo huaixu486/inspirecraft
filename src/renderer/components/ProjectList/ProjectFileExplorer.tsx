@@ -489,6 +489,31 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const handleDropFiles = async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setIsDragOver(false);
+    setIsDraggingFileOut(false);
+
+    // 内部拖拽到空白区域：Ctrl = 复制副本，普通 = 无操作
+    if (internalDragPaths.size > 0) {
+      if (event.ctrlKey) {
+        // Ctrl+拖拽到空白：在当前目录创建副本
+        const paths = Array.from(internalDragPaths);
+        let copied = 0;
+        for (const srcPath of paths) {
+          const item = items.find(i => i.path === srcPath);
+          if (!item || item.isDirectory) continue;
+          const result = await window.electronAPI.importFiles({ folderPath: currentPath, filePaths: [srcPath] });
+          if (result.success) copied++;
+        }
+        if (copied > 0) {
+          message.success(`已创建 ${copied} 个副本`);
+          await loadContents();
+        }
+      }
+      setInternalDragPaths(new Set());
+      setInternalDragOverPath(null);
+      return;
+    }
+
+    // 外部文件拖入
     if (!isExternalFileDrag(event)) return;
     const filePaths = getDraggedFilePaths(event);
     if (filePaths.length === 0) {
@@ -718,6 +743,13 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
         transition: 'background 0.15s, outline-color 0.15s',
       }}
       onDragOver={(event) => {
+        // 内部拖拽到空白区域
+        if (internalDragPaths.size > 0) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = event.ctrlKey ? 'copy' : 'none';
+          if (event.ctrlKey) setIsDragOver(true);
+          return;
+        }
         if (isDraggingFileOut || !isExternalFileDrag(event)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
