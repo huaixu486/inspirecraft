@@ -30,7 +30,6 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 import { buildProjectStageSegments, getAllStages, getStageMeta, getGlobalStageProgress as calcProjectProgress, TimelineStageSegment, StageConfig } from '../../utils/timelineStages';
 import { Project, ProjectDocument } from '../../../shared/types';
-import ProjectFileExplorer from './ProjectFileExplorer';
 
 const { Text } = Typography;
 
@@ -42,8 +41,12 @@ const fileTypeOptions = [
   { value: 'txt', label: '纯文本 (.txt)' },
 ];
 
-const ProjectList: React.FC = () => {
-  const { projects, addProject, setCurrentProject, deleteProject, versions } =
+interface Props {
+  onEnterProject: (project: Project) => void;
+}
+
+const ProjectList: React.FC<Props> = ({ onEnterProject }) => {
+  const { projects, addProject, deleteProject, versions } =
     useProjectStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const { templates } = useTemplateStore();
@@ -67,7 +70,7 @@ const ProjectList: React.FC = () => {
   };
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
-  const [browsingProject, setBrowsingProject] = useState<Project | null>(null);
+
   const [form] = Form.useForm();
 
   // 导入项目相关
@@ -352,10 +355,6 @@ const ProjectList: React.FC = () => {
     setDragOverProjectId(null);
   };
 
-  if (browsingProject) {
-    return <ProjectFileExplorer project={browsingProject} onBack={() => setBrowsingProject(null)} />;
-  }
-
   return (
     <div>
       <div
@@ -368,7 +367,14 @@ const ProjectList: React.FC = () => {
         <Text strong style={{ fontSize: 18 }}>
           我的项目
         </Text>
-        <Space>
+        <Space size={8}>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => setIsModalOpen(true)}
+          >
+            新建项目
+          </Button>
           <Dropdown
             menu={{
               items: [
@@ -381,15 +387,8 @@ const ProjectList: React.FC = () => {
               },
             }}
           >
-            <Button icon={<ImportOutlined />}>导入项目</Button>
+            <Button icon={<ImportOutlined />}>导入</Button>
           </Dropdown>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={() => setIsModalOpen(true)}
-          >
-            新建项目
-          </Button>
         </Space>
       </div>
 
@@ -411,22 +410,8 @@ const ProjectList: React.FC = () => {
             >
             <Card
               hoverable
-              onClick={() => setCurrentProject(project)}
+              onDoubleClick={() => onEnterProject(project)}
               actions={[
-                <Button
-                  type="link"
-                  icon={<FolderOpenOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (project.folderPath) {
-                      setBrowsingProject(project);
-                    } else {
-                      message.warning('该项目未关联文件夹');
-                    }
-                  }}
-                >
-                  打开
-                </Button>,
                 <Button
                   type="link"
                   icon={<ExportOutlined />}

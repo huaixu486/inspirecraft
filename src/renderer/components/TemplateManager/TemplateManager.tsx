@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useDeferredValue, useEffect, useRef, useState, useMemo } from 'react';
 import {
   Card,
   Button,
@@ -33,6 +33,7 @@ import {
   CaretRightOutlined,
   CaretDownOutlined,
   MinusOutlined,
+  LeftOutlined,
 } from '@ant-design/icons';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -571,24 +572,151 @@ function nodesFromHeadingItems(items: AiTemplateHeadingItem[]): TemplateNode[] {
   return nodes;
 }
 
-const extractJsonForAiTemplate = (response: string): any | null => {
-  const trimmed = String(response || '').trim();
-  try {
-    return JSON.parse(trimmed);
-  } catch {}
-  const objectMatch = trimmed.match(/\{[\s\S]*\}/);
-  if (objectMatch) {
-    try {
-      return JSON.parse(objectMatch[0]);
-    } catch {}
+const formatTemplateAiError = (error: any): string => {
+  const raw = String(error?.message || error || '').trim();
+  const cleaned = raw
+    .replace(/^Error invoking remote method ['"]ai:call['"]:\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .replace(/^AI 调用失败:\s*/i, '');
+
+  if (/ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ECONNRESET|socket hang up|连接被中断/i.test(cleaned)) {
+    return 'AI 接口连接被中断，系统已自动重试但仍失败。请检查网络/代理/API 地址，或稍后再试。';
   }
-  const arrayMatch = trimmed.match(/\[[\s\S]*\]/);
-  if (arrayMatch) {
+  if (/ETIMEDOUT|ERR_TIMED_OUT|请求超时|超时/i.test(cleaned)) {
+    return 'AI 接口请求超时。建议检查网络/代理，或减少导入文档内容后再试。';
+  }
+  if (/thinking|思考块|输出额度耗尽|max_tokens|没有返回最终文本/i.test(cleaned)) {
+    return 'AI 只返回了思考过程，没有返回最终结构。系统已自动尝试本地结构兜底；建议减少导入内容，或在模型服务中关闭思考输出/提高输出上限后重试。';
+  }
+  if (/ENOTFOUND|ERR_NAME_NOT_RESOLVED|getaddrinfo|无法解析/i.test(cleaned)) {
+    return '无法连接到 AI 接口地址，请检查 AI 设置里的接口地址或当前网络 DNS。';
+  }
+  if (/401|403|api.?key|unauthorized|forbidden|鉴权|密钥/i.test(cleaned)) {
+    return 'AI 鉴权失败，请检查 API Key、模型权限和接口地址是否匹配。';
+  }
+  return cleaned || 'AI 章节识别失败，请检查 AI 配置后重试。';
+};
+
+const normalizeAiJsonText = (value: string): string =>
+  String(value || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/^\s*```(?:json)?/i, '')
+    .replace(/```\s*$/i, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/，/g, ',')
+    .replace(/：/g, ':')
+    .trim();
+
+const parseJsonCandidateForTemplate = (value: string): any | null => {
+  const candidates = [value, normalizeAiJsonText(value)];
+  for (const candidate of candidates) {
     try {
-      return JSON.parse(arrayMatch[0]);
+      return JSON.parse(candidate);
     } catch {}
   }
   return null;
+};
+
+const extractJsonForAiTemplate = (response: string): any | null => {
+  const trimmed = normalizeAiJsonText(String(response || '').trim());
+  const direct = parseJsonCandidateForTemplate(trimmed);
+  if (direct) return direct;
+
+  const fenceMatch = String(response || '').match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch) {
+    const parsedFence = parseJsonCandidateForTemplate(fenceMatch[1]);
+    if (parsedFence) return parsedFence;
+  }
+
+  const objectMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (objectMatch) {
+    const parsedObject = parseJsonCandidateForTemplate(objectMatch[0]);
+    if (parsedObject) return parsedObject;
+  }
+
+  const arrayMatch = trimmed.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    const parsedArray = parseJsonCandidateForTemplate(arrayMatch[0]);
+    if (parsedArray) return parsedArray;
+  }
+  return null;
+};
+
+const firstStringValue = (source: any, keys: string[]): string => {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value === undefined || value === null) continue;
+    if (Array.isArray(value)) return value.filter(Boolean).join('\n');
+    if (typeof value === 'object') return Object.values(value).filter(Boolean).join('\n');
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+};
+
+const normalizeAiHeadingLevel = (value: any, title: string): number => {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.min(Math.max(value, 1), 4);
+  const text = String(value || '').trim();
+  const numeric = Number(text.match(/\d+/)?.[0]);
+  if (Number.isFinite(numeric) && numeric > 0) return Math.min(Math.max(numeric, 1), 4);
+  if (/一级|一[级級]|h1|heading1/i.test(text)) return 1;
+  if (/二级|二[级級]|h2|heading2/i.test(text)) return 2;
+  if (/三级|三[级級]|h3|heading3/i.test(text)) return 3;
+  if (/四级|四[级級]|h4|heading4/i.test(text)) return 4;
+  const heading = matchHeadingLine(title);
+  return heading?.level || 1;
+};
+
+const collectAiTemplateItems = (parsed: any): any[] => {
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== 'object') return [];
+
+  const direct = parsed.nodes
+    || parsed.headings
+    || parsed.sections
+    || parsed.outline
+    || parsed.structure
+    || parsed.templateNodes
+    || parsed.templateStructure
+    || parsed.chapterStructure
+    || parsed.chapters
+    || parsed.items
+    || parsed['nodes']
+    || parsed['headings']
+    || parsed['sections']
+    || parsed['outline']
+    || parsed['章节']
+    || parsed['章节结构']
+    || parsed['标题结构']
+    || parsed['模板章节']
+    || parsed['大纲']
+    || parsed['目录'];
+  if (Array.isArray(direct)) return direct;
+  if (direct && typeof direct === 'object') {
+    const nested = collectAiTemplateItems(direct);
+    if (nested.length > 0) return nested;
+  }
+
+  const nestedContainers = [parsed.template, parsed.result, parsed.data, parsed.content, parsed.analysis].filter(Boolean);
+  for (const container of nestedContainers) {
+    const nested = collectAiTemplateItems(container);
+    if (nested.length > 0) return nested;
+  }
+
+  const metadataKeys = new Set([
+    'formatRules', 'styleRules', 'format', 'evidence', 'formatEvidence',
+    'requirementText', 'requirements', 'templateRequirements',
+    'exampleText', 'examples', 'sampleText', 'referenceWriting',
+    '格式规则', '格式要求', '识别依据', '格式依据', '模板要求', '填写说明', '写作要求', '范文', '示例', '参考写法'
+  ]);
+  const entryItems = Object.entries(parsed)
+    .filter(([key, value]) => !metadataKeys.has(key) && value && typeof value === 'object')
+    .map(([key, value]: [string, any]) => ({
+      title: value.title || value.heading || value.name || key,
+      ...value,
+    }));
+  return entryItems.length > 0 ? entryItems : [];
 };
 
 const normalizeAiFormatStyleValues = (value: any) => {
@@ -665,28 +793,37 @@ const normalizeAiFormatRules = (raw: any): { rules?: TemplateFormatRules; values
 function parseAiHeadingResponse(response: string): AiTemplateExtractionResult {
   const parsed = extractJsonForAiTemplate(response);
   if (!parsed) return { nodes: [], requirementText: '', exampleText: '', evidence: [] };
-  const rawItems = Array.isArray(parsed)
-    ? parsed
-    : parsed.nodes || parsed.headings || parsed.sections || parsed.outline || [];
-  if (!Array.isArray(rawItems)) return { nodes: [], requirementText: '', exampleText: '', evidence: [] };
+  const rawItems = collectAiTemplateItems(parsed);
 
-  const items = rawItems.map((item: any) => ({
-    title: String(item.title || item.name || item.heading || '').trim(),
-    level: Number(item.level || item.headingLevel) || 1,
-    description: String(item.description || item.tips || item.note || '').trim(),
-    requirementText: String(item.requirementText || item.requirement || item.requirements || item.writingRequirement || item.contentRequirement || '').trim(),
-    exampleText: String(item.exampleText || item.example || item.sample || item.sampleText || item.referenceText || '').trim(),
-    isRequired: item.isRequired,
-  }));
+  const items = rawItems.map((item: any) => {
+    const title = firstStringValue(item, [
+      'title', 'name', 'heading', 'headingTitle', 'sectionTitle', 'chapterTitle', 'label', 'text',
+      '标题', '名称', '章节标题', '标题名称', '章标题', '节标题'
+    ]);
+    return {
+      title: title.trim(),
+      level: normalizeAiHeadingLevel(item.level ?? item.headingLevel ?? item.depth ?? item.type ?? item['level'] ?? item['层级'] ?? item['标题级别'], title),
+      description: firstStringValue(item, ['description', 'tips', 'note', 'notes', 'summary', '说明', '描述', '备注', '写作说明']).trim(),
+      requirementText: firstStringValue(item, [
+        'requirementText', 'requirement', 'requirements', 'writingRequirement', 'contentRequirement', 'formatRequirement',
+        '要求', '写作要求', '填写说明', '内容要求', '格式要求'
+      ]).trim(),
+      exampleText: firstStringValue(item, [
+        'exampleText', 'example', 'examples', 'sample', 'sampleText', 'referenceText', 'referenceWriting',
+        '范文', '示例', '样例', '参考写法', '参考内容'
+      ]).trim(),
+      isRequired: item.isRequired ?? item.required ?? item['是否必需'],
+    };
+  });
   const nodes = nodesFromHeadingItems(items);
   const guidance = collectTemplateGuidance(nodes);
-  const normalizedFormat = normalizeAiFormatRules(parsed.formatRules || parsed.styleRules || parsed.format || {});
+  const normalizedFormat = normalizeAiFormatRules(parsed.formatRules || parsed.styleRules || parsed.format || parsed['格式规则'] || parsed['格式要求'] || {});
   const requirementText = uniqueTextLines([
-    String(parsed.requirementText || parsed.requirements || parsed.templateRequirements || '').trim(),
+    firstStringValue(parsed, ['requirementText', 'requirements', 'templateRequirements', 'writingRequirements', '模板要求', '填写说明', '写作要求']),
     guidance.requirementText,
   ]).join('\n\n').slice(0, 8000);
   const exampleText = uniqueTextLines([
-    String(parsed.exampleText || parsed.examples || parsed.sampleText || parsed.referenceWriting || '').trim(),
+    firstStringValue(parsed, ['exampleText', 'examples', 'sampleText', 'referenceWriting', '范文', '示例', '参考写法']),
     guidance.exampleText,
   ]).join('\n\n').slice(0, 10000);
   return {
@@ -696,7 +833,7 @@ function parseAiHeadingResponse(response: string): AiTemplateExtractionResult {
     formatRules: normalizedFormat.rules,
     formatValues: normalizedFormat.values,
     evidence: [
-      ...normalizeStringEvidence(parsed.evidence || parsed.formatEvidence),
+      ...normalizeStringEvidence(parsed.evidence || parsed.formatEvidence || parsed['识别依据'] || parsed['格式依据']),
       ...normalizedFormat.evidence,
     ].slice(0, 12),
   };
@@ -786,6 +923,101 @@ function extractTemplateNodes(content: string): TemplateNode[] {
   return nodes;
 }
 
+type ImportedTemplateFile = { filePath: string; text: string; fileName?: string };
+
+function normalizeTemplateHeadingTitle(value: string): string {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/^第[一二三四五六七八九十百千万\d]+[章节篇部分]/, '')
+    .replace(/^[一二三四五六七八九十百千万\d]+[、.．]/, '')
+    .replace(/^[（(][一二三四五六七八九十百千万\d]+[）)]/, '')
+    .replace(/^\d+(?:[.．]\d+)*[、.．)]?/, '')
+    .replace(/[：:。.]$/, '')
+    .toLowerCase();
+}
+
+function flattenTemplateNodesForMatch(nodes: TemplateNode[]): TemplateNode[] {
+  return nodes.flatMap(node => [
+    node,
+    ...(node.children?.length ? flattenTemplateNodesForMatch(node.children) : []),
+  ]);
+}
+
+function getCommonExampleHeadingKeys(files: ImportedTemplateFile[]) {
+  const extracted = files.map(file => extractTemplateNodes(file.text));
+  const keySets = extracted.map(nodes => {
+    const keys = new Set<string>();
+    flattenTemplateNodesForMatch(nodes).forEach(node => {
+      const key = normalizeTemplateHeadingTitle(node.title);
+      if (key) keys.add(key);
+    });
+    return keys;
+  });
+  const commonKeys = new Set<string>(keySets[0] || []);
+  keySets.slice(1).forEach(keys => {
+    [...commonKeys].forEach(key => {
+      if (!keys.has(key)) commonKeys.delete(key);
+    });
+  });
+  return { commonKeys, extracted };
+}
+
+function mergeCommonExampleNodeGuidance(node: TemplateNode, extracted: TemplateNode[][]): TemplateNode {
+  const key = normalizeTemplateHeadingTitle(node.title);
+  const sameTitleNodes = extracted
+    .flatMap(nodes => flattenTemplateNodesForMatch(nodes))
+    .filter(item => normalizeTemplateHeadingTitle(item.title) === key);
+  const descriptions = uniqueTextLines([
+    node.description || '',
+    ...sameTitleNodes.map(item => item.description || ''),
+  ]).join('\n\n');
+  const requirementText = uniqueTextLines([
+    node.requirementText || '',
+    ...sameTitleNodes.map(item => item.requirementText || ''),
+  ]).join('\n\n');
+  const exampleText = uniqueTextLines([
+    node.exampleText || '',
+    ...sameTitleNodes.map(item => item.exampleText || ''),
+  ]).join('\n\n');
+  return {
+    ...node,
+    description: descriptions || node.description,
+    requirementText: requirementText || node.requirementText,
+    exampleText: exampleText || node.exampleText,
+  };
+}
+
+function filterNodesByCommonExampleHeadings(
+  nodes: TemplateNode[],
+  commonKeys: Set<string>,
+  extracted: TemplateNode[][],
+): TemplateNode[] {
+  return nodes.flatMap(node => {
+    const children = node.children?.length
+      ? filterNodesByCommonExampleHeadings(node.children, commonKeys, extracted)
+      : [];
+    const key = normalizeTemplateHeadingTitle(node.title);
+    if (!key || !commonKeys.has(key)) return children;
+    return [{ ...mergeCommonExampleNodeGuidance(node, extracted), children: children.length ? children : undefined }];
+  });
+}
+
+function buildCommonExampleTemplateNodes(sourceNodes: TemplateNode[], files: ImportedTemplateFile[]) {
+  if (files.length < 2) {
+    return { nodes: sourceNodes, evidence: '' };
+  }
+  const { commonKeys, extracted } = getCommonExampleHeadingKeys(files);
+  let nodes = filterNodesByCommonExampleHeadings(sourceNodes, commonKeys, extracted);
+  if (nodes.length === 0 && extracted[0]?.length) {
+    nodes = filterNodesByCommonExampleHeadings(extracted[0], commonKeys, extracted);
+  }
+  return {
+    nodes,
+    evidence: `已按 ${files.length} 篇范文取共同标题，保留 ${flattenTemplateNodesForMatch(nodes).length} 个共同章节`,
+  };
+}
+
 function mapTemplateNodes(nodes: TemplateNode[], id: string, updater: (node: TemplateNode) => TemplateNode): TemplateNode[] {
   return nodes.map(node => {
     if (node.id === id) return updater(node);
@@ -827,6 +1059,20 @@ function moveTemplateNodeById(nodes: TemplateNode[], id: string, direction: 'up'
     : node);
 }
 
+function collectTemplateNodeMoveAvailability(nodes: TemplateNode[]): { up: Set<string>; down: Set<string> } {
+  const up = new Set<string>();
+  const down = new Set<string>();
+  const visit = (items: TemplateNode[]) => {
+    items.forEach((node, index) => {
+      if (index > 0) up.add(node.id);
+      if (index < items.length - 1) down.add(node.id);
+      if (node.children?.length) visit(node.children);
+    });
+  };
+  visit(nodes);
+  return { up, down };
+}
+
 function flattenTemplateNodeRows(nodes: TemplateNode[], depth = 0): Array<{ node: TemplateNode; depth: number }> {
   return nodes.flatMap(node => [
     { node, depth },
@@ -850,6 +1096,32 @@ function findTemplateNodeAncestorIds(nodes: TemplateNode[], targetId: string, tr
     }
   }
   return null;
+}
+
+function collectTemplateNodeIdsByLevel(nodes: TemplateNode[], levels: number[]): string[] {
+  const allowed = new Set(levels);
+  const ids: string[] = [];
+  const visit = (items: TemplateNode[]) => {
+    items.forEach(node => {
+      if (allowed.has(node.level)) ids.push(node.id);
+      if (node.children?.length) visit(node.children);
+    });
+  };
+  visit(nodes);
+  return ids;
+}
+
+function countSelectedTemplateNodesWithChildren(nodes: TemplateNode[], selectedIds: Set<string>, parentSelected = false): number {
+  return nodes.reduce((count, node) => {
+    const selected = parentSelected || selectedIds.has(node.id);
+    return count + (selected ? 1 : 0) + (node.children?.length ? countSelectedTemplateNodesWithChildren(node.children, selectedIds, selected) : 0);
+  }, 0);
+}
+
+function removeTemplateNodesByIds(nodes: TemplateNode[], selectedIds: Set<string>): TemplateNode[] {
+  return nodes
+    .filter(node => !selectedIds.has(node.id))
+    .map(node => node.children?.length ? { ...node, children: removeTemplateNodesByIds(node.children, selectedIds) } : node);
 }
 
 function rebuildTemplateTree(nodes: TemplateNode[]): TemplateNode[] {
@@ -881,23 +1153,35 @@ function findEmptyNodeTitle(nodes: TemplateNode[]): TemplateNode | undefined {
   return undefined;
 }
 
-const TemplateManager: React.FC = () => {
-  const { templates, loadTemplates, addTemplate, updateTemplate, deleteTemplate } = useTemplateStore();
-  const { customStages, saveAllStages } = useSettingsStore();
-  const { projects, versions, updateProject } = useProjectStore();
-  const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
+const TemplateManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
+  const templates = useTemplateStore(state => state.templates);
+  const loadTemplates = useTemplateStore(state => state.loadTemplates);
+  const addTemplate = useTemplateStore(state => state.addTemplate);
+  const updateTemplate = useTemplateStore(state => state.updateTemplate);
+  const deleteTemplate = useTemplateStore(state => state.deleteTemplate);
+  const customStages = useSettingsStore(state => state.customStages);
+  const saveAllStages = useSettingsStore(state => state.saveAllStages);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isPreparingTemplateEditor, setIsPreparingTemplateEditor] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<WritingTemplate | null>(null);
   const [deletingTemplate, setDeletingTemplate] = useState<WritingTemplate | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isAiExtracting, setIsAiExtracting] = useState(false);
-  const [importedFilePath, setImportedFilePath] = useState<string>('');
-  const [importedDocumentText, setImportedDocumentText] = useState<string>('');
+  const [importedFiles, setImportedFiles] = useState<Array<{ filePath: string; text: string; fileName?: string }>>([]);
   const [formatRuleEvidence, setFormatRuleEvidence] = useState<string[]>([]);
   const [fontOptions, setFontOptions] = useState(fallbackFontNames.map(font => ({ value: font })));
+  const [headingLevelFilter, setHeadingLevelFilter] = useState<number[]>([1, 2, 3, 4]);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+  const [isStageSectionExpanded, setIsStageSectionExpanded] = useState(false);
+  const hasRequestedTemplateRefreshRef = useRef(false);
+  const hasRequestedFontsRef = useRef(false);
   const [form] = Form.useForm();
   const enableFormatRules = Form.useWatch('enableFormatRules', form);
+  const templateType = Form.useWatch('templateType', form);
+
+  // 兼容：合并所有导入文件的文本
+  const importedDocumentText = useMemo(() => importedFiles.map(f => f.text).join('\n\n'), [importedFiles]);
+  const importedFilePath = importedFiles[0]?.filePath || '';
 
   useEffect(() => {
     document.body.classList.toggle('template-editor-modal-open', isModalOpen);
@@ -908,13 +1192,90 @@ const TemplateManager: React.FC = () => {
   const [isStageModalOpen, setIsStageModalOpen] = useState(false);
   const [editingStage, setEditingStage] = useState<StageConfig | null>(null);
   const [stageForm] = Form.useForm();
-  const allStages = getAllStages(customStages);
+  const allStages = useMemo(() => getAllStages(customStages), [customStages]);
 
   // 模板结构编辑器状态
   const [templateNodes, setTemplateNodes] = useState<TemplateNode[]>([]);
+  const deferredPreviewNodes = useDeferredValue(templateNodes);
   const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(new Set());
   const [activeNodeId, setActiveNodeId] = useState<string>('');
   const nodeCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  // 缓存：实际存在的标题级别
+  const availableLevels = useMemo(() => {
+    const levels = new Set<number>();
+    const collect = (nodes: TemplateNode[]) => {
+      nodes.forEach(n => { levels.add(n.level); if (n.children) collect(n.children); });
+    };
+    collect(templateNodes);
+    return Array.from(levels).sort();
+  }, [templateNodes]);
+
+  const activeHeadingLevelFilter = useMemo(() => {
+    if (availableLevels.length === 0) return headingLevelFilter;
+    const validLevels = headingLevelFilter.filter(level => availableLevels.includes(level));
+    return validLevels.length > 0 ? validLevels : availableLevels;
+  }, [availableLevels, headingLevelFilter]);
+
+  const filteredNodeIds = useMemo(
+    () => collectTemplateNodeIdsByLevel(templateNodes, activeHeadingLevelFilter),
+    [activeHeadingLevelFilter, templateNodes]
+  );
+  const filteredNodeIdSet = useMemo(() => new Set(filteredNodeIds), [filteredNodeIds]);
+  const selectedFilteredCount = useMemo(
+    () => Array.from(selectedNodeIds).filter(id => filteredNodeIdSet.has(id)).length,
+    [filteredNodeIdSet, selectedNodeIds]
+  );
+  const allFilteredSelected = filteredNodeIds.length > 0 && selectedFilteredCount === filteredNodeIds.length;
+  const someFilteredSelected = selectedFilteredCount > 0 && !allFilteredSelected;
+  const selectedCascadeCount = useMemo(
+    () => countSelectedTemplateNodesWithChildren(templateNodes, selectedNodeIds),
+    [selectedNodeIds, templateNodes]
+  );
+
+  const templateNodeMoveAvailability = useMemo(
+    () => collectTemplateNodeMoveAvailability(templateNodes),
+    [templateNodes]
+  );
+
+  useEffect(() => {
+    if (availableLevels.length === 0) {
+      setSelectedNodeIds(prev => (prev.size === 0 ? prev : new Set()));
+      return;
+    }
+
+    const validLevels = headingLevelFilter.filter(level => availableLevels.includes(level));
+    if (validLevels.length !== headingLevelFilter.length || validLevels.length === 0) {
+      setHeadingLevelFilter(validLevels.length > 0 ? validLevels : availableLevels);
+    }
+
+    const validIds = new Set(collectTemplateNodeIdsByLevel(templateNodes, validLevels.length > 0 ? validLevels : availableLevels));
+    setSelectedNodeIds(prev => {
+      const next = new Set(Array.from(prev).filter(id => validIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [availableLevels, headingLevelFilter, templateNodes]);
+
+  const handleHeadingLevelFilterChange = (levels: number[]) => {
+    const nextLevels = levels.length > 0 ? levels : availableLevels;
+    const nextIds = new Set(collectTemplateNodeIdsByLevel(templateNodes, nextLevels));
+    setHeadingLevelFilter(nextLevels);
+    setSelectedNodeIds(prev => {
+      const next = new Set(Array.from(prev).filter(id => nextIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  };
+
+  const toggleSelectFilteredNodes = () => {
+    setSelectedNodeIds(allFilteredSelected ? new Set() : new Set(filteredNodeIds));
+  };
+
+  const deleteSelectedTemplateNodes = () => {
+    setTemplateNodes(prev => removeTemplateNodesByIds(prev, selectedNodeIds));
+    setSelectedNodeIds(new Set());
+    setActiveNodeId(prev => (selectedNodeIds.has(prev) ? '' : prev));
+    message.success(`已删除 ${selectedCascadeCount} 个章节`);
+  };
 
   // 模板结构编辑器操作
   const addTemplateNode = () => {
@@ -987,12 +1348,16 @@ const TemplateManager: React.FC = () => {
 
   // 重新扫描所有项目的阶段文件
   const resyncAllProjects = async (stages: StageConfig[]) => {
+    const { projects, versions, updateProject } = useProjectStore.getState();
+    const { addProjectDoc, updateProjectDoc } = useProjectDocStore.getState();
+    const currentTemplates = useTemplateStore.getState().templates;
     let totalMatched = 0;
+
     for (const project of projects) {
       if (!project.folderPath) continue;
       const result = await syncProjectStageFiles(project, {
         projectDocs: useProjectDocStore.getState().projectDocs,
-        templates,
+        templates: currentTemplates,
         addProjectDoc,
         updateProjectDoc,
         allStages: stages,
@@ -1096,72 +1461,101 @@ const TemplateManager: React.FC = () => {
   };
 
   const renderNodeRows = (nodes: TemplateNode[], depth = 0, prefix: number[] = []): React.ReactNode[] =>
-    nodes.map((node, index) => {
-      const hasChildren = Boolean(node.children?.length);
-      const isCollapsed = collapsedNodeIds.has(node.id);
-      const nodeNumber = [...prefix, index + 1];
-      return (
-        <React.Fragment key={node.id}>
-        <div
-          className={activeNodeId === node.id ? 'template-node-preview-row active' : 'template-node-preview-row'}
-          style={{ paddingLeft: 8 + depth * 16 }}
-          onClick={() => focusTemplateNode(node.id)}
-        >
-          {hasChildren ? (
-            <Button
-              className="template-preview-collapse"
-              type="text"
-              size="small"
-              icon={isCollapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
-              onClick={(event) => {
-                event.stopPropagation();
-                toggleTemplateNodeCollapsed(node.id);
-              }}
-            />
-          ) : (
-            <span className="template-preview-collapse-spacer" />
-          )}
-          <span className="template-node-level">{nodeNumber.join('.')}</span>
-          <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: node.title }}>{node.title}</Text>
-        </div>
-        {hasChildren && !isCollapsed && (
-          <div className="template-node-preview-children">
-            <div className="template-node-preview-children-inner">
-              {renderNodeRows(node.children || [], depth + 1, nodeNumber)}
-            </div>
+    nodes
+      .filter(node => nodeMatchesFilter(node, activeHeadingLevelFilter))
+      .map((node, index) => {
+        const hasChildren = Boolean(node.children?.length);
+        const isCollapsed = collapsedNodeIds.has(node.id);
+        const nodeNumber = [...prefix, index + 1];
+        const nodeVisible = activeHeadingLevelFilter.includes(node.level);
+        return (
+          <React.Fragment key={node.id}>
+          <div
+            className={activeNodeId === node.id ? 'template-node-preview-row active' : 'template-node-preview-row'}
+            style={{ paddingLeft: 8 + depth * 16, opacity: nodeVisible ? 1 : 0.4 }}
+            onClick={() => focusTemplateNode(node.id)}
+          >
+            {hasChildren ? (
+              <Button
+                className="template-preview-collapse"
+                type="text"
+                size="small"
+                icon={isCollapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  toggleTemplateNodeCollapsed(node.id);
+                }}
+              />
+            ) : (
+              <span className="template-preview-collapse-spacer" />
+            )}
+            <span className="template-node-level">{nodeNumber.join('.')}</span>
+            <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: node.title }}>{node.title}</Text>
           </div>
+          {hasChildren && !isCollapsed && (
+            <div className="template-node-preview-children">
+              <div className="template-node-preview-children-inner">
+                {renderNodeRows(node.children || [], depth + 1, nodeNumber)}
+              </div>
+            </div>
         )}
         </React.Fragment>
       );
     });
 
+  // 递归检查节点或其子节点是否匹配筛选
+  const nodeMatchesFilter = (node: TemplateNode, filter: number[]): boolean => {
+    if (filter.includes(node.level)) return true;
+    return node.children?.some(c => nodeMatchesFilter(c, filter)) || false;
+  };
+
   const renderEditorNodeRows = (nodes: TemplateNode[], depth = 0, prefix: number[] = []): React.ReactNode[] =>
-    nodes.map((node, index) => {
-      const hasChildren = Boolean(node.children?.length);
-      const isCollapsed = collapsedNodeIds.has(node.id);
-      const nodeNumber = [...prefix, index + 1];
-      return (
-        <React.Fragment key={node.id}>
-          <div
-            ref={(element) => { nodeCardRefs.current[node.id] = element; }}
-            className={activeNodeId === node.id ? 'template-node-card active' : 'template-node-card'}
-            style={{ marginLeft: depth * 18 }}
-          >
-            <div className="template-node-order">
-              {hasChildren ? (
-                <Button
-                  className="template-node-collapse"
-                  type="text"
-                  size="small"
-                  icon={isCollapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
-                  onClick={() => toggleTemplateNodeCollapsed(node.id)}
+    nodes
+      .filter(node => nodeMatchesFilter(node, activeHeadingLevelFilter))
+      .map((node, index) => {
+        const hasChildren = Boolean(node.children?.length);
+        const isCollapsed = collapsedNodeIds.has(node.id);
+        const nodeNumber = [...prefix, index + 1];
+        const isSelected = selectedNodeIds.has(node.id);
+        const nodeVisible = activeHeadingLevelFilter.includes(node.level);
+        return (
+          <React.Fragment key={node.id}>
+            <div
+              ref={(element) => { nodeCardRefs.current[node.id] = element; }}
+              className={`template-node-card${activeNodeId === node.id ? ' active' : ''}${nodeVisible ? '' : ' filtered-context'}`}
+              style={{ marginLeft: depth * 18 }}
+            >
+              <div className="template-node-order">
+                <input
+                  type="checkbox"
+                  className="template-node-selectbox"
+                  checked={nodeVisible && isSelected}
+                  disabled={!nodeVisible}
+                  title={nodeVisible ? '选择该筛选结果' : '仅作为层级上下文显示'}
+                  onChange={(e) => {
+                    if (!nodeVisible) return;
+                    setSelectedNodeIds(prev => {
+                      const next = new Set(prev);
+                      if (e.target.checked) next.add(node.id);
+                      else next.delete(node.id);
+                      return next;
+                    });
+                  }}
                 />
-              ) : (
-                <span className="template-node-collapse-spacer" />
-              )}
-              <HolderOutlined className="template-node-handle" />
-              <span className="template-node-index">{nodeNumber.join('.')}</span>
-            </div>
+                {hasChildren ? (
+                  <Button
+                    className="template-node-collapse"
+                    type="text"
+                    size="small"
+                    icon={isCollapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
+                    onClick={() => toggleTemplateNodeCollapsed(node.id)}
+                  />
+                ) : (
+                  <span className="template-node-collapse-spacer" />
+                )}
+                <HolderOutlined className="template-node-handle" />
+                <span className="template-node-index">{nodeNumber.join('.')}</span>
+              </div>
 
             <div className="template-node-content">
               <Input
@@ -1173,14 +1567,14 @@ const TemplateManager: React.FC = () => {
               <div className="template-node-subline">
                 {renderLevelControl(node)}
                 <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
-                  {node.description ? '已从导入文件提取章节说明' : '可作为文档进度检测节点'}
+                  {node.description ? (templateType === 'example' ? '已提取写作方法/技巧提示' : '已从导入文件提取章节说明') : '可作为文档进度检测节点'}
                 </Text>
               </div>
               <TextArea
                 className="template-node-description-input"
                 value={node.description}
                 onChange={(e) => updateTemplateNode(node.id, { description: e.target.value })}
-                placeholder="可填写或确认该章节的内容要求、格式要求、审阅重点"
+                placeholder={templateType === 'example' ? '写作方法、技巧、内容要点提示（供后续写作参考）' : '可填写或确认该章节的内容要求、格式要求、审阅重点'}
                 autoSize={{ minRows: 1, maxRows: 4 }}
               />
             </div>
@@ -1197,14 +1591,14 @@ const TemplateManager: React.FC = () => {
                 <Button
                   type="text"
                   size="small"
-                  disabled={!canMoveTemplateNode(templateNodes, node.id, 'up')}
+                  disabled={!templateNodeMoveAvailability.up.has(node.id)}
                   icon={<UpOutlined />}
                   onClick={() => moveTemplateNode(node.id, 'up')}
                 />
                 <Button
                   type="text"
                   size="small"
-                  disabled={!canMoveTemplateNode(templateNodes, node.id, 'down')}
+                  disabled={!templateNodeMoveAvailability.down.has(node.id)}
                   icon={<DownOutlined />}
                   onClick={() => moveTemplateNode(node.id, 'down')}
                 />
@@ -1230,11 +1624,79 @@ const TemplateManager: React.FC = () => {
       );
     });
 
-  const nodeTotal = flattenNodeCount(templateNodes);
-  const requiredTotal = countRequiredNodes(templateNodes);
+  const editorNodeRows = useMemo(
+    () => renderEditorNodeRows(templateNodes),
+    [templateNodes, activeHeadingLevelFilter, collapsedNodeIds, activeNodeId, selectedNodeIds, templateType, templateNodeMoveAvailability]
+  );
+  const previewNodeRows = useMemo(
+    () => renderNodeRows(deferredPreviewNodes),
+    [deferredPreviewNodes, activeHeadingLevelFilter, collapsedNodeIds, activeNodeId]
+  );
+  const nodeTotal = useMemo(() => flattenNodeCount(templateNodes), [templateNodes]);
+  const requiredTotal = useMemo(() => countRequiredNodes(templateNodes), [templateNodes]);
+  const templateCardItems = useMemo(
+    () => templates.map(template => ({
+      template,
+      nodeCount: flattenNodeCount(template.nodes || []),
+    })),
+    [templates]
+  );
 
   const extractNodesWithAi = async (content: string): Promise<AiTemplateExtractionResult> => {
-    const prompt = `你是“文档模板结构、写作要求、范文和格式规则”识别助手。请从下面的模板文本中同时识别：
+    const currentType = form.getFieldValue('templateType') || 'direct';
+    const fileCount = importedFiles.length;
+
+    const multiFileNote = fileCount > 1
+      ? `\n注意：本次导入了 ${fileCount} 篇范文。章节结构只保留各篇范文中名称相同的共同标题；不要把只出现在单篇范文里的项目化小标题、个性化小节放入 nodes。一级标题通常是共同写作大方向，应优先保留。差异性的内容只总结进 description 或 evidence。`
+      : '';
+
+    const examplePrompt = `你是”范文写作分析”助手。下面是${fileCount > 1 ? `${fileCount}篇范文` : '一篇范文'}，请分析其写作方法、格式特征和结构，生成一份写作指导。${multiFileNote}
+
+分析要求：
+1. 提取范文的章节结构（标题和层级）。如果是多篇范文，只输出各篇都出现过的共同标题/共同写作骨架；同名标题可忽略编号差异，例如“一、项目背景”和“1. 项目背景”视为同一标题。
+2. 对每个章节，分析：
+   - 该章节的写作方法和技巧（如论述方式、数据运用、逻辑结构）
+   - 建议字数范围（基于范文实际字数）
+   - 内容要点提示（该章节应该包含什么）
+3. 提取范文的整体格式规范（标题字体、正文字体、字号、行距等）
+4. 总结范文的整体写作风格和特点
+
+请只返回 JSON 对象，不要 Markdown，不要代码块。格式如下：
+{
+  “nodes”: [
+    {
+      “title”: “章节标题”,
+      “level”: 1,
+      “description”: “该章节的写作方法/技巧/内容要点提示（供后续写作参考，不是硬性要求）”,
+      “requirementText”: “建议字数：约XXX字”,
+      “isRequired”: true
+    }
+  ],
+  “formatRules”: {
+    “heading1”: {“fontFamily”:”字体名”,”fontSize”:14,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”},
+    “heading2”: {“fontFamily”:”字体名”,”fontSize”:14,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”},
+    “heading3”: {“fontFamily”:”字体名”,”fontSize”:14,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”},
+    “heading4”: {“fontFamily”:”字体名”,”fontSize”:12,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”},
+    “body”: {“fontFamily”:”字体名”,”fontSize”:12,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”normal”},
+    “caption”: {“fontFamily”:”字体名”,”fontSize”:10.5,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”normal”},
+    “tableTitle”: {“fontFamily”:”字体名”,”fontSize”:10.5,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”normal”},
+    “tableHeader”: {“fontFamily”:”字体名”,”fontSize”:10.5,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”}
+  },
+  “evidence”: [“格式或分类识别依据，简短说明”]
+}
+
+规则：
+1. level 只允许 1-4。
+2. description 要写具体的写作方法和技巧，不是直接复制范文原文，而是分析总结。
+3. requirementText 只写建议字数，不要写硬性要求。
+4. 格式规则要从范文中实际使用的格式推断，如果范文使用了某种字体/字号/行距，请提取出来。
+5. 目录、页码、页眉页脚、乱码不要作为标题。
+6. 多篇范文中只在某一篇出现的小标题、项目名称、实施地点、金额、时间、单位名称等个性化标题，不要放入 nodes。
+
+范文内容：
+${content.slice(0, 22000)}`;
+
+    const directPrompt = `你是”文档模板结构、写作要求、范文和格式规则”识别助手。请从下面的模板文本中同时识别：
 1. 标题结构和标题层级。
 2. 每个标题下哪些是硬性写作要求、填写说明、内容要求、格式要求。
 3. 每个标题下哪些是范文、示例、样例、参考写法。范文只作为写法参考，不可当作硬性要求。
@@ -1242,43 +1704,70 @@ const TemplateManager: React.FC = () => {
 
 请只返回 JSON 对象，不要 Markdown，不要代码块。格式如下：
 {
-  "nodes": [
+  “nodes”: [
     {
-      "title": "原始章节标题",
-      "level": 1,
-      "requirementText": "该章节硬性要求/填写说明/内容要求/格式要求；没有则为空字符串",
-      "exampleText": "该章节范文/示例/样例/参考写法；没有则为空字符串",
-      "isRequired": true
+      “title”: “原始章节标题”,
+      “level”: 1,
+      “requirementText”: “该章节硬性要求/填写说明/内容要求/格式要求；没有则为空字符串”,
+      “exampleText”: “该章节范文/示例/样例/参考写法；没有则为空字符串”,
+      “isRequired”: true
     }
   ],
-  "requirementText": "模板全局硬性要求、填写说明、格式/内容约束；不要包含范文正文",
-  "exampleText": "模板全局范文、示例、样例、参考写法；只用于提取写作结构和表达方法",
-  "formatRules": {
-    "heading1": {"fontFamily":"字体名","fontSize":14,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"},
-    "heading2": {"fontFamily":"字体名","fontSize":14,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"},
-    "heading3": {"fontFamily":"字体名","fontSize":14,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"},
-    "heading4": {"fontFamily":"字体名","fontSize":12,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"},
-    "body": {"fontFamily":"字体名","fontSize":12,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"normal"},
-    "caption": {"fontFamily":"字体名","fontSize":10.5,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"normal"},
-    "tableTitle": {"fontFamily":"字体名","fontSize":10.5,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"normal"},
-    "tableHeader": {"fontFamily":"字体名","fontSize":10.5,"lineHeight":1.5,"letterSpacing":0,"fontWeight":"bold"}
+  “requirementText”: “模板全局硬性要求、填写说明、格式/内容约束；不要包含范文正文”,
+  “exampleText”: “模板全局范文、示例、样例、参考写法；只用于提取写作结构和表达方法”,
+  “formatRules”: {
+    “heading1”: {“fontFamily”:”字体名”,”fontSize”:14,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”},
+    “heading2”: {“fontFamily”:”字体名”,”fontSize”:14,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”},
+    “heading3”: {“fontFamily”:”字体名”,”fontSize”:14,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”},
+    “heading4”: {“fontFamily”:”字体名”,”fontSize”:12,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”},
+    “body”: {“fontFamily”:”字体名”,”fontSize”:12,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”normal”},
+    “caption”: {“fontFamily”:”字体名”,”fontSize”:10.5,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”normal”},
+    “tableTitle”: {“fontFamily”:”字体名”,”fontSize”:10.5,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”normal”},
+    “tableHeader”: {“fontFamily”:”字体名”,”fontSize”:10.5,”lineHeight”:1.5,”letterSpacing”:0,”fontWeight”:”bold”}
   },
-  "evidence": ["格式或分类识别依据，简短说明"]
+  “evidence”: [“格式或分类识别依据，简短说明”]
 }
 
 识别规则：
-1. level 只允许 1-4。按上下文判断：“一、/第X章”通常为1级，“（一）”通常为2级，“1.”通常为3级，“（1）”通常为4级；如果文档实际层级不同，以上下文为准。
-2. requirementText 只放“要求、应当、必须、需、填写、说明、格式、字号、字体、行距、内容包括、提交材料、指标、标准、依据”等约束性内容。
-3. exampleText 只放“范文、示例、示范、样例、参考写法、参考内容、例如、如下所示”等样例性内容。
+1. level 只允许 1-4。按上下文判断：”一、/第X章”通常为1级，”（一）”通常为2级，”1.”通常为3级，”（1）”通常为4级；如果文档实际层级不同，以上下文为准。
+2. requirementText 只放”要求、应当、必须、需、填写、说明、格式、字号、字体、行距、内容包括、提交材料、指标、标准、依据”等约束性内容。
+3. exampleText 只放”范文、示例、示范、样例、参考写法、参考内容、例如、如下所示”等样例性内容。
 4. 不要把范文中的项目事实、金额、时间、数据、背景当成当前模板要求。
 5. 目录、页码、页眉页脚、乱码、孤立正文句子不要作为标题。
 6. 如果格式在文本中明确说明，按说明提取；如果没有说明但模板文本明显展示了对应样式，请根据样式样本推断，并在 evidence 中说明。
 
 模板文本：
-${content.slice(0, 30000)}`;
+${content.slice(0, 22000)}`;
+
+    const strictJsonInstruction = `
+
+重要：请严格返回可被 JSON.parse 解析的标准 JSON。必须使用英文半角双引号，不要使用中文弯引号，不要输出 Markdown 代码块。
+不要输出思考过程、分析过程、解释性前言或结尾。第一字符必须是 {，最后一个字符必须是 }。
+最小格式：
+{
+  "nodes": [
+    {
+      "title": "一、章节标题",
+      "level": 1,
+      "requirementText": "要求或填写说明",
+      "exampleText": "范文或参考写法",
+      "isRequired": true
+    }
+  ],
+  "requirementText": "全局模板要求",
+  "exampleText": "全局范文参考",
+  "formatRules": {},
+  "evidence": []
+}
+`;
+    const prompt = `${currentType === 'example' ? examplePrompt : directPrompt}${strictJsonInstruction}`;
 
     const response = await window.electronAPI.callAI(prompt);
-    return parseAiHeadingResponse(response);
+    const aiResult = parseAiHeadingResponse(response);
+    if (aiResult.nodes.length === 0) {
+      console.warn('[Template AI] Empty node result. Raw response preview:', String(response || '').slice(0, 1200));
+    }
+    return aiResult;
   };
 
   const applyAiTemplateExtraction = async (result: AiTemplateExtractionResult, successPrefix = 'AI 已识别') => {
@@ -1287,28 +1776,42 @@ ${content.slice(0, 30000)}`;
       return false;
     }
 
-    const fallbackGuidance = collectTemplateGuidance(result.nodes, importedDocumentText);
-    const requirementText = result.requirementText || fallbackGuidance.requirementText;
-    const exampleText = result.exampleText || fallbackGuidance.exampleText;
+    const currentType = form.getFieldValue('templateType') || 'direct';
+    const commonResult = currentType === 'example'
+      ? buildCommonExampleTemplateNodes(result.nodes, importedFiles)
+      : { nodes: result.nodes, evidence: '' };
+    if (currentType === 'example' && importedFiles.length > 1 && commonResult.nodes.length === 0) {
+      message.warning('多篇范文未识别到共同章节标题，请检查标题命名是否一致，或保留一篇范文后再识别。');
+      return false;
+    }
     const currentFormatValues = form.getFieldValue('formatRules') || buildDefaultFormatFormValues();
     const mergedFormatValues = mergeFormatFormValues(
       currentFormatValues,
       result.formatValues || formatRulesToPartialFormValues(result.formatRules),
     );
-    const evidence = result.evidence.slice(0, 12);
+    const evidence = [
+      ...(commonResult.evidence ? [commonResult.evidence] : []),
+      ...result.evidence,
+    ].slice(0, 12);
 
-    form.setFieldsValue({
-      requirementText,
-      exampleText,
+    // 范文模板：全局字段留空，内容在节点里；直接套用：保留全局字段
+    const formValues: any = {
       ...(Object.keys(result.formatValues || {}).length || result.formatRules
         ? { enableFormatRules: true, formatRules: mergedFormatValues }
         : {}),
-    });
+    };
+    if (currentType !== 'example') {
+      const fallbackGuidance = collectTemplateGuidance(commonResult.nodes, importedDocumentText);
+      formValues.requirementText = result.requirementText || fallbackGuidance.requirementText;
+      formValues.exampleText = result.exampleText || fallbackGuidance.exampleText;
+    }
+
+    form.setFieldsValue(formValues);
     if (evidence.length > 0) {
       setFormatRuleEvidence(evidence);
     }
-    setTemplateNodes(result.nodes);
-    message.success(`${successPrefix} ${result.nodes.length} 个章节${evidence.length ? `，并补充 ${evidence.length} 条格式/分类依据` : ''}`);
+    setTemplateNodes(commonResult.nodes);
+    message.success(`${successPrefix} ${flattenTemplateNodesForMatch(commonResult.nodes).length} 个章节${evidence.length ? `，并补充 ${evidence.length} 条格式/分类依据` : ''}`);
     return true;
   };
 
@@ -1345,9 +1848,36 @@ ${content.slice(0, 30000)}`;
     setIsAiExtracting(true);
     try {
       const aiResult = await enrichAiResultWithSourceFormat(await extractNodesWithAi(importedDocumentText));
+      if (aiResult.nodes.length === 0) {
+        const fallbackNodes = extractTemplateNodes(importedDocumentText);
+        if (fallbackNodes.length > 0) {
+          const guidance = collectTemplateGuidance(fallbackNodes, importedDocumentText);
+          await applyAiTemplateExtraction({
+            ...aiResult,
+            nodes: fallbackNodes,
+            requirementText: aiResult.requirementText || guidance.requirementText,
+            exampleText: aiResult.exampleText || guidance.exampleText,
+            evidence: [...aiResult.evidence, 'AI未返回标准章节数组，已使用本地标题识别结果兜底'].slice(0, 12),
+          }, '已使用本地结构兜底识别');
+          return;
+        }
+      }
       await applyAiTemplateExtraction(aiResult);
     } catch (error: any) {
-      message.warning(error?.message || 'AI 章节识别失败，请先配置 AI API 密钥');
+      const fallbackNodes = extractTemplateNodes(importedDocumentText);
+      if (fallbackNodes.length > 0) {
+        const guidance = collectTemplateGuidance(fallbackNodes, importedDocumentText);
+        await applyAiTemplateExtraction({
+          nodes: fallbackNodes,
+          requirementText: guidance.requirementText,
+          exampleText: guidance.exampleText,
+          formatRules: undefined,
+          evidence: ['AI接口未返回最终文本，已使用本地标题识别结果兜底'].slice(0, 12),
+        }, '已使用本地结构兜底识别');
+        message.warning(formatTemplateAiError(error), 7);
+        return;
+      }
+      message.error(formatTemplateAiError(error), 7);
     } finally {
       setIsAiExtracting(false);
     }
@@ -1421,26 +1951,39 @@ ${content.slice(0, 30000)}`;
   };
 
   useEffect(() => {
+    if (hasRequestedTemplateRefreshRef.current || templates.length > 0) return;
+    hasRequestedTemplateRefreshRef.current = true;
     loadTemplates();
-    window.electronAPI.listSystemFonts?.()
-      .then(result => {
-        const fonts = result?.fonts?.length ? result.fonts : fallbackFontNames;
-        setFontOptions(fonts.map(font => ({ value: font })));
-      })
-      .catch(() => setFontOptions(fallbackFontNames.map(font => ({ value: font }))));
-  }, []);
+  }, [loadTemplates, templates.length]);
+
+  useEffect(() => {
+    if (!isModalOpen || hasRequestedFontsRef.current) return;
+    hasRequestedFontsRef.current = true;
+    const timer = window.setTimeout(() => {
+      window.electronAPI.listSystemFonts?.()
+        .then(result => {
+          const fonts = result?.fonts?.length ? result.fonts : fallbackFontNames;
+          setFontOptions(fonts.map(font => ({ value: font })));
+        })
+        .catch(() => setFontOptions(fallbackFontNames.map(font => ({ value: font }))));
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [isModalOpen]);
 
   const handleCreate = () => {
     setIsPreparingTemplateEditor(true);
     setEditingTemplate(null);
     setIsModalOpen(true);
     window.requestAnimationFrame(() => {
-      setImportedFilePath('');
-      setImportedDocumentText('');
+      setImportedFiles([]);
       setFormatRuleEvidence([]);
+      setHeadingLevelFilter([1, 2, 3, 4]);
+      setSelectedNodeIds(new Set());
+      setSelectedNodeIds(new Set());
       form.resetFields();
       form.setFieldsValue({
         outputFileType: 'docx',
+        templateType: 'direct',
         requirementText: '',
         exampleText: '',
         enableFormatRules: false,
@@ -1456,8 +1999,10 @@ ${content.slice(0, 30000)}`;
     setEditingTemplate(template);
     setIsModalOpen(true);
     window.requestAnimationFrame(() => {
-      setImportedDocumentText('');
+      setImportedFiles([]);
       setFormatRuleEvidence([]);
+      setHeadingLevelFilter([1, 2, 3, 4]);
+      setSelectedNodeIds(new Set());
       form.setFieldsValue({
         name: template.name,
         description: template.description,
@@ -1465,6 +2010,7 @@ ${content.slice(0, 30000)}`;
         exampleText: template.exampleText || collectTemplateGuidance(template.nodes || []).exampleText,
         category: template.category,
         outputFileType: template.outputFileType || inferOutputFileType(template.filePath || ''),
+        templateType: template.templateType || 'direct',
         enableFormatRules: Boolean(template.formatRules || template.titleFontRequirement || template.bodyFontRequirement),
         formatRules: flattenFormatRulesForForm(template.formatRules || {
           heading1: { fontRequirement: template.titleFontRequirement },
@@ -1517,6 +2063,7 @@ ${content.slice(0, 30000)}`;
         formatRules,
         nodes,
         filePath: editingTemplate?.filePath,
+        templateType: values.templateType || 'direct',
         createdAt: editingTemplate?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -1554,17 +2101,13 @@ ${content.slice(0, 30000)}`;
       ]);
       if (!filePath) return;
 
-      setIsExtracting(true);
-      setImportedFilePath(filePath);
-      setImportedDocumentText('');
-      setFormatRuleEvidence([]);
-
-      const fileBaseName = getImportedBaseName(filePath);
-      const currentName = form.getFieldValue('name');
-      if (!currentName) {
-        form.setFieldsValue({ name: fileBaseName });
+      // 检查是否已导入过该文件
+      if (importedFiles.some(f => f.filePath === filePath)) {
+        message.warning('该文件已导入');
+        return;
       }
-      form.setFieldsValue({ outputFileType: inferOutputFileType(filePath) });
+
+      setIsExtracting(true);
 
       const result = await parseImportedDocument(filePath);
       const fileExt = filePath.split('.').pop()?.toLowerCase();
@@ -1580,24 +2123,39 @@ ${content.slice(0, 30000)}`;
         message.warning('文件已关联，但旧版 .doc 提取结果疑似乱码，已跳过章节生成；请重启应用使用新版静默解析，或将文件另存为 .docx 后导入。');
         return;
       }
-      setImportedDocumentText(result.content);
 
-      const importedName = getImportedBaseName(filePath, result.fileName);
-      if (!currentName) {
-        form.setFieldsValue({ name: importedName });
-      }
+      const newFile = { filePath, text: result.content, fileName: result.fileName };
 
-      // 推断分类：用阶段关键词匹配
-      const currentCategory = form.getFieldValue('category');
-      if (!currentCategory) {
-        for (const stage of allStages) {
-          if (stage.keywords.some(kw => importedName.includes(kw))) {
-            form.setFieldsValue({ category: stage.name });
-            break;
+      // 范文模板追加文件，直接套用替换文件
+      const currentType = form.getFieldValue('templateType') || 'direct';
+      const newFiles = currentType === 'example'
+        ? [...importedFiles, newFile]
+        : [newFile];
+      setImportedFiles(newFiles);
+
+      // 第一个文件设置模板名称和类型
+      if (newFiles.length === 1) {
+        const fileBaseName = getImportedBaseName(filePath);
+        const currentName = form.getFieldValue('name');
+        if (!currentName) {
+          form.setFieldsValue({ name: fileBaseName });
+        }
+        form.setFieldsValue({ outputFileType: inferOutputFileType(filePath) });
+
+        // 推断分类
+        const importedName = getImportedBaseName(filePath, result.fileName);
+        const currentCategory = form.getFieldValue('category');
+        if (!currentCategory) {
+          for (const stage of allStages) {
+            if (stage.keywords.some(kw => importedName.includes(kw))) {
+              form.setFieldsValue({ category: stage.name });
+              break;
+            }
           }
         }
       }
 
+      // 提取格式规则（从第一个docx文件）
       const textualFormat = inferFormatRulesFromText(result.content);
       let actualFormatValues: Record<string, any> = {};
       const actualEvidence: string[] = [];
@@ -1617,28 +2175,36 @@ ${content.slice(0, 30000)}`;
         mergeFormatFormValues(currentFormatValues, actualFormatValues),
         textualFormat.values,
       );
-      const evidence = [...actualEvidence, ...textualFormat.evidence].slice(0, 12);
+      // 从最新文件提取章节结构
+      const extractedNodes = extractTemplateNodes(result.content);
+      const commonImportResult = currentType === 'example'
+        ? buildCommonExampleTemplateNodes(extractedNodes, newFiles)
+        : { nodes: extractedNodes, evidence: '' };
+      const nodes = commonImportResult.nodes;
+      const evidence = [
+        ...(commonImportResult.evidence ? [commonImportResult.evidence] : []),
+        ...actualEvidence,
+        ...textualFormat.evidence,
+      ].slice(0, 12);
       if (evidence.length > 0) {
         form.setFieldsValue({ enableFormatRules: true, formatRules: mergedFormatValues });
         setFormatRuleEvidence(evidence);
       }
 
-      const nodes = extractTemplateNodes(result.content);
       if (nodes.length === 0) {
-        try {
-          const aiResult = await extractNodesWithAi(result.content);
-          if (await applyAiTemplateExtraction(aiResult, '规则未检测到章节，AI 已识别')) {
-            return;
-          }
-        } catch {}
-        message.warning('文件已关联并填入模板名称，但未检测到章节标题。可以点击“AI识别结构/要求/格式”重试，或确认文档使用了一、二、三 / 第X章 / 1. 2. 3. 等编号格式。');
-        return;
+        message.warning(currentType === 'example' && newFiles.length > 1
+          ? '已导入范文，但多篇范文未识别到共同章节标题。请检查标题名称是否一致，或点击“AI识别结构/分析范文”重试。'
+          : '文件已关联，但未检测到章节标题。可以点击”AI识别结构”重试，或确认文档使用了一、二、三 / 第X章 / 1. 2. 3. 等编号格式。');
+      } else {
+        if (currentType !== 'example') {
+          const guidance = collectTemplateGuidance(nodes, result.content);
+          form.setFieldsValue({ requirementText: guidance.requirementText, exampleText: guidance.exampleText });
+        }
+        setTemplateNodes(nodes);
       }
 
-      const guidance = collectTemplateGuidance(nodes, result.content);
-      form.setFieldsValue({ requirementText: guidance.requirementText, exampleText: guidance.exampleText });
-      setTemplateNodes(nodes);
-      message.success(`已从 ${result.fileName || '文档'} 提取 ${nodes.length} 个章节${evidence.length ? `，并识别 ${evidence.length} 条格式依据` : ''}`);
+      const fileCount = newFiles.length;
+      message.success(`已导入 ${result.fileName || '文档'}${fileCount > 1 ? `（共 ${fileCount} 个文件）` : ''}${nodes.length > 0 ? `，提取 ${nodes.length} 个章节` : ''}${evidence.length ? `，识别 ${evidence.length} 条格式依据` : ''}`);
     } catch (error: any) {
       console.error('Import failed:', error);
       message.error(`导入失败：${error?.message || '未知错误'}`);
@@ -1651,9 +2217,12 @@ ${content.slice(0, 30000)}`;
     <div className="template-manager-page">
       <section className="template-section">
       <div className="template-section-header" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <Title level={4} style={{ margin: 0 }}>模板管理</Title>
-          <Text type="secondary" style={{ fontSize: 13 }}>维护写作模板结构，可从 Word、PPT、Excel、PDF、文本等文档中提取章节</Text>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {onBack && <Button type="text" icon={<LeftOutlined />} onClick={onBack} />}
+          <div>
+            <Title level={4} style={{ margin: 0 }}>模板管理</Title>
+            <Text type="secondary" style={{ fontSize: 13 }}>维护写作模板结构，可从 Word、PPT、Excel、PDF、文本等文档中提取章节</Text>
+          </div>
         </div>
         <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
           创建模板
@@ -1666,8 +2235,9 @@ ${content.slice(0, 30000)}`;
         <List
           className="template-card-list"
           grid={{ gutter: 16, xs: 1, sm: 2, md: 2, lg: 3, xl: 3, xxl: 4 }}
-          dataSource={templates}
-          renderItem={(template) => (
+          pagination={templateCardItems.length > 12 ? { pageSize: 12, size: 'small', showSizeChanger: false, hideOnSinglePage: true } : false}
+          dataSource={templateCardItems}
+          renderItem={({ template, nodeCount }) => (
             <List.Item>
               <Card
                 className="template-card"
@@ -1696,11 +2266,14 @@ ${content.slice(0, 30000)}`;
                   description={
                     <div>
                       <Tag color="blue" style={{ marginBottom: 8 }}>{template.category}</Tag>
+                      <Tag color={template.templateType === 'example' ? 'green' : 'default'} style={{ marginBottom: 8 }}>
+                        {template.templateType === 'example' ? '范文模板' : '直接套用'}
+                      </Tag>
                       <br />
                       <Paragraph ellipsis={{ rows: 2 }} style={{ marginBottom: 0 }}>{template.description}</Paragraph>
                       <br />
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        {template.outputFileType?.toUpperCase() || 'DOCX'} · 包含 {flattenNodeCount(template.nodes)} 个章节{template.filePath ? ' · 已保存源文件' : ''}
+                        {template.outputFileType?.toUpperCase() || 'DOCX'} · 包含 {nodeCount} 个章节{template.filePath ? ' · 已保存源文件' : ''}
                       </Text>
                       <br />
                       <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1777,6 +2350,19 @@ ${content.slice(0, 30000)}`;
                 </div>
 
                 <Form.Item
+                  name="templateType"
+                  label="模板类型"
+                  extra="直接套用模板：要求文字作为硬性检查标准；范文模板：作为格式和风格参考，字数为建议值"
+                >
+                  <Select
+                    options={[
+                      { value: 'direct', label: '直接套用模板' },
+                      { value: 'example', label: '范文模板' },
+                    ]}
+                  />
+                </Form.Item>
+
+                <Form.Item
                   name="description"
                   label="模板说明"
                 >
@@ -1786,15 +2372,9 @@ ${content.slice(0, 30000)}`;
                 <Form.Item
                   name="requirementText"
                   label="模板要求/填写说明"
+                  style={{ display: templateType === 'example' ? 'none' : undefined }}
                 >
                   <TextArea rows={3} placeholder="导入后自动识别硬性要求、内容要求、格式要求；可人工修正" />
-                </Form.Item>
-
-                <Form.Item
-                  name="exampleText"
-                  label="范文/参考写法"
-                >
-                  <TextArea rows={3} placeholder="导入后自动识别范文、示例、样例内容；仅作为写法参考，不作为硬性要求" />
                 </Form.Item>
 
                 <div className="template-format-toggle">
@@ -1862,42 +2442,118 @@ ${content.slice(0, 30000)}`;
                 <div>
                   <Text strong>从文件导入结构</Text>
                   <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 2 }}>
-                    支持 .doc/.docx/.ppt/.pptx/.xls/.xlsx/.pdf/.txt/.md/.rtf，自动识别章节标题并保留源文件用于后续创建文件。
+                    {templateType === 'example'
+                      ? '支持导入多个范文文件；多篇范文会只保留共同标题，差异化小标题用于分析写作特征。'
+                      : '支持 .doc/.docx/.ppt/.pptx/.xls/.xlsx/.pdf/.txt/.md/.rtf，自动识别章节标题并保留源文件用于后续创建文件。'}
                   </Text>
-                  {importedFilePath && (
-                    <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 6 }} ellipsis={{ tooltip: importedFilePath }}>
-                      已导入：{importedFilePath.split(/[/\\]/).pop()}
-                    </Text>
+                  {importedFiles.length > 0 && (
+                    <div style={{ marginTop: 6 }}>
+                      {importedFiles.map((f, idx) => (
+                        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                          <Text type="secondary" ellipsis style={{ flex: 1 }}>
+                            {idx + 1}. {f.fileName || f.filePath.split(/[/\\]/).pop()}
+                          </Text>
+                          <Button
+                            type="text"
+                            size="small"
+                            danger
+                            icon={<DeleteOutlined />}
+                            onClick={() => {
+                              const newFiles = importedFiles.filter((_, i) => i !== idx);
+                              setImportedFiles(newFiles);
+                              if (templateType === 'example') {
+                                if (newFiles.length === 0) {
+                                  setTemplateNodes([]);
+                                } else {
+                                  const baseNodes = extractTemplateNodes(newFiles[0].text);
+                                  const commonResult = buildCommonExampleTemplateNodes(baseNodes, newFiles);
+                                  setTemplateNodes(commonResult.nodes);
+                                  if (commonResult.evidence) {
+                                    setFormatRuleEvidence(prev => [commonResult.evidence, ...prev].slice(0, 12));
+                                  }
+                                }
+                              }
+                            }}
+                          />
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
-                <Space>
+                <Space wrap>
                   <Button
                     icon={<ImportOutlined />}
                     loading={isExtracting}
                     onClick={handleImportFromDoc}
                   >
-                    选择文件
+                    {templateType === 'example' && importedFiles.length > 0 ? '继续添加文件' : '选择文件'}
                   </Button>
                   <Button
-                    disabled={!importedDocumentText}
+                    disabled={importedFiles.length === 0}
                     loading={isAiExtracting}
                     onClick={handleAiExtract}
                   >
-                    AI识别结构/要求/格式
+                    {templateType === 'example' ? 'AI识别结构/分析范文' : 'AI识别结构/要求/格式'}
                   </Button>
                 </Space>
               </div>
 
           {/* 模板结构编辑器 */}
           <div className="template-node-editor" style={{ marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <div>
-                <Text strong>模板章节结构</Text>
-                <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
-                  共 {nodeTotal} 个章节，{requiredTotal} 个必需项
-                </Text>
+            <div className="template-node-toolbar">
+              <div className="template-node-toolbar-title">
+                <div className="template-node-bulk-select">
+                  <input
+                    type="checkbox"
+                    className="template-node-selectbox"
+                    checked={allFilteredSelected}
+                    ref={el => { if (el) el.indeterminate = someFilteredSelected; }}
+                    disabled={filteredNodeIds.length === 0}
+                    onChange={toggleSelectFilteredNodes}
+                  />
+                </div>
+                <div>
+                  <Text strong>模板章节结构</Text>
+                  <div className="template-node-toolbar-meta">
+                    <span>共 {nodeTotal} 个章节</span>
+                    <span>{requiredTotal} 个必需项</span>
+                    <span>当前筛选 {filteredNodeIds.length} 项</span>
+                    {selectedFilteredCount > 0 && <Tag color="blue">已选 {selectedFilteredCount} 项</Tag>}
+                    {selectedCascadeCount > selectedFilteredCount && <Tag color="orange">含子章节共 {selectedCascadeCount} 项</Tag>}
+                  </div>
+                </div>
               </div>
-              <Space>
+              <Space wrap size={8}>
+                {availableLevels.length > 0 && (
+                  <Select
+                    mode="multiple"
+                    size="small"
+                    className="template-node-filter-select"
+                    placeholder="筛选标题级别"
+                    value={activeHeadingLevelFilter}
+                    onChange={handleHeadingLevelFilterChange}
+                    maxTagCount={2}
+                    options={availableLevels.map(l => ({ value: l, label: `${['一','二','三','四'][l - 1] || l}级标题` }))}
+                  />
+                )}
+                <Button
+                  size="small"
+                  disabled={filteredNodeIds.length === 0}
+                  onClick={toggleSelectFilteredNodes}
+                >
+                  {allFilteredSelected ? '取消全选' : '全选筛选结果'}
+                </Button>
+                {selectedFilteredCount > 0 && (
+                  <Popconfirm
+                    title={`确定删除当前选中的 ${selectedFilteredCount} 个筛选结果？`}
+                    description={selectedCascadeCount > selectedFilteredCount ? `其中包含父章节，删除后会连同子章节共删除 ${selectedCascadeCount} 个章节。` : '删除后会重新计算模板结构。'}
+                    onConfirm={deleteSelectedTemplateNodes}
+                  >
+                    <Button size="small" danger>
+                      删除选中 ({selectedFilteredCount})
+                    </Button>
+                  </Popconfirm>
+                )}
                 <Button
                   type="dashed"
                   size="small"
@@ -1909,7 +2565,7 @@ ${content.slice(0, 30000)}`;
               </Space>
             </div>
             <div className="template-node-list">
-              {renderEditorNodeRows(templateNodes)}
+              {editorNodeRows}
             </div>
             {templateNodes.length === 0 && (
               <div style={{ textAlign: 'center', padding: 16, color: '#999', fontSize: 12 }}>
@@ -1924,7 +2580,7 @@ ${content.slice(0, 30000)}`;
             <div className="template-editor-side">
               <Text strong>结构预览</Text>
               <div className="template-node-preview">
-                {templateNodes.length > 0 ? renderNodeRows(templateNodes) : (
+                {templateNodes.length > 0 ? previewNodeRows : (
                   <Text type="secondary" style={{ fontSize: 12 }}>暂无章节</Text>
                 )}
               </div>
@@ -1951,52 +2607,64 @@ ${content.slice(0, 30000)}`;
       {/* ========== 项目阶段管理 ========== */}
       <Divider className="template-page-divider" />
       <section className="template-section stage-section">
-      <div className="template-section-header" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <Title level={4} style={{ margin: 0 }}>项目阶段管理</Title>
-          <Text type="secondary" style={{ fontSize: 13 }}>阶段会参与文件识别、进度计算、统计卡片、甘特图和项目表</Text>
+        <div className="template-section-header" style={{ marginBottom: isStageSectionExpanded ? 16 : 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <Title level={4} style={{ margin: 0 }}>项目阶段管理</Title>
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              阶段会参与文件识别、进度计算、统计卡片、甘特图和项目表；列表已按需展开，避免进入模板页时卡顿。
+            </Text>
+          </div>
+          <Space>
+            <Button onClick={() => setIsStageSectionExpanded(prev => !prev)}>
+              {isStageSectionExpanded ? '收起阶段' : `展开阶段（${allStages.length}）`}
+            </Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateStage}>
+              新增阶段
+            </Button>
+          </Space>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateStage}>
-          新增阶段
-        </Button>
-      </div>
-      <Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 13 }}>
-        新增或修改阶段后，系统会重新扫描所有项目文件夹，并按新的阶段规则刷新项目进度。
-      </Text>
 
-      <List
-        className="stage-list"
-        dataSource={allStages}
-        renderItem={(stage) => (
-          <List.Item
-            actions={[
-              <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEditStage(stage)}>编辑</Button>,
-              <Popconfirm title="确定删除此阶段？删除后会重新计算所有项目进度。" onConfirm={() => handleDeleteStage(stage.id)}>
-                <Button type="link" danger size="small" icon={<DeleteOutlined />}>删除</Button>
-              </Popconfirm>,
-            ]}
-          >
-            <List.Item.Meta
-              avatar={
-                <div style={{
-                  width: 32, height: 32, borderRadius: 6,
-                  background: stage.color,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: '#fff', fontSize: 14, fontWeight: 'bold',
-                }}>
-                  {stage.name.charAt(0)}
-                </div>
-              }
-              title={stage.name}
-              description={
-                <span style={{ fontSize: 12, color: '#999' }}>
-                  关键词：{stage.keywords.length > 0 ? stage.keywords.join('、') : '（无）'}
-                </span>
-              }
+        {isStageSectionExpanded && (
+          <>
+            <Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 13 }}>
+              新增或修改阶段后，系统会重新扫描所有项目文件夹，并按新的阶段规则刷新项目进度。
+            </Text>
+
+            <List
+              className="stage-list"
+              dataSource={allStages}
+              renderItem={(stage) => (
+                <List.Item
+                  actions={[
+                    <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEditStage(stage)}>编辑</Button>,
+                    <Popconfirm title="确定删除此阶段？删除后会重新计算所有项目进度。" onConfirm={() => handleDeleteStage(stage.id)}>
+                      <Button type="link" danger size="small" icon={<DeleteOutlined />}>删除</Button>
+                    </Popconfirm>,
+                  ]}
+                >
+                  <List.Item.Meta
+                    avatar={
+                      <div style={{
+                        width: 32, height: 32, borderRadius: 6,
+                        background: stage.color,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: '#fff', fontSize: 14, fontWeight: 'bold',
+                      }}>
+                        {stage.name.charAt(0)}
+                      </div>
+                    }
+                    title={stage.name}
+                    description={
+                      <span style={{ fontSize: 12, color: '#999' }}>
+                        关键词：{stage.keywords.length > 0 ? stage.keywords.join('、') : '（无）'}
+                      </span>
+                    }
+                  />
+                </List.Item>
+              )}
             />
-          </List.Item>
+          </>
         )}
-      />
       </section>
 
       {/* 新增/编辑阶段弹窗 */}

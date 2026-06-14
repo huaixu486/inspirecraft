@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 文件操作
   openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
   openFile: (filters?: any[]) => ipcRenderer.invoke('dialog:openFile', filters),
+  openFiles: (filters?: any[]) => ipcRenderer.invoke('dialog:openFiles', filters),
   openInExplorer: (folderPath: string) => ipcRenderer.invoke('file:openInExplorer', folderPath),
   openFileWithApp: (filePath: string) => ipcRenderer.invoke('file:openWithDefaultApp', filePath),
   startDrag: (filePath: string) => ipcRenderer.sendSync('shell:startDrag', filePath),
@@ -37,6 +38,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteTemplate: (templateId: string) => ipcRenderer.invoke('template:delete', templateId),
   storeTemplateFile: (params: { templateId: string; sourcePath: string }) =>
     ipcRenderer.invoke('template:storeFile', params),
+  analyzeExamples: (params: { exampleContents: string[]; templateNodes: Array<{ id: string; title: string; level: number }>; templateName: string; existingAnalysis?: string }) =>
+    ipcRenderer.invoke('template:analyzeExamples', params),
 
   // 审查操作
   executeReview: (params: any) => ipcRenderer.invoke('review:execute', params),
@@ -88,11 +91,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scanStageFiles: (folderPath: string) => ipcRenderer.invoke('folder:scanStageFiles', folderPath),
   createFromTemplate: (params: { folderPath: string; fileName: string; template: any; fileType?: string }) =>
     ipcRenderer.invoke('file:createFromTemplate', params),
+  generateFromContent: (params: { template: any; sectionContents: Record<string, string>; folderPath: string; fileName: string }) =>
+    ipcRenderer.invoke('file:generateFromContent', params),
 
   // ZIP 导入导出
   openZipFile: () => ipcRenderer.invoke('dialog:openZip'),
   importFromZip: (params: { zipPath: string; workspacePath: string }) =>
     ipcRenderer.invoke('project:importFromZip', params),
+  listZipFiles: (zipPath: string) => ipcRenderer.invoke('zip:listFiles', zipPath),
+  extractZipFiles: (params: { zipPath: string; targetPath: string; filePaths: string[] }) =>
+    ipcRenderer.invoke('zip:extractFiles', params),
   saveZipFile: (projectName: string) => ipcRenderer.invoke('dialog:saveZip', projectName),
   exportZip: (params: { project: any; savePath: string; projectDocs: any[] }) =>
     ipcRenderer.invoke('project:exportZip', params),

@@ -1,40 +1,31 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Layout, Menu, theme, Typography, Button, Space, Progress, Select } from 'antd';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Button, Space, Typography } from 'antd';
 import {
-  FolderOutlined,
-  FileTextOutlined,
-  DiffOutlined,
-  BarChartOutlined,
-  RobotOutlined,
-  FileSearchOutlined,
-  FormOutlined,
-  SettingOutlined,
-  PlusOutlined,
-  ImportOutlined,
-  UserOutlined,
-  RightOutlined,
-  BellOutlined,
   CalendarOutlined,
+  FileTextOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
-import ProjectList from './components/ProjectList/ProjectList';
-import VersionViewer from './components/VersionViewer/VersionViewer';
 import DiffViewer from './components/DiffViewer/DiffViewer';
-import ProgressBoard from './components/ProgressBoard/ProgressBoard';
-import TaskPlanner from './components/TaskPlanner/TaskPlanner';
-import TemplateManager from './components/TemplateManager/TemplateManager';
-import DocumentReviewer from './components/DocumentReviewer/DocumentReviewer';
 import AISettings from './components/AISettings/AISettings';
 import Overview from './components/Overview/Overview';
+import ProjectFileExplorer from './components/ProjectList/ProjectFileExplorer';
+import ProgressBoard from './components/ProgressBoard/ProgressBoard';
 import PlanManager from './components/PlanManager/PlanManager';
+import TemplateManager from './components/TemplateManager/TemplateManager';
+import TaskPlanner from './components/TaskPlanner/TaskPlanner';
+import DocumentReviewer from './components/DocumentReviewer/DocumentReviewer';
+import DocumentWriter from './components/DocumentWriter/DocumentWriter';
 import { useProjectStore } from './stores/projectStore';
 import { useTemplateStore } from './stores/templateStore';
 import { useTaskStore } from './stores/taskStore';
 import { useSettingsStore } from './stores/settingsStore';
 import { useProjectDocStore } from './stores/projectDocStore';
-import { buildProjectStageSegments, detectTimelineStage, getAllStages } from './utils/timelineStages';
+import { Project } from '../shared/types';
 
-const { Sider, Content } = Layout;
 const { Title, Text } = Typography;
+
+type GlobalPage = 'overview' | 'calendar' | 'settings' | 'project-files' | 'project-plan' | 'project-team' | 'project-templates' | 'project-report' | 'project-review' | 'project-writing';
+type ProjectDetailPage = 'files' | 'plan' | 'team' | 'templates' | 'report' | 'review' | 'writing';
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -58,24 +49,25 @@ class ErrorBoundary extends React.Component<
 }
 
 const App: React.FC = () => {
-  const [selectedKey, setSelectedKey] = useState('overview');
+  const [globalPage, setGlobalPage] = useState<GlobalPage>('overview');
+  const [panelInitialTab, setPanelInitialTab] = useState('overview');
+  // 设置页动画状态
+  const [settingsAnim, setSettingsAnim] = useState<{
+    phase: 'idle' | 'closed' | 'opening' | 'closing';
+    x: number;
+    y: number;
+  }>({ phase: 'idle', x: 0, y: 0 });
+  const settingsFabRef = useRef<HTMLButtonElement>(null);
   const {
-    projects,
-    currentProject,
-    currentStageName,
-    versions,
     loadProjects,
     loadVersions,
+    currentProject,
     setCurrentProject,
-    setCurrentStageName,
   } = useProjectStore();
-  const { templates, loadTemplates, loadReviews } = useTemplateStore();
+  const { loadTemplates, loadReviews } = useTemplateStore();
   const { loadTasks } = useTaskStore();
-  const { loadSettings, workspaceCapacity, workspaceUsedBytes, userProfile, customStages } = useSettingsStore();
-  const { projectDocs, loadProjectDocs } = useProjectDocStore();
-  const {
-    token: { colorBgContainer, borderRadiusLG },
-  } = theme.useToken();
+  const { loadSettings } = useSettingsStore();
+  const { loadProjectDocs } = useProjectDocStore();
 
   useEffect(() => {
     loadProjects();
@@ -87,24 +79,16 @@ const App: React.FC = () => {
     loadProjectDocs();
   }, []);
 
-  // 全局滚动检测：滚动时添加 .scrolling 类，停止后移除
   useEffect(() => {
     let scrollTimer: NodeJS.Timeout;
     const showScrollbar = (el: HTMLElement) => {
       if (!el?.classList) return;
       el.classList.add('scrolling');
       clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(() => {
-        el.classList.remove('scrolling');
-      }, 1000);
+      scrollTimer = setTimeout(() => el.classList.remove('scrolling'), 1000);
     };
-
-    const handleScroll = (e: Event) => {
-      showScrollbar(e.target as HTMLElement);
-    };
-
+    const handleScroll = (e: Event) => showScrollbar(e.target as HTMLElement);
     const handleWheel = (e: WheelEvent) => {
-      // 找到最近的可滚动父元素
       let el = e.target as HTMLElement;
       while (el && el !== document.body) {
         if (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth) {
@@ -114,7 +98,6 @@ const App: React.FC = () => {
         el = el.parentElement!;
       }
     };
-
     document.addEventListener('scroll', handleScroll, true);
     document.addEventListener('wheel', handleWheel, { passive: true });
     return () => {
@@ -124,316 +107,225 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const menuItems = [
-    { key: 'overview', icon: <BarChartOutlined />, label: '总览' },
-    { key: 'projects', icon: <FolderOutlined />, label: '项目' },
-    { key: 'plan', icon: <CalendarOutlined />, label: '计划' },
-    { key: 'templates', icon: <FormOutlined />, label: '模板' },
-    { key: 'diff', icon: <DiffOutlined />, label: '日历' },
-    { key: 'progress', icon: <BarChartOutlined />, label: '团队' },
-    { key: 'tasks', icon: <RobotOutlined />, label: '报告' },
-    { key: 'review', icon: <FileSearchOutlined />, label: '审查' },
-    { key: 'ai-settings', icon: <SettingOutlined />, label: '设置' },
-  ];
-
-  const formatBytes = (bytes: number): string => {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+  const openProjectPanel = (project: Project, initialTab = 'overview') => {
+    setCurrentProject(project);
+    if (initialTab === 'files') {
+      // 双击项目 → 直接进入文件详情页
+      setGlobalPage('project-files');
+    } else {
+      setPanelInitialTab(initialTab);
+      setGlobalPage('overview');
+    }
   };
 
-  const usedGB = workspaceUsedBytes / (1024 * 1024 * 1024);
-  const storagePercent = workspaceCapacity > 0
-    ? Math.min(Math.round((usedGB / workspaceCapacity) * 100), 100)
-    : 0;
-
-  const allStages = useMemo(() => getAllStages(customStages), [customStages]);
-
-  const stageOptions = useMemo(() => {
-    const docIdsByStage = new Map<string, Set<string>>();
-    const stageNames = new Set(allStages.map(stage => stage.name));
-
-    const addDocToStage = (stageName: string, docId: string) => {
-      stageNames.add(stageName);
-      const ids = docIdsByStage.get(stageName) || new Set<string>();
-      ids.add(docId);
-      docIdsByStage.set(stageName, ids);
+  const openProjectDetail = (page: ProjectDetailPage) => {
+    const pageMap: Record<ProjectDetailPage, GlobalPage> = {
+      files: 'project-files',
+      plan: 'project-plan',
+      team: 'project-team',
+      templates: 'project-templates',
+      report: 'project-report',
+      review: 'project-review',
+      writing: 'project-writing',
     };
+    setGlobalPage(pageMap[page]);
+  };
 
-    if (currentProject) {
-      const docs = projectDocs.filter(doc => doc.projectId === currentProject.id);
-      const projectVersions = versions.filter(version => version.projectId === currentProject.id);
-      const segments = buildProjectStageSegments(currentProject, docs, templates, projectVersions, allStages);
-
-      segments.forEach(segment => {
-        segment.sourceDocIds.forEach(docId => addDocToStage(segment.stage, docId));
+  // 设置页：从按钮位置展开
+  const handleOpenSettings = useCallback(() => {
+    const btn = settingsFabRef.current;
+    if (!btn) { setGlobalPage('settings'); return; }
+    const rect = btn.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    // 先设为 closed 状态（circle 0%），下一帧再设为 open（circle 150%），触发 CSS transition
+    setSettingsAnim({ phase: 'closed', x: cx, y: cy });
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setSettingsAnim({ phase: 'opening', x: cx, y: cy });
       });
-
-      docs.forEach(doc => {
-        const template = templates.find(item => item.id === doc.templateId);
-        const version = doc.versionId ? projectVersions.find(item => item.id === doc.versionId) : undefined;
-        const stageName = detectTimelineStage(
-          allStages,
-          doc.name,
-          doc.sourceFilePath,
-          template?.name,
-          template?.category,
-          version?.fileName,
-        );
-        addDocToStage(stageName, doc.id);
-      });
-    }
-
-    const orderedNames = [
-      ...allStages.map(stage => stage.name).filter(name => stageNames.has(name)),
-      ...Array.from(stageNames).filter(name => !allStages.some(stage => stage.name === name)),
-    ];
-
-    return orderedNames.map(name => {
-      const docCount = docIdsByStage.get(name)?.size || 0;
-      return {
-        value: name,
-        label: docCount > 0 ? `${name} · ${docCount}文档` : name,
-        docCount,
-      };
     });
-  }, [allStages, currentProject, projectDocs, templates, versions]);
+  }, []);
 
-  useEffect(() => {
-    if (!currentProject) {
-      if (currentStageName) setCurrentStageName('');
-      return;
-    }
-    if (stageOptions.length === 0) {
-      if (currentStageName) setCurrentStageName('');
-      return;
-    }
-    if (currentStageName && stageOptions.some(option => option.value === currentStageName)) return;
-    const firstWithDocs = stageOptions.find(option => option.docCount > 0)?.value;
-    setCurrentStageName(firstWithDocs || stageOptions[0].value);
-  }, [currentProject, currentStageName, stageOptions, setCurrentStageName]);
+  // 从设置页返回：收缩回按钮位置
+  const handleCloseSettings = useCallback(() => {
+    const btn = settingsFabRef.current;
+    if (!btn) { setGlobalPage('overview'); setSettingsAnim({ phase: 'idle', x: 0, y: 0 }); return; }
+    const rect = btn.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    // 先设为 opening（circle 150%），下一帧设为 closed（circle 0%），触发收缩动画
+    setSettingsAnim({ phase: 'opening', x: cx, y: cy });
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setSettingsAnim({ phase: 'closed', x: cx, y: cy });
+        // 动画结束后清理
+        setTimeout(() => {
+          setGlobalPage('overview');
+          setSettingsAnim({ phase: 'idle', x: 0, y: 0 });
+        }, 380);
+      });
+    });
+  }, []);
 
   const renderContent = () => {
-    switch (selectedKey) {
-      case 'overview':
-        return <Overview />;
-      case 'projects':
-        return <ProjectList />;
-      case 'plan':
-        return <PlanManager />;
-      case 'templates':
-        return <TemplateManager />;
-      case 'diff':
-        return <DiffViewer />;
-      case 'progress':
-        return <ProgressBoard />;
-      case 'tasks':
-        return <TaskPlanner />;
-      case 'review':
-        return <DocumentReviewer />;
-      case 'ai-settings':
-        return <AISettings />;
-      default:
-        return <Overview />;
+    if (globalPage === 'calendar') return <DiffViewer onBack={() => setGlobalPage('overview')} />;
+    // 设置页由覆盖层动画渲染，不在主内容区渲染
+    if (globalPage === 'settings' && settingsAnim.phase === 'idle') return <AISettings />;
+    if (globalPage === 'project-files' && currentProject) {
+      return <ProjectFileExplorer project={currentProject} onBack={() => setGlobalPage('overview')} />;
     }
+    if (globalPage === 'project-plan') return <PlanManager onBack={() => setGlobalPage('overview')} />;
+    if (globalPage === 'project-team') return <ProgressBoard onBack={() => setGlobalPage('overview')} />;
+    if (globalPage === 'project-templates') return <TemplateManager onBack={() => setGlobalPage('overview')} />;
+    if (globalPage === 'project-report') return <TaskPlanner onBack={() => setGlobalPage('overview')} />;
+    if (globalPage === 'project-review') return <DocumentReviewer onBack={() => setGlobalPage('overview')} />;
+    if (globalPage === 'project-writing') return <DocumentWriter onBack={() => setGlobalPage('overview')} />;
+    return <Overview onEnterProject={openProjectPanel} panelInitialTab={panelInitialTab} onOpenProjectDetail={openProjectDetail} />;
   };
 
+  const pageTitleMap: Record<GlobalPage, string> = {
+    overview: 'ProjectHub',
+    calendar: '日历',
+    settings: '设置',
+    'project-files': '文件详情',
+    'project-plan': '计划详情',
+    'project-team': '团队协同',
+    'project-templates': '模板管理',
+    'project-report': '报告工作台',
+    'project-review': '审查工作台',
+    'project-writing': 'AI协同',
+  };
+  const title = pageTitleMap[globalPage];
+  const subtitle = globalPage === 'overview' ? '项目总览' : currentProject?.name || '全局工具';
+
   return (
-    <Layout className="app-shell" style={{ height: '100vh', overflow: 'hidden' }}>
-      <Sider className="app-sidebar" width={210} theme="light" style={{ borderRight: '1px solid rgba(226, 232, 240, 0.72)', height: '100vh', overflow: 'hidden' }}>
-        <div className="app-brand" style={{ padding: '18px 20px 20px', borderBottom: '1px solid rgba(226, 232, 240, 0.45)' }}>
-          <Space>
-            <div style={{
-              width: 32,
-              height: 32,
-              background: 'linear-gradient(135deg, #1677ff 0%, #5bb7ff 100%)',
-              borderRadius: 8,
+    <div className="app-shell app-shell-polished" style={{ height: '100vh', overflow: 'hidden', position: 'relative' }}>
+      <div
+        className="app-topbar"
+        style={{
+          height: 62,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 24px',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div
+            className="app-topbar-logo"
+            style={{
+              width: 38,
+              height: 38,
+              background: 'linear-gradient(135deg, #1677ff 0%, #24a3ff 100%)',
+              borderRadius: 10,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               color: '#fff',
               fontWeight: 'bold',
-              fontSize: 14,
-              boxShadow: '0 8px 18px rgba(22, 119, 255, 0.24)',
-            }}>
-              P
-            </div>
+              fontSize: 16,
+              boxShadow: '0 10px 22px rgba(22, 119, 255, 0.24)',
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            P
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Title level={5} style={{ margin: 0, color: '#0f172a' }}>
-              ProjectHub
+              {title}
             </Title>
-          </Space>
-        </div>
-        <Menu
-          className="app-nav"
-          mode="inline"
-          selectedKeys={[selectedKey]}
-          items={menuItems}
-          onClick={({ key }) => setSelectedKey(key)}
-          style={{ borderRight: 0, padding: '10px 12px' }}
-        />
-
-        {/* Storage info */}
-        <div style={{
-          position: 'absolute',
-          bottom: 88,
-          left: 16,
-          right: 16,
-          background: 'rgba(255, 255, 255, 0.72)',
-          border: '1px solid rgba(226, 232, 240, 0.86)',
-          borderRadius: 12,
-          padding: '14px',
-          boxShadow: '0 8px 24px rgba(15, 23, 42, 0.04)',
-        }}>
-          <Text style={{ color: '#999', fontSize: 11 }}>存储空间</Text>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-            <Text style={{ color: '#333', fontSize: 12 }}>{formatBytes(workspaceUsedBytes)} / {workspaceCapacity} GB</Text>
+            <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.4 }}>
+              {subtitle}
+            </Text>
           </div>
-          <Progress
-            percent={storagePercent}
-            size="small"
-            strokeColor={storagePercent > 90 ? '#ff4d4f' : '#1890ff'}
-            trailColor="#e8e8e8"
-            showInfo={false}
-            style={{ marginTop: 4 }}
-          />
         </div>
 
-        {/* User info */}
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 14,
-            left: 16,
-            right: 16,
-            padding: '12px',
-            border: '1px solid rgba(226, 232, 240, 0.78)',
-            borderRadius: 12,
-            background: 'rgba(255, 255, 255, 0.8)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            cursor: 'pointer',
-            boxShadow: '0 10px 26px rgba(15, 23, 42, 0.05)',
-          }}
-          onClick={() => setSelectedKey('ai-settings')}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-            {userProfile?.avatar ? (
-              <img
-                src={userProfile.avatar}
-                alt="avatar"
-                style={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover' }}
-              />
-            ) : (
-              <div style={{
-                width: 32,
-                height: 32,
-                borderRadius: '50%',
-                background: userProfile ? '#e6f7ff' : '#f5f5f5',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-              }}>
-                <UserOutlined style={{ color: userProfile ? '#1890ff' : '#999', fontSize: 14 }} />
-              </div>
-            )}
-            <div style={{ minWidth: 0 }}>
-              <Text style={{ color: '#333', fontSize: 12, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {userProfile?.nickname || '未登录'}
-              </Text>
-              <Text style={{ color: '#999', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
-                {userProfile?.email || '点击设置个人信息'}
-              </Text>
-            </div>
-          </div>
-          <RightOutlined style={{ color: '#ccc', fontSize: 10, flexShrink: 0 }} />
-        </div>
-      </Sider>
-      <Layout className="app-workspace" style={{ height: '100vh', overflow: 'hidden' }}>
-        {/* Top bar with notification bell */}
-        <div className="app-topbar" style={{
+        <Space size={8}>
+          <Button
+            icon={<FileTextOutlined />}
+            onClick={() => setGlobalPage('project-templates')}
+            type={globalPage === 'project-templates' ? 'primary' : 'default'}
+          >
+            模板
+          </Button>
+          <Button
+            icon={<CalendarOutlined />}
+            onClick={() => setGlobalPage('calendar')}
+            type={globalPage === 'calendar' ? 'primary' : 'default'}
+          >
+            日历
+          </Button>
+        </Space>
+      </div>
+
+      <main
+        className="app-content"
+        style={{
+          height: 'calc(100vh - 62px)',
+          overflow: 'hidden',
+          padding: 18,
+          background: 'transparent',
           display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 16,
-          padding: '8px 22px',
-          borderBottom: '1px solid rgba(226, 232, 240, 0.55)',
-          background: 'rgba(255, 255, 255, 0.58)',
-          flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
-            <Space size={10} style={{ minWidth: 0 }}>
-              <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>当前项目</Text>
-              <Select
-                showSearch
-                allowClear
-                placeholder="选择项目"
-                value={currentProject?.id}
-                optionFilterProp="label"
-                onChange={(projectId) => {
-                  const project = projects.find(p => p.id === projectId) || null;
-                  setCurrentProject(project);
-                }}
-                options={projects.map(project => ({
-                  value: project.id,
-                  label: project.name,
-                }))}
-                style={{ width: 260 }}
-                popupMatchSelectWidth={320}
-              />
-            </Space>
-            <Space size={10} style={{ minWidth: 0 }}>
-              <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>当前阶段</Text>
-              <Select
-                showSearch
-                placeholder={currentProject ? '选择阶段' : '先选择项目'}
-                value={currentStageName || undefined}
-                optionFilterProp="label"
-                disabled={!currentProject}
-                onChange={(stageName) => setCurrentStageName(stageName)}
-                options={stageOptions}
-                style={{ width: 220 }}
-                popupMatchSelectWidth={260}
-              />
-            </Space>
-            <Space size={8}>
-              <Button size="small" onClick={() => setSelectedKey('tasks')}>报告工作台</Button>
-              <Button size="small" onClick={() => setSelectedKey('review')}>审查</Button>
-            </Space>
+          flexDirection: 'column',
+        }}
+      >
+        <ErrorBoundary>
+          <div
+            className="page-transition"
+            style={{
+              flex: '1 1 auto',
+              minHeight: 0,
+              overflow: 'auto',
+            }}
+          >
+            {renderContent()}
           </div>
-          <div style={{
-            width: 30,
-            height: 30,
-            borderRadius: '50%',
-            background: 'rgba(255, 255, 255, 0.78)',
-            border: '1px solid rgba(226, 232, 240, 0.9)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-          }}>
-            <BellOutlined style={{ fontSize: 16, color: '#666' }} />
-          </div>
-        </div>
-        <Content
-          className="app-content"
+        </ErrorBoundary>
+      </main>
+
+      <Button
+        ref={settingsFabRef}
+        shape="circle"
+        icon={<SettingOutlined style={{ color: settingsAnim.phase !== 'idle' ? '#1677ff' : undefined }} />}
+        type="default"
+        onClick={settingsAnim.phase !== 'idle' ? handleCloseSettings : handleOpenSettings}
+        title="设置"
+        className={`app-settings-fab${settingsAnim.phase !== 'idle' ? ' app-settings-fab-active' : ''}`}
+        style={{
+          position: 'fixed',
+          left: 18,
+          bottom: 18,
+          width: 42,
+          height: 42,
+          zIndex: 200,
+          borderColor: settingsAnim.phase !== 'idle' ? '#1677ff' : undefined,
+          boxShadow: settingsAnim.phase !== 'idle' ? '0 0 0 3px rgba(22, 119, 255, 0.15)' : undefined,
+        }}
+      />
+
+      {/* 设置页圆形展开/收缩动画覆盖层 */}
+      {settingsAnim.phase !== 'idle' && (
+        <div
+          className="settings-overlay"
           style={{
-            margin: 0,
-            padding: '20px',
-            background: 'transparent',
-            borderRadius: borderRadiusLG,
-            flex: 1,
+            position: 'fixed',
+            inset: 0,
+            zIndex: 100,
+            background: '#fff',
+            clipPath: settingsAnim.phase === 'opening'
+              ? `circle(150% at ${settingsAnim.x}px ${settingsAnim.y}px)`
+              : `circle(0% at ${settingsAnim.x}px ${settingsAnim.y}px)`,
             overflow: 'auto',
           }}
         >
-          <ErrorBoundary>
-            {renderContent()}
-          </ErrorBoundary>
-        </Content>
-      </Layout>
-    </Layout>
+          <div style={{ padding: 18 }}>
+            <AISettings />
+          </div>
+        </div>
+      )}
+    </div>
   );
 };
 

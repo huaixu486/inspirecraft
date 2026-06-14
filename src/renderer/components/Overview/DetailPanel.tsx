@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, Collapse, message, Popconfirm, DatePicker } from 'antd';
+import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, Collapse, message, Popconfirm, DatePicker, Input } from 'antd';
+
+const { TextArea } = Input;
 import {
   CheckCircleOutlined, ClockCircleOutlined, CloseOutlined,
   FolderOutlined, FileOutlined, ExclamationCircleOutlined,
@@ -28,50 +30,23 @@ const AnimatedExpand: React.FC<{
   open: boolean;
   children: React.ReactNode;
   borderColor?: string;
-  onExpandEnd?: () => void;
-  onCollapseEnd?: () => void;
-}> = ({ open, children, borderColor = '#f0f0f0', onExpandEnd, onCollapseEnd }) => {
+}> = ({ open, children, borderColor = '#f0f0f0' }) => {
   const contentRef = useRef<HTMLDivElement>(null);
-  const [height, setHeight] = useState<number>(0);
-  const [animating, setAnimating] = useState(false);
-  const [showExpandedBorder, setShowExpandedBorder] = useState(false);
+  const [height, setHeight] = useState<number>(open ? 9999 : 0);
+  const firstRender = useRef(true);
 
   useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      setHeight(open ? (contentRef.current?.scrollHeight || 9999) : 0);
+      return;
+    }
     if (!contentRef.current) return;
-
     if (open) {
-      setShowExpandedBorder(true);
-      const scrollH = contentRef.current.scrollHeight;
-      setHeight(0);
-      requestAnimationFrame(() => {
-        setHeight(scrollH);
-        setAnimating(true);
-      });
-      const timer = setTimeout(() => {
-        setHeight(contentRef.current?.scrollHeight || 0);
-        setAnimating(false);
-        onExpandEnd?.();
-      }, 260);
-      return () => clearTimeout(timer);
-    } else {
-      // 折叠时保持蓝色边框，动画结束后再渐隐
       const scrollH = contentRef.current.scrollHeight;
       setHeight(scrollH);
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          setHeight(0);
-          setAnimating(true);
-        });
-      });
-      const timer = setTimeout(() => {
-        setAnimating(false);
-        // 动画结束后，再用0.3s渐隐蓝色边框
-        setTimeout(() => {
-          setShowExpandedBorder(false);
-          onCollapseEnd?.();
-        }, 300);
-      }, 260);
-      return () => clearTimeout(timer);
+    } else {
+      setHeight(0);
     }
   }, [open]);
 
@@ -79,16 +54,18 @@ const AnimatedExpand: React.FC<{
     <div style={{
       height,
       overflow: 'hidden',
-      transition: animating ? 'height 0.25s ease-in-out' : 'none',
+      transition: 'height 0.2s ease-in-out',
     }}>
-      <div ref={contentRef} style={{ borderTop: `1px solid ${showExpandedBorder ? borderColor : 'transparent'}`, transition: 'border-color 0.3s ease-in-out' }}>
+      <div ref={contentRef}>
         {children}
       </div>
     </div>
   );
 };
 
-const DetailPanel: React.FC = () => {
+export type ProjectDetailPage = 'files' | 'plan' | 'team' | 'templates' | 'report' | 'review' | 'writing';
+
+const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: ProjectDetailPage) => void }> = ({ initialTab = 'overview', onOpenDetail }) => {
   const { currentProject, setCurrentProject, versions } = useProjectStore();
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc, deleteProjectDoc } = useProjectDocStore();
@@ -100,11 +77,24 @@ const DetailPanel: React.FC = () => {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [selectedVersionId, setSelectedVersionId] = useState<string>('');
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analyzingDocId, setAnalyzingDocId] = useState<string | null>(null);
   const [expandedStage, setExpandedStage] = useState<string | null>(null);
   const [expandedTemplate, setExpandedTemplate] = useState<string | null>(null);
   // 延迟收起边框状态，让边框在动画结束后再渐隐
   const [stageBorderVisible, setStageBorderVisible] = useState<Record<string, boolean>>({});
+  const [activeTab, setActiveTab] = useState(initialTab);
+  // 报告Tab：已读报告 & 展开的阶段
+  const [readReportIds, setReadReportIds] = useState<Set<string>>(new Set());
+  const [expandedReportStage, setExpandedReportStage] = useState<string | null>(null);
+
+  // 团队Tab：AI协同
+  const [selectedWritingTemplateId, setSelectedWritingTemplateId] = useState<string>('');
+  const [selectedWritingDocIds, setSelectedWritingDocIds] = useState<string[]>([]);
+  const [writingContent, setWritingContent] = useState('');
+
+  useEffect(() => {
+    if (currentProject) setActiveTab(initialTab || 'overview');
+  }, [currentProject?.id, initialTab]);
 
   const isOverdue = (deadline?: string, completedAt?: string) => {
     if (!deadline || completedAt) return false;
@@ -126,16 +116,30 @@ const DetailPanel: React.FC = () => {
     return now.getFullYear() === d.getFullYear() && now.getMonth() === d.getMonth() && now.getDate() === d.getDate();
   };
 
-  if (!currentProject) {
-    return (
-      <div style={{ padding: 24, textAlign: 'center', color: '#999' }}>
-        请选择一个项目查看详情
-      </div>
-    );
-  }
+  if (!currentProject) return null;
 
   const projectVersions = versions.filter(v => v.projectId === currentProject.id);
   const projectDocsList = projectDocs.filter(d => d.projectId === currentProject.id);
+
+  // 报告Tab：已分析的文档按阶段分组
+  const analyzedDocsByStage = (() => {
+    const analyzed = projectDocsList.filter(doc => doc.analyzedAt && doc.sections?.length > 0);
+    const stageMap = new Map<string, ProjectDocument[]>();
+    for (const doc of analyzed) {
+      const stage = detectTimelineStage(allStages, doc.name, doc.sourceFilePath);
+      const arr = stageMap.get(stage) || [];
+      arr.push(doc);
+      stageMap.set(stage, arr);
+    }
+    return Array.from(stageMap.entries()).map(([stage, docs]) => ({
+      stage,
+      docs: docs.sort((a, b) => new Date(b.analyzedAt!).getTime() - new Date(a.analyzedAt!).getTime()),
+      hasUnread: docs.some(doc => !readReportIds.has(doc.id)),
+    }));
+  })();
+  const totalAnalyzed = projectDocsList.filter(doc => doc.analyzedAt).length;
+  const totalUnread = totalAnalyzed - analyzedDocsByStage.reduce((sum, g) => sum + g.docs.filter(d => readReportIds.has(d.id)).length, 0);
+
   const selectedDoc = projectDocsList.find(d => d.id === selectedDocId) || null;
   const planSegments = buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages);
 
@@ -214,6 +218,142 @@ const DetailPanel: React.FC = () => {
   };
 
   // 可选的模板列表（已有模板 + 未使用的新模板）
+  const parseSidePanelAiReport = (value: string, fallbackTitle: string) => {
+    const normalizeList = (input: unknown): string[] => {
+      if (Array.isArray(input)) return input.map(item => String(item || '').trim()).filter(Boolean);
+      if (typeof input === 'string') {
+        return input.split(/\n|；|;|，/).map(item => item.replace(/^[-\d.、\s]+/, '').trim()).filter(Boolean);
+      }
+      return [];
+    };
+
+    let payload = value.trim();
+    const codeBlock = payload.match(/\`\`\`(?:json|JSON)?\s*\n?([\s\S]*?)\n?\s*\`\`\`/);
+    if (codeBlock) payload = codeBlock[1].trim();
+
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      const match = payload.match(/\{[\s\S]*\}/);
+      if (match) {
+        try {
+          parsed = JSON.parse(match[0].replace(/,\s*([}\]])/g, '$1'));
+        } catch {}
+      }
+    }
+
+    if (!parsed) {
+      return {
+        reportTitle: fallbackTitle,
+        reportSummary: value.trim(),
+        writingFramework: [],
+        writingDirection: [],
+        materialPlan: [],
+        draftPlan: [],
+        humanTasks: [],
+        aiTasks: [],
+        workflowPlan: [],
+        rawText: value,
+      };
+    }
+
+    return {
+      reportTitle: String(parsed.reportTitle || parsed.title || fallbackTitle).trim(),
+      reportSummary: String(parsed.reportSummary || parsed.summary || '').trim(),
+      templateFit: normalizeList(parsed.templateFit),
+      writingStyleNotes: normalizeList(parsed.writingStyleNotes),
+      writingFramework: normalizeList(parsed.writingFramework),
+      writingDirection: normalizeList(parsed.writingDirection),
+      materialPlan: normalizeList(parsed.materialPlan),
+      draftPlan: normalizeList(parsed.draftPlan),
+      humanTasks: normalizeList(parsed.humanTasks),
+      aiTasks: normalizeList(parsed.aiTasks),
+      workflowPlan: Array.isArray(parsed.workflowPlan) ? parsed.workflowPlan : [],
+      rawText: value,
+    };
+  };
+
+  const flattenTemplateNodesForSidePanelPrompt = (nodes: any[] = [], depth = 0): string[] => nodes.flatMap(node => {
+    const title = String(node.title || '').trim();
+    const requirement = String(node.requirementText || node.description || '').trim();
+    const example = String(node.exampleText || '').trim();
+    const line = [
+      `${'  '.repeat(depth)}- ${title || '未命名章节'}`,
+      requirement ? `要求：${requirement.slice(0, 500)}` : '',
+      example ? `范文写法参考：${example.slice(0, 400)}` : '',
+    ].filter(Boolean).join('；');
+    return [line, ...flattenTemplateNodesForSidePanelPrompt(node.children || [], depth + 1)];
+  });
+
+  const generateAiReportForDoc = async (
+    doc: ProjectDocument,
+    content: string,
+    template: WritingTemplate,
+    sections: any[] = [],
+    overallProgress = 0,
+  ) => {
+    const stage = detectTimelineStage(allStages, doc.name, doc.sourceFilePath);
+    const version = getVersionForDoc(doc);
+    const sectionStatus = sections.map(section =>
+      `- ${section.title || '未命名章节'}：${section.status || 'unknown'}，字数 ${section.wordCount || 0}${section.aiComment ? `，说明：${section.aiComment}` : ''}`
+    ).join('\n');
+    const templateNodes = flattenTemplateNodesForSidePanelPrompt((template as any).nodes || []).join('\n');
+    const fallbackTitle = `${stage}阶段写作报告：${getDocDisplayName(doc)}`;
+    const prompt = `你是项目阶段文档的写作框架助手。请基于当前文档、关联模板、模板章节要求和范文写法，生成“报告详情页”可展示的 AI 写作框架报告。
+
+注意：
+1. 这不是审查结论，不要打分，不要泛泛说风险。
+2. 如果模板里有范文，只提取范文的结构、写法、段落组织和表达特征，不要把范文事实当作当前项目要求。
+3. 输出必须是 JSON 对象，不要 Markdown，不要代码块。
+4. 任务建议要贴合“AI先写初稿/人工补资料/AI再优化/人工确认/再审查”的工作流。
+5. 七章节结构属于全局模板约束，不要在每个章节建议里反复输出；只有章节缺失、顺序错误或结构错乱时，才在对应章节提一次。
+
+JSON 字段：
+{
+  "reportTitle": "标题",
+  "reportSummary": "300字以内概述当前文档写作状态和下一步方向",
+  "templateFit": ["模板要求转化成的写作约束"],
+  "writingStyleNotes": ["从范文或模板中提取的写法特征"],
+  "writingFramework": ["建议采用的章节框架或段落组织"],
+  "writingDirection": ["下一版写作方向，尽量对应章节"],
+  "materialPlan": ["需要人工补充或确认的资料、数据、附件、口径"],
+  "draftPlan": ["AI可以执行的初稿、扩写、润色、整理任务"],
+  "humanTasks": ["人工下一步任务"],
+  "aiTasks": ["AI下一步任务"],
+  "sectionAdvice": [{"title":"模板一级标题","problems":["该章节当前存在的问题"],"suggestions":["该章节下一步怎么写、补什么、AI如何改"]}],
+  "workflowPlan": [{"type":"ai|manual","title":"任务标题","description":"执行说明","priority":"high|medium|low","reason":"排序理由"}]
+}
+
+项目：${currentProject.name}
+阶段：${stage}
+文档：${doc.name}
+文件名：${version?.fileName || getDocDisplayName(doc)}
+创建时间：${dayjs(getDocActivityAt(doc)).format('YYYY-MM-DD HH:mm')}
+完成度：${overallProgress}%
+
+模板：${template.name}
+模板分类：${template.category || '无'}
+模板说明：${template.description || '无'}
+
+模板章节和写作要求：
+${templateNodes || '无'}
+
+当前章节分析：
+${sectionStatus || '暂无章节分析'}
+
+当前文档正文摘录：
+${content.slice(0, 9000)}`;
+
+    const response = await window.electronAPI.callAI({ prompt });
+    const aiReport = parseSidePanelAiReport(response, fallbackTitle);
+    await updateProjectDoc(doc.id, {
+      aiReport: JSON.stringify(aiReport),
+      analyzedAt: new Date().toISOString(),
+    });
+    return aiReport;
+  };
+
   const templateOptions = () => {
     const usedTemplateIds = new Set(projectDocsList.map(d => d.templateId));
     const options: { value: string; label: string; isNew: boolean }[] = [];
@@ -272,7 +412,7 @@ const DetailPanel: React.FC = () => {
 
   // 执行分析
   const runAnalysis = async (docId: string, content: string, template: WritingTemplate, useAI: boolean) => {
-    setIsAnalyzing(true);
+    setAnalyzingDocId(docId);
     try {
       const result = await window.electronAPI.analyzeProjectDoc({ content, template, useAI });
       if (result.success && result.sections) {
@@ -281,24 +421,123 @@ const DetailPanel: React.FC = () => {
           overallProgress: result.overallProgress ?? 0,
           analyzedAt: new Date().toISOString(),
         });
-        message.success(useAI ? 'AI 分析完成' : '基础分析完成');
+        message.success(useAI ? 'AI分析完成，正在生成报告...' : '基础分析完成');
+        return result;
       }
+      return null;
     } catch (error) {
       console.error('Analysis failed:', error);
       message.error('分析失败');
+      return null;
     } finally {
-      setIsAnalyzing(false);
+      setAnalyzingDocId(null);
     }
   };
 
   const handleAnalyze = async (doc: ProjectDocument, useAI: boolean) => {
-    const version = versions.find(v => v.id === doc.versionId);
-    const template = templates.find(t => t.id === doc.templateId);
-    if (!version || !template) {
-      message.error('找不到关联的文件或模板');
+    const version = doc.versionId ? versions.find(v => v.id === doc.versionId) : undefined;
+    const template = doc.templateId ? templates.find(t => t.id === doc.templateId) : undefined;
+
+    // 尝试从源文件实时解析内容
+    let content = version?.content || '';
+    if (!content && doc.sourceFilePath) {
+      try {
+        const parsed = await window.electronAPI.parseDocument(doc.sourceFilePath);
+        if (parsed.success && parsed.content?.trim()) {
+          content = parsed.content.trim();
+        }
+      } catch {}
+    }
+
+    if (!content) {
+      message.warning('该文档暂无文本内容，请先导入文件版本');
       return;
     }
-    await runAnalysis(doc.id, version.content, template, useAI);
+    if (!template) {
+      message.warning('该文档未关联模板，请先在关联文件时选择模板');
+      return;
+    }
+    const result = await runAnalysis(doc.id, content, template, useAI);
+    if (useAI && result?.success) {
+      setAnalyzingDocId(doc.id);
+      try {
+        await generateAiReportForDoc(
+          doc,
+          content,
+          template,
+          result.sections || doc.sections || [],
+          result.overallProgress ?? doc.overallProgress ?? 0,
+        );
+        message.success('AI报告已生成，双击报告即可查看详情');
+      } catch (error: any) {
+        console.error('AI report generation failed:', error);
+        message.error(`AI报告生成失败：${error.message || '未知错误'}`);
+      } finally {
+        setAnalyzingDocId(null);
+      }
+    }
+  };
+
+  // 快速导出 Word
+  const handleQuickExport = async () => {
+    const template = templates.find(t => t.id === selectedWritingTemplateId);
+    if (!template || !currentProject) return;
+    try {
+      const result = await window.electronAPI.generateFromContent({
+        template,
+        sectionContents: { 'main': writingContent },
+        folderPath: currentProject.folderPath,
+        fileName: `${currentProject.name}-${template.name}`,
+      });
+      if (result.success) {
+        message.success(`文档已导出`);
+        if (result.filePath) await window.electronAPI.openInExplorer(result.filePath);
+      } else {
+        message.error(result.error || '导出失败');
+      }
+    } catch (error: any) {
+      message.error(`导出失败：${error.message}`);
+    }
+  };
+
+  // 导入单个文档内容
+  const handleImportWritingDoc = async (docId: string) => {
+    const doc = projectDocsList.find(d => d.id === docId);
+    if (!doc) return '';
+    const version = doc.versionId ? versions.find(v => v.id === doc.versionId) : undefined;
+    let content = version?.content || '';
+    if (!content && doc.sourceFilePath) {
+      try {
+        const parsed = await window.electronAPI.parseDocument(doc.sourceFilePath);
+        if (parsed.success && parsed.content?.trim()) content = parsed.content.trim();
+      } catch {}
+    }
+    return content;
+  };
+
+  // 批量导入文档内容
+  const handleBatchImportDocs = async (docIds: string[]) => {
+    const contents: string[] = [];
+    for (const docId of docIds) {
+      const content = await handleImportWritingDoc(docId);
+      if (content) contents.push(content);
+    }
+    if (contents.length > 0) {
+      setWritingContent(prev => prev ? prev + '\n\n' + contents.join('\n\n') : contents.join('\n\n'));
+      message.success(`已导入 ${contents.length} 个文档内容`);
+    } else {
+      message.warning('所选文档暂无文本内容');
+    }
+  };
+
+  // 导入项目所有文档
+  const handleImportAllDocs = async () => {
+    const allDocIds = projectDocsList.map(d => d.id);
+    if (allDocIds.length === 0) {
+      message.warning('项目暂无关联文档');
+      return;
+    }
+    await handleBatchImportDocs(allDocIds);
   };
 
   const handleStageDeadline = async (segment: TimelineStageSegment, deadline?: string) => {
@@ -317,6 +556,23 @@ const DetailPanel: React.FC = () => {
     await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt: undefined })));
     message.success('已取消完成状态');
   };
+
+
+  const openDetail = (page: ProjectDetailPage) => {
+    onOpenDetail?.(page);
+  };
+
+  const summaryCardStyle: React.CSSProperties = {
+    border: '1px solid rgba(226, 232, 240, 0.9)',
+    borderRadius: 10,
+    background: 'rgba(255, 255, 255, 0.92)',
+    padding: '12px 14px',
+    boxShadow: '0 8px 18px rgba(15, 23, 42, 0.035)',
+  };
+
+  const recentVersions = [...projectVersions]
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 5);
 
   // 状态图标
   const statusIcon = (status: string) => {
@@ -477,11 +733,36 @@ const DetailPanel: React.FC = () => {
       label: '文件',
       children: (
         <div style={{ height: '100%' }}>
-          <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          {/* 文件版本概览 */}
+          <div style={{ ...summaryCardStyle, marginBottom: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+              <div><Text type="secondary" style={{ fontSize: 11 }}>文件版本</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{projectVersions.length}</div></div>
+              <div><Text type="secondary" style={{ fontSize: 11 }}>关联文档</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{projectDocsList.length}</div></div>
+              <div><Text type="secondary" style={{ fontSize: 11 }}>可用模板</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{templates.length}</div></div>
+            </div>
+            {recentVersions.length > 0 && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #f0f0f0' }}>
+                <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 6 }}>最近导入</Text>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {recentVersions.slice(0, 3).map(version => (
+                    <div key={version.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                      <Text style={{ fontSize: 11, minWidth: 0, flex: 1 }} ellipsis={{ tooltip: version.fileName }}>{version.fileName}</Text>
+                      <Tag style={{ margin: 0, fontSize: 9 }}>{version.fileType.toUpperCase()}</Tag>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
             <Text strong style={{ fontSize: 13 }}>关联文档 ({projectDocsList.length})</Text>
-            <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
-              关联文件
-            </Button>
+            <Space size={6}>
+              <Button size="small" onClick={() => openDetail('files')}>详情</Button>
+              <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
+                新增文件
+              </Button>
+            </Space>
           </div>
           {projectDocsList.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -568,8 +849,8 @@ const DetailPanel: React.FC = () => {
                                   {getDocDisplayName(doc)}
                                 </Text>
                                 <Space size={2} style={{ flexShrink: 0 }}>
-                                  <Button type="text" size="small" icon={<ReloadOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(doc, false)} style={{ padding: '0 3px' }} />
-                                  <Button type="text" size="small" icon={<ExperimentOutlined />} loading={isAnalyzing} onClick={() => handleAnalyze(doc, true)} style={{ padding: '0 3px' }} />
+                                  <Button type="text" size="small" icon={<ReloadOutlined />} loading={analyzingDocId === doc.id} onClick={() => handleAnalyze(doc, false)} style={{ padding: '0 3px' }} />
+                                  <Button type="text" size="small" icon={<ExperimentOutlined />} loading={analyzingDocId === doc.id} onClick={() => handleAnalyze(doc, true)} style={{ padding: '0 3px' }} />
                                   <Popconfirm title="确定删除？" onConfirm={() => deleteProjectDoc(doc.id)}>
                                     <Button type="text" size="small" danger icon={<DeleteOutlined />} style={{ padding: '0 3px' }} />
                                   </Popconfirm>
@@ -644,8 +925,9 @@ const DetailPanel: React.FC = () => {
       label: '计划',
       children: (
         <div>
-          <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
             <Text strong style={{ fontSize: 13 }}>阶段计划 ({planSegments.length})</Text>
+            <Button size="small" onClick={() => openDetail('plan')}>详情</Button>
           </div>
 
           {planSegments.length > 0 ? (
@@ -717,7 +999,7 @@ const DetailPanel: React.FC = () => {
           ) : (
             <Empty description="暂无可计划的阶段" image={Empty.PRESENTED_IMAGE_SIMPLE}>
               <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
-                关联文件
+                新增文件
               </Button>
             </Empty>
           )}
@@ -729,8 +1011,9 @@ const DetailPanel: React.FC = () => {
       label: '进度',
       children: (
         <div>
-          <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Text strong style={{ fontSize: 13 }}>阶段进度</Text>
+          <Button size="small" onClick={() => openDetail('team')}>详情</Button>
           </div>
           {planSegments.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -849,7 +1132,7 @@ const DetailPanel: React.FC = () => {
                 <Text type="secondary" style={{ fontSize: 13 }}>暂无阶段数据</Text>
               </div>
               <Button type="link" size="small" onClick={() => setAddModalOpen(true)} style={{ marginTop: 8 }}>
-                关联文件
+                新增文件
               </Button>
             </div>
           )}
@@ -858,17 +1141,199 @@ const DetailPanel: React.FC = () => {
     },
     {
       key: 'members',
-      label: '成员',
+      label: '团队',
       children: (
-        <Empty description="团队成员管理功能开发中" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Text strong style={{ fontSize: 13 }}>团队协同</Text>
+            <Button size="small" type="primary" onClick={() => openDetail('team')}>详情</Button>
+          </div>
+          <div style={summaryCardStyle}>
+            <Text type="secondary" style={{ fontSize: 12 }}>阶段、审查和任务在这里汇总，方便判断下一步该谁推进什么。</Text>
+          </div>
+          <Text strong style={{ fontSize: 13 }}>AI协同</Text>
+          <div style={{ ...summaryCardStyle, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <Select
+              placeholder="选择模板"
+              size="small"
+              style={{ width: '100%' }}
+              value={selectedWritingTemplateId || undefined}
+              onChange={setSelectedWritingTemplateId}
+              options={templates.map(t => ({ value: t.id, label: t.name }))}
+            />
+            {selectedWritingTemplateId && (
+              <>
+                <Select
+                  mode="multiple"
+                  placeholder="导入文稿参考（可多选）"
+                  size="small"
+                  style={{ width: '100%' }}
+                  value={selectedWritingDocIds}
+                  onChange={setSelectedWritingDocIds}
+                  options={projectDocsList.map(d => ({ value: d.id, label: d.name }))}
+                  maxTagCount={2}
+                  maxTagTextLength={12}
+                />
+                <Space size={4}>
+                  <Button size="small" onClick={() => handleBatchImportDocs(selectedWritingDocIds)} disabled={selectedWritingDocIds.length === 0}>
+                    导入选中文档
+                  </Button>
+                  <Button size="small" onClick={handleImportAllDocs} disabled={projectDocsList.length === 0}>
+                    导入全部文档
+                  </Button>
+                </Space>
+                <TextArea
+                  value={writingContent}
+                  onChange={(e) => setWritingContent(e.target.value)}
+                  placeholder="在此编写文档内容..."
+                  autoSize={{ minRows: 3, maxRows: 8 }}
+                  style={{ fontSize: 12 }}
+                />
+                <Button type="primary" size="small" block onClick={handleQuickExport} disabled={!writingContent.trim()}>
+                  导出 Word
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: 'report',
+      label: '报告',
+      children: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {/* 统计概览 */}
+          <div style={summaryCardStyle}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+              <div><Text type="secondary" style={{ fontSize: 11 }}>已分析文档</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{totalAnalyzed}</div></div>
+              <div><Text type="secondary" style={{ fontSize: 11 }}>分析阶段</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{analyzedDocsByStage.length}</div></div>
+              <div>
+                <Text type="secondary" style={{ fontSize: 11 }}>未读报告</Text>
+                <div style={{ fontSize: 20, fontWeight: 700, color: totalUnread > 0 ? '#ff4d4f' : undefined }}>{totalUnread}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* 按阶段分组的报告列表 */}
+          {analyzedDocsByStage.length > 0 ? analyzedDocsByStage.map(group => {
+            const color = stageMeta[group.stage]?.color || '#8c8c8c';
+            const isExpanded = expandedReportStage === group.stage;
+            return (
+              <div key={group.stage} style={{
+                border: '1px solid #edf0f5',
+                borderLeft: `3px solid ${isExpanded ? color : '#edf0f5'}`,
+                borderRadius: 8,
+                background: '#fff',
+                overflow: 'hidden',
+                transition: 'border-color 0.2s ease',
+              }}>
+                {/* 阶段标题行 */}
+                <div
+                  onClick={() => setExpandedReportStage(isExpanded ? null : group.stage)}
+                  style={{
+                    padding: '8px 10px',
+                    background: isExpanded ? '#fbfdff' : '#fff',
+                    cursor: 'pointer',
+                    borderBottom: isExpanded ? '1px solid #eef4ff' : '1px solid transparent',
+                    transition: 'background 0.2s ease',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Space size={6}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block' }} />
+                      <Text strong style={{ fontSize: 12 }}>{stageMeta[group.stage]?.label || group.stage}</Text>
+                      <Tag style={{ margin: 0, fontSize: 10 }}>{group.docs.length} 份</Tag>
+                      {group.hasUnread && <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#ff4d4f', display: 'inline-block' }} />}
+                    </Space>
+                    <DownOutlined style={{ fontSize: 10, color: '#999', transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+                  </div>
+                </div>
+                {/* 展开的报告列表 */}
+                <AnimatedExpand open={isExpanded} borderColor="transparent">
+                  <div style={{ padding: '6px 10px', background: '#fff' }}>
+                    {group.docs.map(doc => {
+                      const isRead = readReportIds.has(doc.id);
+                      return (
+                        <div
+                          key={doc.id}
+                          onClick={() => {
+                            if (!isRead) setReadReportIds(prev => new Set(prev).add(doc.id));
+                          }}
+                          onDoubleClick={() => {
+                            useProjectStore.getState().setPendingReportDocId(doc.id);
+                            useProjectStore.getState().setPendingReportDocOnly(true);
+                            openDetail('report');
+                          }}
+                          style={{
+                            padding: '6px 8px',
+                            borderRadius: 6,
+                            marginBottom: 4,
+                            background: isRead ? '#fafafa' : '#f5faff',
+                            border: `1px solid ${isRead ? 'transparent' : '#d6eaff'}`,
+                            cursor: 'pointer',
+                            transition: 'background 0.15s ease, border-color 0.15s ease',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            {!isRead && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#ff4d4f', flexShrink: 0 }} />}
+                            <Text style={{ display: 'block', flex: 1, minWidth: 0, fontSize: 11, lineHeight: '20px' }} ellipsis={{ tooltip: doc.name }}>
+                              {doc.name}
+                            </Text>
+                            <Tag color={doc.overallProgress >= 80 ? 'green' : doc.overallProgress > 0 ? 'orange' : 'default'} style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }}>
+                              {doc.overallProgress}%
+                            </Tag>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3, paddingLeft: isRead ? 0 : 12 }}>
+                            <Text type="secondary" style={{ fontSize: 10, flex: 1 }}>
+                              章节 {doc.sections.filter(s => s.status === 'completed').length}/{doc.sections.length} 完成
+                            </Text>
+                            <Text type="secondary" style={{ fontSize: 10 }}>
+                              {dayjs(doc.analyzedAt).format('MM-DD HH:mm')}
+                            </Text>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </AnimatedExpand>
+              </div>
+            );
+          }) : (
+            <div style={summaryCardStyle}>
+              <Text type="secondary" style={{ fontSize: 12 }}>暂无分析报告，在「文件」Tab 中点击分析按钮生成。</Text>
+            </div>
+          )}
+
+          <Button size="small" block onClick={() => {
+            useProjectStore.getState().setPendingReportDocId(null);
+            useProjectStore.getState().setPendingReportDocOnly(false);
+            openDetail('report');
+          }}>进入报告工作台</Button>
+        </div>
+      ),
+    },
+    {
+      key: 'review',
+      label: '审查',
+      children: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Text strong style={{ fontSize: 13 }}>审查</Text>
+            <Button size="small" type="primary" onClick={() => openDetail('review')}>详情</Button>
+          </div>
+          <div style={summaryCardStyle}>
+            <Text type="secondary" style={{ fontSize: 12 }}>进入审查工作台后查看最新审查结果、AI建议和生成任务。</Text>
+          </div>
+        </div>
       ),
     },
   ];
 
   return (
-    <div className="detail-panel" style={{ padding: '18px 20px', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div className="detail-panel detail-panel-polished" style={{ padding: '16px 18px', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+      <div className="detail-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{
             width: 40, height: 40, background: '#e6f7ff', borderRadius: 10,
@@ -884,10 +1349,18 @@ const DetailPanel: React.FC = () => {
             </div>
           </div>
         </div>
-        <Button type="text" icon={<CloseOutlined />} onClick={() => setCurrentProject(null)} size="small" />
+        <Button
+          type="text"
+          icon={<CloseOutlined />}
+          onClick={() => setCurrentProject(null)}
+          size="small"
+          style={{ transition: 'transform 0.15s ease, background 0.15s ease' }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = 'rotate(90deg)'; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'rotate(0deg)'; }}
+        />
       </div>
 
-      <Tabs className="detail-panel-tabs" items={tabItems} size="small" style={{ flex: 1, overflow: 'hidden' }} />
+      <Tabs className="detail-panel-tabs detail-panel-tabs-polished" activeKey={activeTab} onChange={setActiveTab} items={tabItems} size="small" style={{ flex: 1, overflow: 'hidden' }} animated={false} />
     </div>
   );
 };

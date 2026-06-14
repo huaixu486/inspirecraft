@@ -1,12 +1,16 @@
-import React, { useEffect, useMemo } from 'react';
-import { Card, Progress, List, Tag, Typography, Empty, Space, Statistic, Row, Col, Divider } from 'antd';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Button, Card, Progress, List, Tag, Typography, Empty, Space, Statistic, Row, Col, Divider, Select, Input, message } from 'antd';
 import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   ExclamationCircleOutlined,
   FileTextOutlined,
+  LeftOutlined,
   TeamOutlined,
+  EditOutlined,
 } from '@ant-design/icons';
+
+const { TextArea } = Input;
 import dayjs from 'dayjs';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
@@ -17,12 +21,77 @@ import { buildProjectStageSegments, getAllStages, getProjectProgress, getStageMe
 
 const { Text, Title } = Typography;
 
-const ProgressBoard: React.FC = () => {
+interface ProgressBoardProps {
+  onBack?: () => void;
+}
+
+const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
   const { currentProject, versions } = useProjectStore();
   const { projectDocs, loadProjectDocs } = useProjectDocStore();
   const { customStages } = useSettingsStore();
   const { tasks, loadTasks } = useTaskStore();
   const { templates, reviews, loadTemplates, loadReviews } = useTemplateStore();
+  const [selectedWritingTemplateId, setSelectedWritingTemplateId] = useState<string>('');
+  const [selectedWritingDocIds, setSelectedWritingDocIds] = useState<string[]>([]);
+  const [writingContent, setWritingContent] = useState('');
+
+  const handleQuickExport = async () => {
+    const template = templates.find(t => t.id === selectedWritingTemplateId);
+    if (!template || !currentProject) return;
+    try {
+      const result = await window.electronAPI.generateFromContent({
+        template,
+        sectionContents: { 'main': writingContent },
+        folderPath: currentProject.folderPath,
+        fileName: `${currentProject.name}-${template.name}`,
+      });
+      if (result.success) {
+        message.success('文档已导出');
+        if (result.filePath) await window.electronAPI.openInExplorer(result.filePath);
+      } else {
+        message.error(result.error || '导出失败');
+      }
+    } catch (error: any) {
+      message.error(`导出失败：${error.message}`);
+    }
+  };
+
+  const handleImportWritingDoc = async (docId: string): Promise<string> => {
+    const doc = projectDocsList.find(d => d.id === docId);
+    if (!doc) return '';
+    const version = doc.versionId ? projectVersions.find(v => v.id === doc.versionId) : undefined;
+    let content = version?.content || '';
+    if (!content && doc.sourceFilePath) {
+      try {
+        const parsed = await window.electronAPI.parseDocument(doc.sourceFilePath);
+        if (parsed.success && parsed.content?.trim()) content = parsed.content.trim();
+      } catch {}
+    }
+    return content;
+  };
+
+  const handleBatchImportDocs = async (docIds: string[]) => {
+    const contents: string[] = [];
+    for (const docId of docIds) {
+      const content = await handleImportWritingDoc(docId);
+      if (content) contents.push(content);
+    }
+    if (contents.length > 0) {
+      setWritingContent(prev => prev ? prev + '\n\n' + contents.join('\n\n') : contents.join('\n\n'));
+      message.success(`已导入 ${contents.length} 个文档内容`);
+    } else {
+      message.warning('所选文档暂无文本内容');
+    }
+  };
+
+  const handleImportAllDocs = async () => {
+    const allDocIds = projectDocsList.map(d => d.id);
+    if (allDocIds.length === 0) {
+      message.warning('项目暂无关联文档');
+      return;
+    }
+    await handleBatchImportDocs(allDocIds);
+  };
 
   useEffect(() => {
     loadProjectDocs();
@@ -101,22 +170,66 @@ const ProgressBoard: React.FC = () => {
   return (
     <div>
       <div style={{ marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0 }}>{currentProject.name} - 团队协同</Title>
-        <Text type="secondary">阶段、审查和任务会在这里汇总，方便判断下一步该谁推进什么。</Text>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+          <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
+          <Title level={4} style={{ margin: 0 }}>{currentProject.name} - 团队协同</Title>
+        </div>
+        <Text type="secondary" style={{ fontSize: 13, lineHeight: 1.5 }}>阶段、审查和任务会在这里汇总，方便判断下一步该谁推进什么。</Text>
       </div>
 
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        <Card>
-          <Row gutter={16}>
-            <Col span={6}><Statistic title="阶段进度" value={projectProgress} suffix="%" /></Col>
-            <Col span={6}><Statistic title="待处理任务" value={openTasks.length} /></Col>
-            <Col span={6}><Statistic title="高优先级" value={highPriorityTasks.length} valueStyle={{ color: highPriorityTasks.length ? '#ff4d4f' : undefined }} /></Col>
-            <Col span={6}><Statistic title="最近审查" value={latestReview ? latestReview.score : 0} suffix={latestReview ? '分' : ''} /></Col>
-          </Row>
-          <Progress percent={projectProgress} style={{ marginTop: 12, marginBottom: 0 }} />
-        </Card>
+          <Card>
+            <Row gutter={16}>
+              <Col span={6}><Statistic title="阶段进度" value={projectProgress} suffix="%" /></Col>
+              <Col span={6}><Statistic title="待处理任务" value={openTasks.length} /></Col>
+              <Col span={6}><Statistic title="高优先级" value={highPriorityTasks.length} valueStyle={{ color: highPriorityTasks.length ? '#ff4d4f' : undefined }} /></Col>
+              <Col span={6}><Statistic title="最近审查" value={latestReview ? latestReview.score : 0} suffix={latestReview ? '分' : ''} /></Col>
+            </Row>
+            <Progress percent={projectProgress} style={{ marginTop: 12, marginBottom: 0 }} />
+          </Card>
 
-        <Row gutter={16}>
+          {/* AI协同 */}
+          <Card title="AI协同" size="small">
+            <Space direction="vertical" size={10} style={{ width: '100%' }}>
+              <Select
+                placeholder="选择模板"
+                style={{ width: '100%' }}
+                value={selectedWritingTemplateId || undefined}
+                onChange={setSelectedWritingTemplateId}
+                options={templates.map(t => ({ value: t.id, label: t.name }))}
+              />
+              <Select
+                mode="multiple"
+                placeholder="导入文稿参考（可多选）"
+                style={{ width: '100%' }}
+                value={selectedWritingDocIds}
+                onChange={setSelectedWritingDocIds}
+                options={projectDocsList.map(d => ({ value: d.id, label: d.name }))}
+                maxTagCount={2}
+                maxTagTextLength={12}
+              />
+              <Space size={4}>
+                <Button size="small" onClick={() => handleBatchImportDocs(selectedWritingDocIds)} disabled={selectedWritingDocIds.length === 0}>
+                  导入选中
+                </Button>
+                <Button size="small" onClick={handleImportAllDocs} disabled={projectDocsList.length === 0}>
+                  导入全部
+                </Button>
+              </Space>
+              <TextArea
+                value={writingContent}
+                onChange={(e) => setWritingContent(e.target.value)}
+                placeholder="在此编写文档内容..."
+                autoSize={{ minRows: 4, maxRows: 12 }}
+                style={{ fontSize: 13 }}
+              />
+              <Button type="primary" icon={<FileTextOutlined />} onClick={handleQuickExport} disabled={!writingContent.trim() || !selectedWritingTemplateId}>
+                导出 Word
+              </Button>
+            </Space>
+          </Card>
+
+          <Row gutter={16}>
           <Col span={14}>
             <Card title="阶段推进">
               {stageRows.length === 0 ? (

@@ -265,7 +265,7 @@ const GanttChart: React.FC = () => {
   const needsScroll = totalContentHeight > visibleHeight;
 
   return (
-    <Card className="dashboard-card gantt-card" title="整体计划时间线" bordered={false} style={{}}>
+    <Card className="dashboard-card gantt-card animate-slide-up stagger-3" title="整体计划时间线" bordered={false} style={{}}>
       <div style={{ overflow: 'hidden' }}>
         <div style={{ display: 'grid', gridTemplateColumns: `${PROJECT_COL + STAGE_COL}px minmax(0, 1fr)`, height: 30 }}>
           <div />
@@ -338,7 +338,7 @@ const GanttChart: React.FC = () => {
               />
             ))}
             {todayPct >= 0 && todayPct <= 100 && (
-              <div style={{ position: 'absolute', left: `${todayPct}%`, top: 0, bottom: 0, width: 1.5, background: '#1677ff55', zIndex: 3 }} />
+              <div className="gantt-now-marker" style={{ position: 'absolute', left: `${todayPct}%`, top: 0, bottom: 0, width: 1.5, background: '#1677ff55', zIndex: 3 }} />
             )}
           </div>
 
@@ -480,6 +480,7 @@ const GanttChart: React.FC = () => {
                           title={`${segment.label}：${fmtDate(start)} → ${isDone ? fmtDate(actualEnd) + '（已完成）' : isOverdue ? fmtDate(now) + '（逾期）' : fmtDate(actualEnd) + '（进行中）'}${hasPlan ? ` | 计划截止 ${fmtDate(planEnd)}` : ''}`}
                         >
                           <div
+                            className="gantt-bar"
                             style={{
                               position: 'absolute',
                               ...barStyle(start, barEnd, view.start, view.span),
@@ -489,6 +490,7 @@ const GanttChart: React.FC = () => {
                               border: `1.5px dashed ${color}`,
                               overflow: 'visible',
                               zIndex: 1,
+                              animationDelay: `${segmentIndex * 60}ms`,
                             }}
                           >
                             {/* 实际进度填充 */}

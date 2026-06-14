@@ -83,7 +83,7 @@ async function fetchHolidayData(year: number): Promise<{ holidays: Set<string>; 
   }
 }
 
-const DiffViewer: React.FC = () => {
+const DiffViewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -231,6 +231,7 @@ const DiffViewer: React.FC = () => {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <Space>
+            {onBack && <Button type="text" icon={<LeftOutlined />} onClick={onBack} />}
             <Title level={4} style={{ margin: 0 }}>工作日历</Title>
             {holidayLoading && <Spin size="small" />}
           </Space>

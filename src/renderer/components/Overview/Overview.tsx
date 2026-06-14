@@ -1,56 +1,65 @@
-﻿import React from 'react';
+import React from 'react';
 import { Typography } from 'antd';
 import StatsCards from './StatsCards';
 import GanttChart from './GanttChart';
 import ProjectTable from './ProjectTable';
 import DetailPanel from './DetailPanel';
+import { Project } from '../../../shared/types';
+import type { ProjectDetailPage } from './DetailPanel';
 import { useProjectStore } from '../../stores/projectStore';
 
 const { Text } = Typography;
 
-const Overview: React.FC = () => {
-  const { currentProject } = useProjectStore();
+interface Props {
+  onEnterProject: (project: Project, initialTab?: string) => void;
+  panelInitialTab?: string;
+  onOpenProjectDetail?: (page: ProjectDetailPage) => void;
+}
+
+const Overview: React.FC<Props> = ({ onEnterProject, panelInitialTab, onOpenProjectDetail }) => {
+  const currentProject = useProjectStore((state) => state.currentProject);
 
   return (
-    <div className="overview-shell" style={{ display: 'flex', height: '100%' }}>
-      {/* Left main content */}
-      <div className="overview-main" style={{ flex: 1, overflowX: 'hidden', overflowY: 'auto' }}>
-        {/* Top title bar */}
-        <div className="overview-header" style={{ marginBottom: 22 }}>
+    <div className="overview-shell overview-shell-polished" style={{ height: '100%', position: 'relative', display: 'flex', overflow: 'hidden' }}>
+      <div
+        className="overview-main"
+        style={{
+          height: '100%',
+          overflowX: 'hidden',
+          overflowY: 'auto',
+          flex: '1 1 auto',
+          minWidth: 0,
+          transition: 'width 0.2s ease, flex-basis 0.2s ease',
+          paddingRight: currentProject ? 14 : 0,
+        }}
+      >
+        <div className="overview-header overview-header-polished animate-slide-up" style={{ marginBottom: 18 }}>
           <div>
             <div style={{ fontSize: 22, fontWeight: 700, color: '#0f172a', letterSpacing: 0 }}>项目总览</div>
-            <Text type="secondary" style={{ fontSize: 13 }}>掌控全局，推进每个项目的成功</Text>
+            <Text type="secondary" style={{ fontSize: 13 }}>双击项目进入文件详情，单击项目打开项目侧边窗</Text>
           </div>
         </div>
-
-        {/* Stats cards */}
         <StatsCards />
-
-        {/* Gantt chart timeline */}
         <div style={{ marginTop: 18 }}>
           <GanttChart />
         </div>
-
-        {/* Project table */}
         <div style={{ marginTop: 18 }}>
-          <ProjectTable />
+          <ProjectTable onEnterProject={onEnterProject} />
         </div>
       </div>
-
-      {/* Right detail panel */}
-      <div className="overview-detail-rail" style={{
-        width: currentProject ? 360 : 0,
-        borderLeft: 'none',
-        overflow: 'hidden',
-        background: 'transparent',
-        transition: 'width 0.2s',
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-      }}>
-        <DetailPanel />
-      </div>
-
+      {currentProject && (
+        <aside
+          className="overview-detail-rail animate-slide-in-right"
+          style={{
+            width: 420,
+            flex: '0 0 420px',
+            height: '100%',
+            overflow: 'hidden',
+          }}
+        >
+          <DetailPanel initialTab={panelInitialTab} onOpenDetail={onOpenProjectDetail} />
+        </aside>
+      )}
     </div>
   );
 };

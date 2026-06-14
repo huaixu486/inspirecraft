@@ -2,6 +2,7 @@ interface ElectronAPI {
   // 文件操作
   openFolder: () => Promise<string | null>;
   openFile: (filters?: any[]) => Promise<string | null>;
+  openFiles: (filters?: any[]) => Promise<string[] | null>;
   openInExplorer: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
   openFileWithApp: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     startDrag: (filePath: string) => { success: boolean; error?: string };
@@ -15,7 +16,7 @@ interface ElectronAPI {
   parseWordDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; error?: string }>;
   parseDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; convertedFilePath?: string; error?: string }>;
   parseDocumentSilent?: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; convertedFilePath?: string; error?: string }>;
-  extractTemplateFormatRules?: (filePath: string) => Promise<{ success: boolean; formatRules?: any; evidence?: string[]; sampleCount?: number; error?: string }>;
+  extractTemplateFormatRules?: (filePath: string) => Promise<{ success: boolean; formatRules?: any; paragraphs?: any[]; evidence?: string[]; sampleCount?: number; paragraphCount?: number; error?: string }>;
   parsePdfDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; error?: string }>;
 
   // 项目操作
@@ -33,6 +34,7 @@ interface ElectronAPI {
   loadTemplates: () => Promise<any[]>;
   deleteTemplate: (templateId: string) => Promise<void>;
   storeTemplateFile: (params: { templateId: string; sourcePath: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+  analyzeExamples: (params: { exampleContents: string[]; templateNodes: Array<{ id: string; title: string; level: number }>; templateName: string; existingAnalysis?: string }) => Promise<{ success: boolean; analysis?: string; rawAnalysis?: any; error?: string }>;
 
   // 审查操作
   executeReview: (params: any) => Promise<{ success: boolean; result?: any; error?: string }>;
@@ -82,8 +84,11 @@ interface ElectronAPI {
   // ZIP 导入导出
   openZipFile: () => Promise<string | null>;
   importFromZip: (params: { zipPath: string; workspacePath: string }) => Promise<{ success: boolean; project?: any; error?: string }>;
+  listZipFiles: (zipPath: string) => Promise<{ success: boolean; files?: { name: string; path: string; size: number; isDirectory: boolean }[]; error?: string }>;
+  extractZipFiles: (params: { zipPath: string; targetPath: string; filePaths: string[] }) => Promise<{ success: boolean; files?: string[]; error?: string }>;
   saveZipFile: (projectName: string) => Promise<string | null>;
   exportZip: (params: { project: any; savePath: string; projectDocs: any[] }) => Promise<{ success: boolean; error?: string }>;
+  generateFromContent: (params: { template: any; sectionContents: Record<string, string>; folderPath: string; fileName: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
 }
 
 interface Window {

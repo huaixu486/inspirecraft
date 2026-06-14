@@ -124,6 +124,38 @@ export interface TemplateFormatRules {
   tableHeader?: TemplateStyleRule;
 }
 
+export type TemplateFormatRuleKey = keyof TemplateFormatRules;
+
+export interface ExtractedParagraphFormat {
+  index: number;
+  key: TemplateFormatRuleKey;
+  text: string;
+  styleId?: string;
+  styleName?: string;
+  isTableCell?: boolean;
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: 'normal' | 'bold';
+  fontStyle?: 'normal' | 'italic';
+  alignment?: 'left' | 'center' | 'right' | 'justify';
+  lineHeight?: number;
+  letterSpacing?: number;
+  color?: string;
+  indentFirstLine?: number;
+  spaceBefore?: number;
+  spaceAfter?: number;
+}
+
+export interface TemplateFormatExtractionResult {
+  success: boolean;
+  formatRules?: TemplateFormatRules;
+  paragraphs?: ExtractedParagraphFormat[];
+  evidence?: string[];
+  sampleCount?: number;
+  paragraphCount?: number;
+  error?: string;
+}
+
 // 模板节点（支持层级结构）
 export interface TemplateNode {
   id: string;
@@ -152,6 +184,9 @@ export interface WritingTemplate {
   formatRules?: TemplateFormatRules; // 创建办公文档时注入的默认格式规则
   nodes: TemplateNode[]; // 模板结构节点
   filePath?: string; // 模板源文件路径（导入时保存）
+  templateType?: 'direct' | 'example'; // 模板类型：direct=直接套用模板，example=范文模板，默认 direct
+  exampleFilePaths?: string[]; // 范文模板的多篇范文文件路径
+  exampleAnalysis?: string; // 范文模板的AI分析摘要
   createdAt: string;
   updatedAt: string;
 }
@@ -240,4 +275,3 @@ export interface AppSettings {
   workspaceCapacity: number; // 工作区容量上限（GB）
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
 }
-

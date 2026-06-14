@@ -5,6 +5,8 @@ interface ProjectState {
   projects: Project[];
   currentProject: Project | null;
   currentStageName: string;
+  pendingReportDocId: string | null;  // 双击报告时传递的目标文档ID
+  pendingReportDocOnly: boolean;     // 是否只显示该文档（双击进入 vs 按钮进入）
   versions: DocumentVersion[];
   isLoading: boolean;
 
@@ -13,6 +15,8 @@ interface ProjectState {
   addProject: (project: Project) => Promise<void>;
   setCurrentProject: (project: Project | null) => void;
   setCurrentStageName: (stageName: string) => void;
+  setPendingReportDocId: (docId: string | null) => void;
+  setPendingReportDocOnly: (only: boolean) => void;
   updateProject: (id: string, updates: Partial<Project>) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
 
@@ -26,6 +30,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   projects: [],
   currentProject: null,
   currentStageName: '',
+  pendingReportDocId: null,
+  pendingReportDocOnly: false,
   versions: [],
   isLoading: false,
 
@@ -56,6 +62,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   })),
 
   setCurrentStageName: (stageName) => set({ currentStageName: stageName }),
+
+  setPendingReportDocId: (docId) => set({ pendingReportDocId: docId }),
+  setPendingReportDocOnly: (only) => set({ pendingReportDocOnly: only }),
 
   updateProject: async (id, updates) => {
     const projects = get().projects.map((p) =>

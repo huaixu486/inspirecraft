@@ -31,6 +31,7 @@ import {
   DeleteOutlined,
   SaveOutlined,
   CloseOutlined,
+  LeftOutlined,
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useTemplateStore } from '../../stores/templateStore';
@@ -291,7 +292,7 @@ const splitAiSuggestionText = (value = ''): AiSuggestionBlock[] => {
 };
 
 
-const DocumentReviewer: React.FC = () => {
+const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { currentProject, currentStageName, versions, loadVersions, addVersion } = useProjectStore();
   const { templates, reviews, loadTemplates, loadReviews, executeReview } = useTemplateStore();
   const { projectDocs, loadProjectDocs, updateProjectDoc } = useProjectDocStore();
@@ -1053,7 +1054,13 @@ ${contentB.substring(0, 4000)}
 
   return (
     <div>
-      <Title level={4}>文档审查</Title>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+          <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
+          <Title level={4} style={{ margin: 0 }}>文档审查</Title>
+        </div>
+        <Text type="secondary" style={{ fontSize: 13, lineHeight: 1.5 }}>对比模板要求审查文档，查看AI建议和版本差异</Text>
+      </div>
 
       {/* 文档审查 */}
       <Card style={{ marginBottom: 16 }}>

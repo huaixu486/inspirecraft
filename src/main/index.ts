@@ -588,55 +588,136 @@ function analyzeBasic(content: string, template: WritingTemplate): SectionAnalys
 }
 
 // HTTP 请求函数
-function makeRequest(url: string, options: any, body?: string): Promise<any> {
+const AI_REQUEST_TIMEOUT_MS = 120000;
+const AI_REQUEST_RETRY_DELAY_MS = 900;
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+function isRetryableAIRequestError(error: any): boolean {
+  const message = String(error?.message || error || '');
+  return /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ECONNRESET|ETIMEDOUT|ERR_TIMED_OUT|ERR_NETWORK_CHANGED|socket hang up/i.test(message);
+}
+
+function normalizeAIRequestError(error: any): Error {
+  const message = String(error?.message || error || '');
+  if (/ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ECONNRESET|socket hang up/i.test(message)) {
+    return new Error('AI 接口连接被中断。可能是网络不稳定、代理/网关关闭连接，或请求内容过长。系统已自动重试，仍失败时请稍后重试或检查 AI 接口地址/代理。');
+  }
+  if (/ETIMEDOUT|ERR_TIMED_OUT|请求超时/i.test(message)) {
+    return new Error('AI 接口请求超时。请检查网络、代理或模型服务是否可用，也可以减少导入文档内容后重试。');
+  }
+  if (/ENOTFOUND|ERR_NAME_NOT_RESOLVED|getaddrinfo/i.test(message)) {
+    return new Error('无法解析 AI 接口地址。请检查 AI 设置中的接口地址或当前网络 DNS。');
+  }
+  return error instanceof Error ? error : new Error(message || 'AI 请求失败');
+}
+
+async function makeRequest(url: string, options: any, body?: string): Promise<any> {
+  const maxAttempts = 2;
+  let lastError: any;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await makeSingleRequest(url, options, body, attempt);
+    } catch (error: any) {
+      lastError = error;
+      if (attempt < maxAttempts && isRetryableAIRequestError(error)) {
+        console.warn(`[AI] Request failed, retrying (${attempt}/${maxAttempts}): ${error?.message || error}`);
+        await sleep(AI_REQUEST_RETRY_DELAY_MS);
+        continue;
+      }
+      throw normalizeAIRequestError(error);
+    }
+  }
+
+  throw normalizeAIRequestError(lastError);
+}
+
+function makeSingleRequest(url: string, options: any, body: string | undefined, attempt: number): Promise<any> {
   return new Promise((resolve, reject) => {
-    console.log(`[AI] Request: ${options?.method || 'GET'} ${url}`);
+    console.log(`[AI] Request: ${options?.method || 'GET'} ${url} (attempt ${attempt})`);
     const request = net.request({
       url,
       method: options?.method || 'GET',
     });
 
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+
+    const timeout = setTimeout(() => {
+      try {
+        request.abort();
+      } catch {}
+      finish(() => reject(new Error(`请求超时（${Math.round(AI_REQUEST_TIMEOUT_MS / 1000)}秒）`)));
+    }, AI_REQUEST_TIMEOUT_MS);
+
     Object.entries(options?.headers || {}).forEach(([key, value]) => {
-      if (key !== 'Authorization') {
-        request.setHeader(key, String(value));
-      } else {
-        // 只显示 apiKey 前8位
-        const masked = String(value).replace(/Bearer (.*)/, (_, k) => `Bearer ${k.substring(0, 8)}...`);
-        request.setHeader(key, masked);
-      }
+      request.setHeader(key, String(value));
     });
 
     request.on('response', (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
+      res.on('error', (err) => {
+        console.error('[AI] Response stream error:', err);
+        finish(() => reject(err));
+      });
       res.on('end', () => {
-        console.log(`[AI] Response: ${res.statusCode} ${data.substring(0, 200)}`);
-        let parsed: any = data;
-        try {
-          parsed = JSON.parse(data);
-        } catch {
-          parsed = data;
-        }
-        if (res.statusCode >= 400) {
-          const message = parsed?.error?.message || parsed?.message || data || `HTTP ${res.statusCode}`;
-          reject(new Error(`HTTP ${res.statusCode}: ${message}`));
-          return;
-        }
-        resolve(parsed);
+        finish(() => {
+          console.log(`[AI] Response: ${res.statusCode} ${data.substring(0, 200)}`);
+          let parsed: any = data;
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            parsed = data;
+          }
+          if (res.statusCode >= 400) {
+            const message = parsed?.error?.message || parsed?.message || data || `HTTP ${res.statusCode}`;
+            reject(new Error(`HTTP ${res.statusCode}: ${message}`));
+            return;
+          }
+          resolve(parsed);
+        });
       });
     });
 
     request.on('error', (err) => {
-      console.error(`[AI] Request error:`, err);
-      reject(err);
+      console.error('[AI] Request error:', err);
+      finish(() => reject(err));
     });
+
+    request.on('abort', () => {
+      finish(() => reject(new Error('AI 请求已中止')));
+    });
+
     if (body) request.write(body);
     request.end();
   });
 }
 
+function sanitizeAIResponseForLog(value: any): any {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(item => sanitizeAIResponseForLog(item));
+  if (value.type === 'thinking') {
+    const thinking = typeof value.thinking === 'string' ? value.thinking : '';
+    return {
+      ...value,
+      thinking: thinking ? `[thinking omitted, ${thinking.length} chars]` : '[thinking omitted]',
+    };
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entryValue]) => [key, sanitizeAIResponseForLog(entryValue)]),
+  );
+}
+
 function compactResponse(value: any, maxLength = 600): string {
-  const raw = typeof value === 'string' ? value : JSON.stringify(value);
+  const safeValue = sanitizeAIResponseForLog(value);
+  const raw = typeof safeValue === 'string' ? safeValue : JSON.stringify(safeValue);
   return (raw || '')
     .replace(/\s+/g, ' ')
     .slice(0, maxLength);
@@ -696,6 +777,34 @@ function extractAIText(result: any): string {
   return '';
 }
 
+
+function getAIContentBlocks(result: any): any[] {
+  if (!result || typeof result !== 'object') return [];
+  if (Array.isArray(result.content)) return result.content;
+  if (Array.isArray(result.output)) {
+    return result.output.flatMap((item: any) => Array.isArray(item?.content) ? item.content : []);
+  }
+  const firstChoice = result.choices?.[0];
+  const choiceContent = firstChoice?.message?.content || firstChoice?.delta?.content;
+  return Array.isArray(choiceContent) ? choiceContent : [];
+}
+
+function isThinkingOnlyMaxTokensResponse(result: any): boolean {
+  if (!result || typeof result !== 'object') return false;
+  if (extractAIText(result).trim()) return false;
+  const blocks = getAIContentBlocks(result);
+  const hasThinking = blocks.some((item: any) => item?.type === 'thinking');
+  const hasText = blocks.some((item: any) => item?.type === 'text' && String(item?.text || '').trim());
+  return hasThinking && !hasText && /max_tokens/i.test(String(result.stop_reason || result.finish_reason || ''));
+}
+
+function buildNoReadableAITextError(provider: string, url: string, result: any): Error {
+  if (isThinkingOnlyMaxTokensResponse(result)) {
+    return new Error(`${provider} API 调用失败：模型输出额度耗尽，只返回了 thinking 思考块，没有返回最终文本。系统已尝试让模型直接输出结果；如果仍失败，请减少导入文档内容，或在 AI 服务中关闭思考输出/提高输出上限。`);
+  }
+  return new Error(result.error?.message || result.message || `${provider} API 调用失败：响应中没有可读取文本（${url}）。响应：${compactResponse(result)}`);
+}
+
 function normalizeOpenAIEndpoint(endpoint?: string): string {
   const fallback = 'https://api.openai.com/v1/chat/completions';
   const raw = (endpoint || fallback).trim();
@@ -720,10 +829,12 @@ function normalizeClaudeEndpoint(endpoint?: string): string {
 // 调用 Claude API
 async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<string> {
   const url = normalizeClaudeEndpoint(config.endpoint);
-  const body = JSON.stringify({
+  const buildBody = (maxTokens: number, userPrompt = prompt) => JSON.stringify({
     model: config.model || 'claude-3-sonnet-20240229',
-    max_tokens: 4096,
-    messages: [{ role: 'user', content: prompt }],
+    max_tokens: maxTokens,
+    temperature: 0,
+    system: '直接输出最终答案，不要输出思考过程、分析过程或 Markdown 包裹。若任务要求 JSON，只输出可被 JSON.parse 解析的 JSON。',
+    messages: [{ role: 'user', content: userPrompt }],
   });
 
   const options = {
@@ -735,10 +846,19 @@ async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<str
     },
   };
 
-  const result = await makeRequest(url, options, body);
-  const text = extractAIText(result);
+  let result = await makeRequest(url, options, buildBody(4096));
+  let text = extractAIText(result);
   if (text) return text;
-  throw new Error(result.error?.message || result.message || `Claude API 调用失败：响应中没有可读取文本（${url}）。响应：${compactResponse(result)}`);
+
+  if (isThinkingOnlyMaxTokensResponse(result)) {
+    console.warn('[AI] Claude returned thinking-only max_tokens response; retrying with direct-output prompt.');
+    const retryPrompt = `请不要输出思考过程。请直接完成下面任务，并只输出最终结果。\n\n${prompt}`;
+    result = await makeRequest(url, options, buildBody(8192, retryPrompt));
+    text = extractAIText(result);
+    if (text) return text;
+  }
+
+  throw buildNoReadableAITextError('Claude', url, result);
 }
 
 // 调用 OpenAI API
@@ -763,7 +883,7 @@ async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<str
   console.log(`[AI] OpenAI result:`, JSON.stringify(result).substring(0, 500));
   const text = extractAIText(result);
   if (text) return text;
-  throw new Error(result.error?.message || result.message || `OpenAI API 调用失败：响应中没有可读取文本（${url}）。响应：${compactResponse(result)}`);
+  throw buildNoReadableAITextError('OpenAI', url, result);
 }
 
 async function callAIModel(config: AIModelConfig, prompt: string): Promise<string> {
@@ -1135,6 +1255,20 @@ ipcMain.handle('dialog:openFile', async (_event: any, filters?: Electron.FileFil
   return result.filePaths[0];
 });
 
+ipcMain.handle('dialog:openFiles', async (_event: any, filters?: Electron.FileFilter[]) => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile', 'multiSelections'],
+    title: '选择文件',
+    filters: filters || [
+      { name: '所有文件', extensions: ['*'] },
+    ],
+  });
+  if (result.canceled) {
+    return null;
+  }
+  return result.filePaths;
+});
+
 function normalizeExtractedText(value: string): string {
   return value
     .replace(/\r/g, '\n')
@@ -1372,8 +1506,21 @@ interface ExtractedTemplateStyleSample {
   fontFamily?: string;
   fontSize?: number;
   fontWeight?: 'normal' | 'bold';
+  fontStyle?: 'normal' | 'italic';
   alignment?: 'left' | 'center' | 'right' | 'justify';
   lineHeight?: number;
+  letterSpacing?: number;
+  color?: string;
+  indentFirstLine?: number;
+  spaceBefore?: number;
+  spaceAfter?: number;
+}
+
+interface ExtractedTemplateParagraphStyle extends ExtractedTemplateStyleSample {
+  index: number;
+  styleId?: string;
+  styleName?: string;
+  isTableCell?: boolean;
 }
 
 const styleKeyNames: Record<ExtractedTemplateStyleKey, string> = {
@@ -1395,19 +1542,42 @@ function xmlTextFromBlock(block: string): string {
   );
 }
 
+function isWordToggleEnabled(xml: string, tagName: string): boolean | undefined {
+  const match = xml.match(new RegExp(`<w:${tagName}\\b[^>]*>`, 'i'));
+  if (!match) return undefined;
+  const value = match[0].match(/\bw:val="([^"]+)"/i)?.[1];
+  return value ? !/^(0|false|off)$/i.test(value) : true;
+}
+
 function parseStylePropsFromXml(xml: string): any {
   const fontFamily =
     xml.match(/<w:rFonts\b[^>]*(?:w:eastAsia|w:ascii|w:hAnsi)="([^"]+)"/)?.[1];
   const fontSizeRaw = xml.match(/<w:sz\b[^>]*w:val="(\d+)"/)?.[1];
   const lineRaw = xml.match(/<w:spacing\b[^>]*w:line="(\d+)"/)?.[1];
+  const letterSpacingRaw = xml.match(/<w:spacing\b[^>]*w:val="(-?\d+)"/)?.[1];
   const alignmentRaw = xml.match(/<w:jc\b[^>]*w:val="([^"]+)"/)?.[1];
+  const colorRaw = xml.match(/<w:color\b[^>]*w:val="([^"]+)"/)?.[1];
+  const firstLineCharsRaw = xml.match(/<w:ind\b[^>]*w:firstLineChars="(\d+)"/)?.[1];
+  const firstLineRaw = xml.match(/<w:ind\b[^>]*w:firstLine="(\d+)"/)?.[1];
+  const beforeRaw = xml.match(/<w:spacing\b[^>]*w:before="(\d+)"/)?.[1];
+  const afterRaw = xml.match(/<w:spacing\b[^>]*w:after="(\d+)"/)?.[1];
+  const isBold = isWordToggleEnabled(xml, 'b');
+  const isItalic = isWordToggleEnabled(xml, 'i');
   const alignmentMap: Record<string, string> = { both: 'justify', distribute: 'justify', center: 'center', right: 'right', left: 'left' };
   return {
     fontFamily,
     fontSize: fontSizeRaw ? Number(fontSizeRaw) / 2 : undefined,
-    fontWeight: /<w:b\b/.test(xml) ? 'bold' : undefined,
+    fontWeight: isBold === undefined ? undefined : isBold ? 'bold' : 'normal',
+    fontStyle: isItalic === undefined ? undefined : isItalic ? 'italic' : 'normal',
     alignment: alignmentRaw ? alignmentMap[alignmentRaw] : undefined,
     lineHeight: lineRaw ? Math.round((Number(lineRaw) / 240) * 100) / 100 : undefined,
+    letterSpacing: letterSpacingRaw ? Math.round((Number(letterSpacingRaw) / 20) * 100) / 100 : undefined,
+    color: colorRaw && colorRaw !== 'auto' ? `#${colorRaw}` : undefined,
+    indentFirstLine: firstLineCharsRaw
+      ? Number(firstLineCharsRaw) / 100
+      : firstLineRaw ? Math.round((Number(firstLineRaw) / 240) * 100) / 100 : undefined,
+    spaceBefore: beforeRaw ? Math.round((Number(beforeRaw) / 20) * 100) / 100 : undefined,
+    spaceAfter: afterRaw ? Math.round((Number(afterRaw) / 20) * 100) / 100 : undefined,
   };
 }
 
@@ -1430,8 +1600,14 @@ function mergeStyleProps(base: any = {}, override: any = {}) {
     fontFamily: override.fontFamily || base.fontFamily,
     fontSize: override.fontSize || base.fontSize,
     fontWeight: override.fontWeight || base.fontWeight,
+    fontStyle: override.fontStyle || base.fontStyle,
     alignment: override.alignment || base.alignment,
     lineHeight: override.lineHeight || base.lineHeight,
+    letterSpacing: override.letterSpacing ?? base.letterSpacing,
+    color: override.color || base.color,
+    indentFirstLine: override.indentFirstLine ?? base.indentFirstLine,
+    spaceBefore: override.spaceBefore ?? base.spaceBefore,
+    spaceAfter: override.spaceAfter ?? base.spaceAfter,
   };
 }
 
@@ -1468,15 +1644,41 @@ function buildTemplateFormatRulesFromSamples(samples: ExtractedTemplateStyleSamp
     const fontFamily = mostCommon(group.map(item => item.fontFamily));
     const fontSize = mostCommon(group.map(item => item.fontSize));
     const fontWeight = mostCommon(group.map(item => item.fontWeight));
+    const fontStyle = mostCommon(group.map(item => item.fontStyle));
     const alignment = mostCommon(group.map(item => item.alignment));
     const lineHeight = mostCommon(group.map(item => item.lineHeight));
+    const letterSpacing = mostCommon(group.map(item => item.letterSpacing));
+    const color = mostCommon(group.map(item => item.color));
+    const indentFirstLine = mostCommon(group.map(item => item.indentFirstLine));
+    const spaceBefore = mostCommon(group.map(item => item.spaceBefore));
+    const spaceAfter = mostCommon(group.map(item => item.spaceAfter));
     rules[key] = {
-      fontRequirement: { fontFamily, fontSize, fontWeight, lineHeight },
-      paragraphRequirement: { alignment },
+      fontRequirement: { fontFamily, fontSize, fontWeight, fontStyle, lineHeight, letterSpacing, color },
+      paragraphRequirement: { alignment, indentFirstLine, spaceBefore, spaceAfter },
     };
     evidence.push(`${styleKeyNames[key]}：${fontFamily || '未知字体'} ${fontSize || '未知字号'}pt${fontWeight === 'bold' ? ' 加粗' : ''}；样本「${group[0].text.slice(0, 36)}」`);
   });
   return { rules, evidence };
+}
+
+function styleRuleFromExtractedSample(sample: ExtractedTemplateStyleSample) {
+  return {
+    fontRequirement: {
+      fontFamily: sample.fontFamily,
+      fontSize: sample.fontSize,
+      fontWeight: sample.fontWeight,
+      fontStyle: sample.fontStyle,
+      lineHeight: sample.lineHeight,
+      letterSpacing: sample.letterSpacing,
+      color: sample.color,
+    },
+    paragraphRequirement: {
+      alignment: sample.alignment,
+      indentFirstLine: sample.indentFirstLine,
+      spaceBefore: sample.spaceBefore,
+      spaceAfter: sample.spaceAfter,
+    },
+  };
 }
 
 function describeTemplateStyleRule(rule: any): string {
@@ -1488,41 +1690,117 @@ function describeTemplateStyleRule(rule: any): string {
   ].filter(Boolean).join(' ');
 }
 
-function compareTemplateFormatRules(expected: any = {}, actual: any = {}) {
-  const labels: Record<string, string> = {
-    heading1: '一级标题',
-    heading2: '二级标题',
-    heading3: '三级标题',
-    heading4: '四级标题',
-    body: '正文',
-    caption: '图题/图例',
-    tableTitle: '表题',
-    tableHeader: '表头',
-  };
+const templateStyleLabels: Record<string, string> = {
+  heading1: '一级标题',
+  heading2: '二级标题',
+  heading3: '三级标题',
+  heading4: '四级标题',
+  body: '正文',
+  caption: '图题/图例',
+  tableTitle: '表题',
+  tableHeader: '表头',
+};
+
+function alignmentLabel(value?: string) {
+  const labels: Record<string, string> = { left: '左对齐', center: '居中', right: '右对齐', justify: '两端对齐' };
+  return value ? labels[value] || value : '';
+}
+
+function compareNumberField(label: string, expected?: number, actual?: number, unit = '', tolerance = 0.1) {
+  if (expected === undefined || actual === undefined || Math.abs(Number(expected) - Number(actual)) < tolerance) return '';
+  return `${label}应为 ${expected}${unit}，当前识别为 ${actual}${unit}`;
+}
+
+function collectFormatMismatches(expectedRule: any = {}, actualRule: any = {}) {
+  const expectedFont = expectedRule?.fontRequirement || {};
+  const actualFont = actualRule?.fontRequirement || {};
+  const expectedParagraph = expectedRule?.paragraphRequirement || {};
+  const actualParagraph = actualRule?.paragraphRequirement || {};
+  const mismatches: string[] = [];
+
+  if (expectedFont.fontFamily && actualFont.fontFamily && expectedFont.fontFamily !== actualFont.fontFamily) {
+    mismatches.push(`字体应为 ${expectedFont.fontFamily}，当前识别为 ${actualFont.fontFamily}`);
+  }
+  const fontSizeMismatch = compareNumberField('字号', expectedFont.fontSize, actualFont.fontSize, 'pt', 0.5);
+  if (fontSizeMismatch) mismatches.push(fontSizeMismatch);
+  if (expectedFont.fontWeight && actualFont.fontWeight && expectedFont.fontWeight !== actualFont.fontWeight) {
+    mismatches.push(`字重应为 ${expectedFont.fontWeight === 'bold' ? '加粗' : '常规'}，当前识别为 ${actualFont.fontWeight === 'bold' ? '加粗' : '常规'}`);
+  }
+  if (expectedFont.fontStyle && actualFont.fontStyle && expectedFont.fontStyle !== actualFont.fontStyle) {
+    mismatches.push(`字形应为 ${expectedFont.fontStyle === 'italic' ? '斜体' : '常规'}，当前识别为 ${actualFont.fontStyle === 'italic' ? '斜体' : '常规'}`);
+  }
+  const lineHeightMismatch = compareNumberField('行距', expectedFont.lineHeight, actualFont.lineHeight, '', 0.05);
+  if (lineHeightMismatch) mismatches.push(lineHeightMismatch);
+  const letterSpacingMismatch = compareNumberField('字间距', expectedFont.letterSpacing, actualFont.letterSpacing, 'pt', 0.1);
+  if (letterSpacingMismatch) mismatches.push(letterSpacingMismatch);
+  if (expectedFont.color && actualFont.color && expectedFont.color.toLowerCase() !== actualFont.color.toLowerCase()) {
+    mismatches.push(`颜色应为 ${expectedFont.color}，当前识别为 ${actualFont.color}`);
+  }
+  if (expectedParagraph.alignment && actualParagraph.alignment && expectedParagraph.alignment !== actualParagraph.alignment) {
+    mismatches.push(`对齐方式应为 ${alignmentLabel(expectedParagraph.alignment)}，当前识别为 ${alignmentLabel(actualParagraph.alignment)}`);
+  }
+  const indentMismatch = compareNumberField('首行缩进', expectedParagraph.indentFirstLine, actualParagraph.indentFirstLine, '字符', 0.2);
+  if (indentMismatch) mismatches.push(indentMismatch);
+  const beforeMismatch = compareNumberField('段前间距', expectedParagraph.spaceBefore, actualParagraph.spaceBefore, 'pt', 0.5);
+  if (beforeMismatch) mismatches.push(beforeMismatch);
+  const afterMismatch = compareNumberField('段后间距', expectedParagraph.spaceAfter, actualParagraph.spaceAfter, 'pt', 0.5);
+  if (afterMismatch) mismatches.push(afterMismatch);
+
+  return mismatches;
+}
+
+function previewParagraphText(text: string) {
+  return text.replace(/\s+/g, ' ').slice(0, 42);
+}
+
+function compareTemplateFormatRules(expected: any = {}, actual: any = {}, actualParagraphs: ExtractedTemplateParagraphStyle[] = []) {
   const issues: ReviewIssue[] = [];
+  const detailedLimit = 20;
+
+  if (actualParagraphs.length > 0) {
+    for (const paragraph of actualParagraphs) {
+      if (issues.length >= detailedLimit) break;
+      const expectedRule = expected?.[paragraph.key];
+      if (!expectedRule) continue;
+      const actualRule = styleRuleFromExtractedSample(paragraph);
+      const mismatches = collectFormatMismatches(expectedRule, actualRule);
+      if (!mismatches.length) continue;
+      const label = templateStyleLabels[paragraph.key] || paragraph.key;
+      issues.push({
+        id: `format_para_${paragraph.index}_${issues.length}`,
+        type: 'wrong_format',
+        severity: paragraph.key === 'body' ? 'warning' : 'info',
+        sectionTitle: label,
+        lineNumber: paragraph.index + 1,
+        message: `第 ${paragraph.index + 1} 段「${previewParagraphText(paragraph.text)}」${label}格式不一致：${mismatches.slice(0, 4).join('；')}`,
+        suggestion: `模板要求：${describeTemplateStyleRule(expectedRule)}。请按${label}格式调整该段。`,
+      });
+    }
+    if (issues.length >= detailedLimit) {
+      issues.push({
+        id: `format_more_${issues.length}`,
+        type: 'wrong_format',
+        severity: 'info',
+        sectionTitle: '格式检查',
+        message: `已列出前 ${detailedLimit} 个段落格式问题，其余相同类型问题请按模板规则继续检查。`,
+        suggestion: '建议先统一修改标题样式和正文样式，再重新运行模板审查。',
+      });
+    }
+    return issues;
+  }
+
   Object.entries(expected).forEach(([key, expectedRule]: [string, any]) => {
     const actualRule = actual?.[key];
     if (!actualRule) return;
-    const expectedFont = expectedRule?.fontRequirement || {};
-    const actualFont = actualRule?.fontRequirement || {};
-    const mismatches: string[] = [];
-    if (expectedFont.fontFamily && actualFont.fontFamily && expectedFont.fontFamily !== actualFont.fontFamily) {
-      mismatches.push(`字体应为 ${expectedFont.fontFamily}，当前识别为 ${actualFont.fontFamily}`);
-    }
-    if (expectedFont.fontSize && actualFont.fontSize && Math.abs(Number(expectedFont.fontSize) - Number(actualFont.fontSize)) >= 0.5) {
-      mismatches.push(`字号应为 ${expectedFont.fontSize}pt，当前识别为 ${actualFont.fontSize}pt`);
-    }
-    if (expectedFont.fontWeight && actualFont.fontWeight && expectedFont.fontWeight !== actualFont.fontWeight) {
-      mismatches.push(`字重应为 ${expectedFont.fontWeight === 'bold' ? '加粗' : '常规'}，当前识别为 ${actualFont.fontWeight === 'bold' ? '加粗' : '常规'}`);
-    }
+    const mismatches = collectFormatMismatches(expectedRule, actualRule);
     if (!mismatches.length) return;
     issues.push({
       id: `format_${key}_${issues.length}`,
       type: 'wrong_format',
       severity: key === 'body' ? 'warning' : 'info',
-      sectionTitle: labels[key] || key,
-      message: `${labels[key] || key}格式可能不一致：${mismatches.join('；')}`,
-      suggestion: `模板要求：${describeTemplateStyleRule(expectedRule)}。请检查文档中${labels[key] || key}的实际格式。`,
+      sectionTitle: templateStyleLabels[key] || key,
+      message: `${templateStyleLabels[key] || key}格式可能不一致：${mismatches.join('；')}`,
+      suggestion: `模板要求：${describeTemplateStyleRule(expectedRule)}。请检查文档中${templateStyleLabels[key] || key}的实际格式。`,
     });
   });
   return issues;
@@ -1540,17 +1818,27 @@ async function extractDocxTemplateFormatRules(filePath: string) {
   const stylesXml = await zip.file('word/styles.xml')?.async('string');
   const styles = parseStyleDefinitions(stylesXml);
   const samples: ExtractedTemplateStyleSample[] = [];
+  const paragraphs: ExtractedTemplateParagraphStyle[] = [];
 
   for (const match of documentXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
     const paragraph = match[0];
     const text = xmlTextFromBlock(paragraph);
-    if (!text || text.length > 600) continue;
+    if (!text) continue;
     const pPr = paragraph.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] || '';
     const styleId = getWordVal(pPr, 'pStyle');
     const style = styleId ? styles.get(styleId) : undefined;
     const runPr = paragraph.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] || '';
     const props = mergeStyleProps(style, mergeStyleProps(parseStylePropsFromXml(pPr), parseStylePropsFromXml(runPr)));
     const key = classifyTemplateText(text, styleId, style?.name);
+    paragraphs.push({
+      index: paragraphs.length,
+      key,
+      text: text.slice(0, 600),
+      styleId,
+      styleName: style?.name,
+      ...props,
+    });
+    if (text.length > 600) continue;
     if (key === 'body' && (text.length < 30 || samples.filter(sample => sample.key === 'body').length >= 12)) continue;
     samples.push({ key, text, ...props });
   }
@@ -1563,12 +1851,27 @@ async function extractDocxTemplateFormatRules(filePath: string) {
       const text = xmlTextFromBlock(cell);
       if (!text) continue;
       const runPr = cell.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] || '';
-      samples.push({ key: 'tableHeader', text, ...parseStylePropsFromXml(runPr) });
+      const props = parseStylePropsFromXml(runPr);
+      samples.push({ key: 'tableHeader', text, ...props });
+      paragraphs.push({
+        index: paragraphs.length,
+        key: 'tableHeader',
+        text: text.slice(0, 600),
+        isTableCell: true,
+        ...props,
+      });
     }
   }
 
   const { rules, evidence } = buildTemplateFormatRulesFromSamples(samples);
-  return { success: true, formatRules: rules, evidence, sampleCount: samples.length };
+  return {
+    success: true,
+    formatRules: rules,
+    paragraphs,
+    evidence: [`已逐段识别 ${paragraphs.length} 段文字格式`, ...evidence],
+    sampleCount: samples.length,
+    paragraphCount: paragraphs.length,
+  };
 }
 
 function stripRtf(value: string): string {
@@ -1946,6 +2249,100 @@ ipcMain.handle('template:delete', async (_event: any, templateId: string) => {
   saveTemplatesToDisk(filtered);
 });
 
+// 范文分析：解析范文并生成AI分析摘要，支持多次分析对比差异
+ipcMain.handle('template:analyzeExamples', async (_event: any, params: {
+  exampleContents: string[];
+  templateNodes: Array<{ id: string; title: string; level: number }>;
+  templateName: string;
+  existingAnalysis?: string;
+}) => {
+  const combinedContent = params.exampleContents
+    .map((content, i) => `【范文${i + 1}】\n${content.slice(0, 15000)}`)
+    .join('\n\n---\n\n');
+
+  const hasExisting = params.existingAnalysis && params.existingAnalysis.trim().length > 10;
+
+  const prompt = hasExisting
+    ? `你是一位专业的文档写作分析助手。已有之前的范文分析结果，现在又导入了一篇新范文，请对比分析，只列出新范文与已有分析的差异点。
+
+已有分析结果：
+${params.existingAnalysis}
+
+新范文内容：
+${combinedContent}
+
+要求：
+1. 只列出新范文与已有分析的差异，相同部分不需要重复
+2. 如果新范文的章节结构、字数、风格与已有分析一致，输出"无显著差异"
+3. 如果有差异，按以下格式列出：
+- 整体风格差异：...
+- 格式差异：...
+- 章节差异（仅列出不同的章节）：...
+- 字数差异（仅列出不同的章节）：...
+
+请用简洁的文本输出，不需要JSON格式。`
+    : `你是一位专业的文档写作分析助手。请分析以下${params.exampleContents.length}篇范文，生成一份精炼的写作分析摘要，供后续写作时参考。
+
+模板名称：${params.templateName}
+模板章节结构：
+${params.templateNodes.map(n => `${'  '.repeat(n.level - 1)}${n.title}`).join('\n')}
+
+分析要求：
+1. 整体格式特征：范文的章节组织方式、标题编号风格、段落划分习惯
+2. 写作风格总结：正式程度、论述方式（举例/数据/引用）、语言特点
+3. 各章节字数参考：给出每个主要章节的建议字数范围（基于范文实际字数）
+4. 内容要点：每个章节应包含的核心内容要素
+5. 常见开头/结尾模式：是否有固定套话或结构
+
+请用以下JSON格式输出（仅输出JSON，不要其他文字）：
+{
+  "overallStyle": "整体写作风格描述（100字以内）",
+  "formatFeatures": "格式特征描述（80字以内）",
+  "sectionGuidance": [
+    { "title": "章节标题", "suggestedWordCount": "建议字数范围", "keyPoints": "核心内容要点", "writingTip": "写作技巧" }
+  ],
+  "openingPatterns": "常见开头模式",
+  "closingPatterns": "常见结尾模式",
+  "generalTips": "通用写作建议"
+}
+
+范文内容：
+${combinedContent}`;
+
+  try {
+    const result = await callConfiguredAI(prompt);
+
+    if (hasExisting) {
+      // 对比模式：直接返回文本结果
+      const summary = `【已有分析】\n${params.existingAnalysis}\n\n【新范文差异】\n${result}`;
+      return { success: true, analysis: summary, rawAnalysis: null };
+    }
+
+    // 首次分析：尝试解析JSON
+    const jsonMatch = result.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const analysis = JSON.parse(jsonMatch[0]);
+      const summary = [
+        `【整体风格】${analysis.overallStyle || ''}`,
+        `【格式特征】${analysis.formatFeatures || ''}`,
+        '',
+        '【各章节参考】',
+        ...(analysis.sectionGuidance || []).map((s: any) =>
+          `  ${s.title}：建议${s.suggestedWordCount || '适量'}字。${s.keyPoints ? `要点：${s.keyPoints}` : ''}${s.writingTip ? ` 技巧：${s.writingTip}` : ''}`
+        ),
+        '',
+        `【开头模式】${analysis.openingPatterns || ''}`,
+        `【结尾模式】${analysis.closingPatterns || ''}`,
+        `【通用建议】${analysis.generalTips || ''}`,
+      ].filter(Boolean).join('\n');
+      return { success: true, analysis: summary, rawAnalysis: analysis };
+    }
+    return { success: true, analysis: result, rawAnalysis: null };
+  } catch (error: any) {
+    return { success: false, error: error.message || '范文分析失败' };
+  }
+});
+
 // 文档审查功能
 ipcMain.handle('review:execute', async (_event: any, params: {
   versionId: string;
@@ -2005,6 +2402,7 @@ ipcMain.handle('review:execute', async (_event: any, params: {
   }
 
   if (params.config.checkContentDeviation) {
+    const isExample = template.templateType === 'example';
     for (const node of allTemplateNodes) {
       if (!node.isRequired) continue;
       const matched = getSectionMatch(node);
@@ -2015,13 +2413,17 @@ ipcMain.handle('review:execute', async (_event: any, params: {
         issues.push({
           id: `content_short_${node.id}`,
           type: 'content_deviation',
-          severity: 'warning',
+          severity: isExample ? 'info' : 'warning',
           nodeId: node.id,
           sectionTitle: node.title,
-          message: `\u7ae0\u8282\u5185\u5bb9\u53ef\u80fd\u504f\u5c11\uff1a${node.title}\uff08\u7ea6 ${wordCount} \u5b57\uff0c\u53c2\u8003\u6807\u51c6\uff1a${lengthRequirement.source}\uff0c\u5efa\u8bae\u7ea6 ${lengthRequirement.minComplete} \u5b57\uff09`,
-          suggestion: node.requirementText || node.description
-            ? `请对照模板要求补充该章节：${node.requirementText || node.description}`
-            : `\u8bf7\u786e\u8ba4\u8be5\u7ae0\u8282\u662f\u5426\u9700\u8981\u8865\u5145\u4e8b\u5b9e\u3001\u6570\u636e\u3001\u4f9d\u636e\u6216\u5c55\u5f00\u8bf4\u660e\uff1b\u5f53\u524d\u53c2\u8003\u6807\u51c6\u4e3a\uff1a${lengthRequirement.source}\u3002`,
+          message: isExample
+            ? `\u7ae0\u8282\u5185\u5bb9\u53c2\u8003\uff1a${node.title}\uff08\u7ea6 ${wordCount} \u5b57\uff0c\u8303\u6587\u53c2\u8003\u7ea6 ${lengthRequirement.minComplete} \u5b57\uff09`
+            : `\u7ae0\u8282\u5185\u5bb9\u53ef\u80fd\u504f\u5c11\uff1a${node.title}\uff08\u7ea6 ${wordCount} \u5b57\uff0c\u53c2\u8003\u6807\u51c6\uff1a${lengthRequirement.source}\uff0c\u5efa\u8bae\u7ea6 ${lengthRequirement.minComplete} \u5b57\uff09`,
+          suggestion: isExample
+            ? `\u5f53\u524d\u4e3a\u8303\u6587\u6a21\u677f\uff0c\u5b57\u6570\u4ec5\u4f9b\u53c2\u8003\uff0c\u53ef\u6839\u636e\u5b9e\u9645\u5185\u5bb9\u7075\u6d3b\u8c03\u6574\u3002`
+            : (node.requirementText || node.description
+              ? `\u8bf7\u5bf9\u7167\u6a21\u677f\u8981\u6c42\u8865\u5145\u8be5\u7ae0\u8282\uff1a${node.requirementText || node.description}`
+              : `\u8bf7\u786e\u8ba4\u8be5\u7ae0\u8282\u662f\u5426\u9700\u8981\u8865\u5145\u4e8b\u5b9e\u3001\u6570\u636e\u3001\u4f9d\u636e\u6216\u5c55\u5f00\u8bf4\u660e\uff1b\u5f53\u524d\u53c2\u8003\u6807\u51c6\u4e3a\uff1a${lengthRequirement.source}\u3002`),
         });
       }
     }
@@ -2031,7 +2433,7 @@ ipcMain.handle('review:execute', async (_event: any, params: {
     try {
       const formatResult: any = await extractDocxTemplateFormatRules(version.filePath);
       if (formatResult.success && formatResult.formatRules) {
-        issues.push(...compareTemplateFormatRules(template.formatRules, formatResult.formatRules));
+        issues.push(...compareTemplateFormatRules(template.formatRules, formatResult.formatRules, formatResult.paragraphs || []));
       }
     } catch (error) {
       console.warn('Format review failed:', error);
@@ -2047,10 +2449,14 @@ ipcMain.handle('review:execute', async (_event: any, params: {
 
   // 生成总结
   let summary = '';
+  const isExampleTemplate = template.templateType === 'example';
   if (issues.length === 0) {
-    summary = '文档结构完整，符合模板要求。';
+    summary = isExampleTemplate ? '文档结构完整，符合范文模板参考要求。' : '文档结构完整，符合模板要求。';
   } else {
-    summary = `发现 ${issues.length} 个问题，其中 ${missingCount} 个必需章节缺失。`;
+    const advisoryCount = isExampleTemplate ? issues.filter(i => i.type === 'content_deviation').length : 0;
+    summary = isExampleTemplate && advisoryCount > 0
+      ? `发现 ${issues.length} 个问题，其中 ${missingCount} 个必需章节缺失，${advisoryCount} 个字数参考建议。`
+      : `发现 ${issues.length} 个问题，其中 ${missingCount} 个必需章节缺失。`;
   }
 
   let aiSuggestions: string | undefined;
@@ -2063,7 +2469,11 @@ ipcMain.handle('review:execute', async (_event: any, params: {
         .filter(node => node.isRequired)
         .map(node => `- ${node.title}${node.requirementText || node.description ? `：${node.requirementText || node.description}` : ''}`)
         .join('\n');
-      aiSuggestions = await callDefaultAI(`你是文档审查与改稿助手。请严格按模板章节输出审查建议。\n\n目标：模板里有多个结构章节，例如“一、总体目标”“二、研究内容”。只输出存在问题或需要优化的章节；没有问题的章节不要输出。每个章节下面固定包含“问题”和“建议”。\n\n输出格式（必须严格遵守，不要添加其他标题、总体评估、寒暄或结尾）：\n## 一、章节名称\n问题：\n- 用一句话说明该章节的核心问题。\n- 如有第二个问题，再用一句话说明。\n建议：\n- 给出一条可执行修改建议。\n- 如需补写正文，给出一条简短参考句式；缺少事实数据时写“需人工补充：...”。\n\n规则：\n1. 只输出有问题或需要优化的模板章节。\n2. 章节标题必须尽量使用模板中的原始章节名。\n3. 每个章节必须同时包含“问题：”和“建议：”。\n4. 每个章节的问题最多 2 条，建议最多 3 条，每条不超过 80 字。\n5. 不要把程序已经模糊匹配到的章节重新判定为缺失；如果标题写法不同，只说明它与模板章节如何对应。\n6. 建议要围绕当前正文和模板要求，避免泛泛而谈。\n7. 不要输出长段落、引用块、成段示例、总体评估、“以下是建议”“好的”等非章节内容。\n\n模板必需章节：\n${requiredOutline || '无'}\n\n程序审查结果：\n${issueText}\n\n正文摘录：\n${content.slice(0, 6000)}`);
+      const analysisContext = isExampleTemplate && template.exampleAnalysis
+        ? `\n范文分析摘要：\n${template.exampleAnalysis.slice(0, 2000)}\n`
+        : '';
+      aiSuggestions = await callDefaultAI(`你是文档审查与改稿助手。请严格按模板章节输出审查建议。\n\n目标：模板里有多个结构章节，例如“一、总体目标”“二、研究内容”。只输出存在问题或需要优化的章节；没有问题的章节不要输出。每个章节下面固定包含“问题”和“建议”。\n\n输出格式（必须严格遵守，不要添加其他标题、总体评估、寒暄或结尾）：\n## 一、章节名称\n问题：\n- 用一句话说明该章节的核心问题。\n- 如有第二个问题，再用一句话说明。\n建议：\n- 给出一条可执行修改建议。\n- 如需补写正文，给出一条简短参考句式；缺少事实数据时写“需人工补充：...”。\n\n规则：\n1. 只输出有问题或需要优化的模板章节。\n2. 章节标题必须尽量使用模板中的原始章节名。\n3. 每个章节必须同时包含“问题：”和“建议：”。\n4. 每个章节的问题最多 2 条，建议最多 3 条，每条不超过 80 字。\n5. 不要把程序已经模糊匹配到的章节重新判定为缺失；如果标题写法不同，只说明它与模板章节如何对应。\n6. 建议要围绕当前正文和模板要求，避免泛泛而谈。\n7. 不要输出长段落、引用块、成段示例、总体评估、“以下是建议”“好的”等非章节内容。\n\n模板必需章节：\n${requiredOutline || '无'}\n\n
+${analysisContext}程序审查结果：\n${issueText}\n\n正文摘录：\n${content.slice(0, 6000)}`);
     } catch (error) {
       console.warn('AI review suggestion failed:', error);
     }
@@ -2551,6 +2961,27 @@ ipcMain.handle('file:createBlank', async (_event: any, params: { folderPath: str
   }
 });
 
+// 根据模板和用户内容生成 Word 文档
+ipcMain.handle('file:generateFromContent', async (_event: any, params: {
+  template: WritingTemplate;
+  sectionContents: Record<string, string>;
+  folderPath: string;
+  fileName: string;
+}) => {
+  try {
+    const { template, sectionContents, folderPath, fileName } = params;
+    if (!fs.existsSync(folderPath)) {
+      fs.mkdirSync(folderPath, { recursive: true });
+    }
+    const fileType = template.outputFileType || 'docx';
+    const filePath = path.join(folderPath, `${fileName}.${fileType}`);
+    await writeDocxFileWithContent(filePath, template, sectionContents);
+    return { success: true, filePath };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
 // 从模板创建文件（直接复制模板源文件并重命名）
 ipcMain.handle('file:createFromTemplate', async (_event: any, params: { folderPath: string; fileName: string; template: WritingTemplate; fileType?: string }) => {
   try {
@@ -2691,6 +3122,57 @@ function buildWordStylesXml(template?: WritingTemplate): string {
   ${buildWordStyle('Heading3', '标题 3', styleRuleFromTemplate(template, 'heading3'), { font: '黑体', size: 14, bold: true })}
   ${buildWordStyle('Heading4', '标题 4', styleRuleFromTemplate(template, 'heading4'), { font: '黑体', size: 12, bold: true })}
 </w:styles>`;
+}
+
+// 带用户内容的 Word XML 生成
+function buildWordDocumentXmlWithContent(template: WritingTemplate, sectionContents: Record<string, string>): string {
+  const nodes = flattenTemplateNodes(template.nodes || []);
+  const paragraphs = nodes.length > 0
+    ? nodes.map(node => {
+      const level = Math.min(Math.max(node.level || 1, 1), 4);
+      const headingXml = `<w:p><w:pPr><w:pStyle w:val="Heading${level}"/></w:pPr><w:r><w:t>${escapeXml(node.title)}</w:t></w:r></w:p>`;
+      const userContent = sectionContents[node.id] || '';
+      if (!userContent) return headingXml;
+      const bodyParagraphs = userContent.split('\n').filter(line => line.trim()).map(line =>
+        `<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>${escapeXml(line.trim())}</w:t></w:r></w:p>`
+      ).join('');
+      return headingXml + bodyParagraphs;
+    }).join('')
+    : '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>新建文档</w:t></w:r></w:p>';
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${paragraphs}
+    <w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t></w:t></w:r></w:p>
+    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+  </w:body>
+</w:document>`;
+}
+
+// 带用户内容的 docx 写入
+async function writeDocxFileWithContent(filePath: string, template: WritingTemplate, sectionContents: Record<string, string>) {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`);
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`;
+  zip.file('[Content_Types].xml', contentTypes);
+
+  zip.folder('_rels')?.file('.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`);
+
+  zip.folder('word')?.file('document.xml', buildWordDocumentXmlWithContent(template, sectionContents));
+  zip.folder('word')?.file('styles.xml', buildWordStylesXml(template));
+
+  const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  fs.writeFileSync(filePath, buffer);
 }
 
 function buildWordDocumentXml(template?: WritingTemplate): string {
@@ -3010,6 +3492,58 @@ ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: s
   }
 });
 
+// 列出ZIP中的文件
+ipcMain.handle('zip:listFiles', async (_event: any, zipPath: string) => {
+  try {
+    if (!fs.existsSync(zipPath)) {
+      return { success: false, error: 'ZIP 文件不存在' };
+    }
+    const buffer = fs.readFileSync(zipPath);
+    const zip = await JSZip.loadAsync(buffer);
+    const files: { name: string; path: string; size: number; isDirectory: boolean }[] = [];
+    zip.forEach((relativePath: string, zipEntry: any) => {
+      if (zipEntry.dir) return;
+      files.push({
+        name: path.basename(relativePath),
+        path: relativePath,
+        size: zipEntry._data?.uncompressedSize || 0,
+        isDirectory: false,
+      });
+    });
+    return { success: true, files };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 从ZIP中提取指定文件到目标文件夹
+ipcMain.handle('zip:extractFiles', async (_event: any, params: { zipPath: string; targetPath: string; filePaths: string[] }) => {
+  try {
+    const { zipPath, targetPath, filePaths } = params;
+    if (!fs.existsSync(zipPath)) {
+      return { success: false, error: 'ZIP 文件不存在' };
+    }
+    const buffer = fs.readFileSync(zipPath);
+    const zip = await JSZip.loadAsync(buffer);
+    const extracted: string[] = [];
+    for (const filePath of filePaths) {
+      const zipEntry = zip.file(filePath);
+      if (!zipEntry) continue;
+      const fullPath = path.join(targetPath, path.basename(filePath));
+      const dir = path.dirname(fullPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const content = await zipEntry.async('nodebuffer');
+      fs.writeFileSync(fullPath, content);
+      extracted.push(path.basename(filePath));
+    }
+    return { success: true, files: extracted };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
 // 导出项目为ZIP
 ipcMain.handle('project:exportZip', async (_event: any, params: { project: any; savePath: string; projectDocs: any[] }) => {
   try {
@@ -3055,3 +3589,4 @@ app.on('activate', () => {
     createWindow();
   }
 });
+

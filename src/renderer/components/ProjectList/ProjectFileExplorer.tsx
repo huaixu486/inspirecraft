@@ -1,12 +1,13 @@
 ﻿import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
-  Typography, Button, Space, Tag, Empty, Spin, Select, message, Modal, Input, Popconfirm, Badge, DatePicker,
+  Typography, Button, Space, Tag, Empty, Spin, Select, message, Modal, Input, Popconfirm, Badge, DatePicker, Dropdown,
 } from 'antd';
 import dayjs from 'dayjs';
 import {
   FolderOutlined, FileTextOutlined, FilePdfOutlined, FileOutlined,
   FileExcelOutlined, FilePptOutlined, ArrowLeftOutlined, PlusOutlined,
   ReloadOutlined, FileWordOutlined, DeleteOutlined, FolderOpenOutlined, UndoOutlined,
+  ImportOutlined,
 } from '@ant-design/icons';
 import { Project } from '../../../shared/types';
 import { useTemplateStore } from '../../stores/templateStore';
@@ -93,8 +94,19 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [isDragOver, setIsDragOver] = useState(false);
   const [isDraggingFileOut, setIsDraggingFileOut] = useState(false);
   const [dragOverDirPath, setDragOverDirPath] = useState<string | null>(null);
-  const [selectedPath, setSelectedPath] = useState<string>('');
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const lastClickRef = React.useRef<{ path: string; time: number } | null>(null);
+  const lastSelectedPathRef = useRef<string>('');
+  const [internalDragPaths, setInternalDragPaths] = useState<Set<string>>(new Set());
+  const [internalDragOverPath, setInternalDragOverPath] = useState<string | null>(null);
+
+  // 导入文件选择
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  const [importSource, setImportSource] = useState<'folder' | 'zip'>('folder');
+  const [importFiles, setImportFiles] = useState<{ name: string; path: string; size: number }[]>([]);
+  const [selectedImportFiles, setSelectedImportFiles] = useState<string[]>([]);
+  const [importing, setImporting] = useState(false);
+  const importZipPathRef = useRef<string>('');
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const { customStages } = useSettingsStore();
@@ -141,7 +153,9 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
 
   const handleDoubleClick = (item: FileItem) => {
     setRenamingPath('');
-    setSelectedPath('');
+    if (item.isDirectory) {
+      setSelectedPaths(new Set());
+    }
     handleOpenFile(item);
   };
 
@@ -390,6 +404,88 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       .filter(Boolean) as string[];
   };
 
+  // 统一导入：选文件→直接导入，选ZIP/文件夹→弹窗勾选
+  const handleImport = async () => {
+    // 先弹文件选择（支持多选）
+    const filePaths = await window.electronAPI.openFiles([{ name: '所有文件', extensions: ['*'] }]);
+    if (filePaths && filePaths.length > 0) {
+      // 有 ZIP → 弹窗勾选
+      const zips = filePaths.filter(f => f.toLowerCase().endsWith('.zip'));
+      if (zips.length > 0) {
+        const result = await window.electronAPI.listZipFiles(zips[0]);
+        if (result.success && result.files && result.files.length > 0) {
+          importZipPathRef.current = zips[0];
+          setImportSource('zip');
+          setImportFiles(result.files.map(f => ({ name: f.name, path: f.path, size: f.size })));
+          setSelectedImportFiles(result.files.map(f => f.path));
+          setImportModalOpen(true);
+        } else {
+          message.warning('ZIP 文件为空');
+        }
+        return;
+      }
+      // 全是普通文件 → 直接导入
+      const result = await window.electronAPI.importFiles({ folderPath: currentPath, filePaths });
+      if (result.success) {
+        loadContents();
+        message.success(`已导入 ${result.files?.length || filePaths.length} 个文件`);
+      } else {
+        message.error(result.error || '导入失败');
+      }
+      return;
+    }
+    // 用户取消了文件选择 → 弹文件夹选择
+    const srcFolder = await window.electronAPI.openFolder();
+    if (!srcFolder) return;
+    const dirResult = await window.electronAPI.scanStageFiles(srcFolder);
+    if (dirResult.success && dirResult.files && dirResult.files.length > 0) {
+      setImportSource('folder');
+      setImportFiles(dirResult.files.map(f => ({ name: f.name, path: f.path, size: f.size })));
+      setSelectedImportFiles(dirResult.files.map(f => f.path));
+      setImportModalOpen(true);
+    } else {
+      message.warning('文件夹为空');
+    }
+  };
+
+  // 执行导入
+  const handleConfirmImport = async () => {
+    if (selectedImportFiles.length === 0) {
+      message.warning('请选择要导入的文件');
+      return;
+    }
+    setImporting(true);
+    try {
+      if (importSource === 'folder') {
+        const result = await window.electronAPI.importFiles({
+          folderPath: currentPath,
+          filePaths: selectedImportFiles,
+        });
+        if (result.success) {
+          loadContents();
+          message.success(`已导入 ${result.files?.length || selectedImportFiles.length} 个文件`);
+        } else {
+          message.error(result.error || '导入失败');
+        }
+      } else {
+        const result = await window.electronAPI.extractZipFiles({
+          zipPath: importZipPathRef.current,
+          targetPath: currentPath,
+          filePaths: selectedImportFiles,
+        });
+        if (result.success) {
+          loadContents();
+          message.success(`已导入 ${result.files?.length || selectedImportFiles.length} 个文件`);
+        } else {
+          message.error(result.error || '导入失败');
+        }
+      }
+      setImportModalOpen(false);
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const handleDropFiles = async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setIsDragOver(false);
@@ -422,7 +518,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       event.preventDefault();
       return;
     }
-    setSelectedPath(item.path);
+    setSelectedPaths(new Set([item.path]));
     lastClickRef.current = null;
     setIsDraggingFileOut(true);
     setIsDragOver(false);
@@ -472,29 +568,53 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     setDragOverDirPath(prev => prev === dirPath ? null : prev);
   };
 
-  // 资源管理器风格点击：单击选中，慢双击/F2 重命名
-  const handleFileClick = (item: FileItem) => {
+  // 资源管理器风格点击：单击选中，Ctrl+点击多选，Shift+点击范围选，慢双击重命名
+  const handleFileClick = (item: FileItem, event: React.MouseEvent) => {
     if (renamingPath === item.path) return;
     const now = Date.now();
     const last = lastClickRef.current;
+
+    // 慢双击检测
     if (last && last.path === item.path && now - last.time < 500) {
-      // 慢双击：进入重命名
       lastClickRef.current = null;
       setRenamingPath(item.path);
       setRenameValue(item.name);
+      return;
+    }
+    lastClickRef.current = { path: item.path, time: now };
+
+    if (event.shiftKey && lastSelectedPathRef.current) {
+      // Shift+点击：范围选择
+      const lastIdx = items.findIndex(i => i.path === lastSelectedPathRef.current);
+      const curIdx = items.findIndex(i => i.path === item.path);
+      if (lastIdx >= 0 && curIdx >= 0) {
+        const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+        const rangePaths = items.slice(start, end + 1).map(i => i.path);
+        setSelectedPaths(prev => new Set([...prev, ...rangePaths]));
+      }
+    } else if (event.ctrlKey || event.metaKey) {
+      // Ctrl+点击：切换选中
+      setSelectedPaths(prev => {
+        const next = new Set(prev);
+        if (next.has(item.path)) next.delete(item.path);
+        else next.add(item.path);
+        return next;
+      });
+      lastSelectedPathRef.current = item.path;
     } else {
-      // 单击：选中
-      setSelectedPath(item.path);
-      lastClickRef.current = { path: item.path, time: now };
+      // 普通点击：单选
+      setSelectedPaths(new Set([item.path]));
+      lastSelectedPathRef.current = item.path;
     }
   };
 
-  // F2 重命名
+  // F2 重命名, Delete 删除, Ctrl+A 全选
   React.useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'F2' && selectedPath && !renamingPath) {
+      if (e.key === 'F2' && selectedPaths.size === 1 && !renamingPath) {
         e.preventDefault();
-        const item = items.find(i => i.path === selectedPath);
+        const path = Array.from(selectedPaths)[0];
+        const item = items.find(i => i.path === path);
         if (item) {
           setRenamingPath(item.path);
           setRenameValue(item.name);
@@ -503,20 +623,22 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       if (e.key === 'Escape' && renamingPath) {
         cancelRename();
       }
-      if (e.key === 'Delete' && selectedPath && !renamingPath) {
-        const item = items.find(i => i.path === selectedPath);
-        if (item) handleDeleteFile(item);
+      if (e.key === 'Delete' && selectedPaths.size > 0 && !renamingPath) {
+        handleDeleteSelected();
+      }
+      if (e.ctrlKey && e.key === 'a' && !renamingPath) {
+        e.preventDefault();
+        setSelectedPaths(new Set(items.map(i => i.path)));
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedPath, renamingPath, items]);
+  }, [selectedPaths, renamingPath, items]);
 
   // 删除文件
   const handleDeleteFile = async (item: FileItem) => {
     const result = await window.electronAPI.deleteFile(item.path);
     if (result.success) {
-      // 压入撤销栈：撤销 = 重建空文件
       const ext = item.name.split('.').pop() || '';
       const nameWithoutExt = item.name.replace(/\.[^.]+$/, '');
       pushUndo({
@@ -531,11 +653,46 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
           loadContents();
         },
       });
-      message.success(`已删除 ${item.name}`);
-      loadContents();
     } else {
-      message.error('删除失败');
+      message.error(`删除 ${item.name} 失败`);
     }
+  };
+
+  // 批量删除选中文件
+  const handleDeleteSelected = async () => {
+    const paths = Array.from(selectedPaths);
+    const toDelete = items.filter(i => paths.includes(i.path));
+    if (toDelete.length === 0) return;
+    for (const item of toDelete) {
+      await handleDeleteFile(item);
+    }
+    message.success(`已删除 ${toDelete.length} 个项目`);
+    setSelectedPaths(new Set());
+    loadContents();
+  };
+
+  // 内部拖拽：移动或复制文件到目标目录
+  const handleInternalDrop = async (targetDirPath: string, copyMode: boolean) => {
+    const paths = Array.from(internalDragPaths);
+    if (paths.length === 0) return;
+    let moved = 0, copied = 0;
+    for (const srcPath of paths) {
+      const item = items.find(i => i.path === srcPath);
+      if (!item || item.isDirectory) continue;
+      const destPath = `${targetDirPath}\\${item.name}`;
+      if (copyMode) {
+        const result = await window.electronAPI.importFiles({ folderPath: targetDirPath, filePaths: [srcPath] });
+        if (result.success) copied++;
+      } else {
+        const result = await window.electronAPI.renameFile({ filePath: srcPath, newName: destPath });
+        if (result.success) moved++;
+      }
+    }
+    if (moved > 0) message.success(`已移动 ${moved} 个文件`);
+    if (copied > 0) message.success(`已复制 ${copied} 个文件`);
+    setInternalDragPaths(new Set());
+    setInternalDragOverPath(null);
+    loadContents();
   };
 
   const fileTypeOptions = [
@@ -573,7 +730,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
         }
       }}
       onDrop={handleDropFiles}
-      onClick={(e) => { if (e.target === e.currentTarget) setSelectedPath(''); }}
+      onClick={(e) => { if (e.target === e.currentTarget) setSelectedPaths(new Set()); }}
     >
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
@@ -598,11 +755,25 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
             </Button>
           </Badge>
           <Button icon={<ReloadOutlined />} onClick={loadContents} size="small">刷新</Button>
+          <Button icon={<ImportOutlined />} size="small" onClick={handleImport}>导入</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)} size="small">
             新建文件
           </Button>
         </Space>
       </div>
+
+      {/* 多选状态栏 */}
+      {selectedPaths.size > 1 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12,
+          padding: '8px 12px', background: '#e6f7ff', borderRadius: 6, fontSize: 12,
+        }}>
+          <Text style={{ fontSize: 12 }}>已选择 {selectedPaths.size} 个项目</Text>
+          <div style={{ flex: 1 }} />
+          <Button size="small" onClick={() => handleDeleteSelected()} danger>批量删除</Button>
+          <Button size="small" onClick={() => setSelectedPaths(new Set())}>取消选择</Button>
+        </div>
+      )}
 
       {/* 概览卡片 */}
       {isInRoot && (
@@ -688,25 +859,62 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
                 : items
           ).map(item => {
             const isHighlighted = highlightedPaths.has(item.path);
-            const isSelected = selectedPath === item.path;
-            const isDirDragOver = item.isDirectory && dragOverDirPath === item.path;
+            const isSelected = selectedPaths.has(item.path);
+            const isDirDragOver = item.isDirectory && (internalDragOverPath === item.path || dragOverDirPath === item.path);
+            const isInDrag = internalDragPaths.has(item.path);
             return (
               <div
                 key={item.path}
-                draggable={!item.isDirectory && renamingPath !== item.path}
-                onDragStart={!item.isDirectory ? (e) => handleFileDragStart(item, e) : undefined}
-                onDragEnd={!item.isDirectory ? () => setIsDraggingFileOut(false) : undefined}
-                onDragOver={item.isDirectory ? (e) => handleDragOverDir(e, item.path) : undefined}
-                onDragLeave={item.isDirectory ? (e) => handleDragLeaveDir(e, item.path) : undefined}
-                onDrop={item.isDirectory ? (e) => handleDropToDir(e, item.path) : undefined}
+                draggable={renamingPath !== item.path}
+                onDragStart={(e) => {
+                  if (item.isDirectory) {
+                    // 目录拖拽：准备内部移动
+                    if (!selectedPaths.has(item.path)) setSelectedPaths(new Set([item.path]));
+                    setInternalDragPaths(new Set([item.path]));
+                    e.dataTransfer.effectAllowed = 'move';
+                  } else {
+                    handleFileDragStart(item, e);
+                    // 同时设置内部拖拽
+                    const paths = selectedPaths.has(item.path) ? selectedPaths : new Set([item.path]);
+                    setInternalDragPaths(paths);
+                  }
+                }}
+                onDragEnd={() => {
+                  setIsDraggingFileOut(false);
+                  setInternalDragPaths(new Set());
+                  setInternalDragOverPath(null);
+                }}
+                onDragOver={(e) => {
+                  if (item.isDirectory && internalDragPaths.size > 0) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
+                    setInternalDragOverPath(item.path);
+                  } else if (item.isDirectory) {
+                    handleDragOverDir(e, item.path);
+                  }
+                }}
+                onDragLeave={(e) => {
+                  if (internalDragOverPath === item.path) setInternalDragOverPath(null);
+                  handleDragLeaveDir(e, item.path);
+                }}
+                onDrop={(e) => {
+                  if (item.isDirectory && internalDragPaths.size > 0) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleInternalDrop(item.path, e.ctrlKey);
+                  } else if (item.isDirectory) {
+                    handleDropToDir(e, item.path);
+                  }
+                }}
                 style={{
                   display: 'flex', alignItems: 'center', padding: '8px 12px',
                   borderRadius: 6, cursor: item.isDirectory ? 'pointer' : 'grab', marginBottom: 2, userSelect: 'none',
                   background: isDirDragOver ? '#e6f7ff' : isSelected ? '#e6f7ff' : isHighlighted ? '#f0f5ff' : 'transparent',
                   border: isDirDragOver ? '2px dashed #1890ff' : isSelected ? '1px solid #91d5ff' : '1px solid transparent',
                   transition: 'background 0.15s, border-color 0.15s',
+                  opacity: isInDrag ? 0.5 : 1,
                 }}
-                onClick={() => item.isDirectory ? handleDoubleClick(item) : handleFileClick(item)}
+                onClick={(e) => item.isDirectory ? handleDoubleClick(item) : handleFileClick(item, e)}
                 onDoubleClick={() => !item.isDirectory && handleDoubleClick(item)}
                 onMouseEnter={e => { if (!isSelected && !isDirDragOver) e.currentTarget.style.background = '#f5f5f5'; }}
                 onMouseLeave={e => { if (!isSelected && !isDirDragOver) e.currentTarget.style.background = 'transparent'; }}
@@ -845,6 +1053,55 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
           <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>
             设定后将在时间线中显示，逾期会自动提醒
           </Text>
+        </div>
+      </Modal>
+
+      {/* 导入文件选择弹窗 */}
+      <Modal
+        title={importSource === 'folder' ? '从文件夹导入' : '从 ZIP 导入'}
+        open={importModalOpen}
+        onOk={handleConfirmImport}
+        onCancel={() => setImportModalOpen(false)}
+        okText={`导入已选 (${selectedImportFiles.length})`}
+        cancelText="取消"
+        confirmLoading={importing}
+        width={520}
+      >
+        <div style={{ marginBottom: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text type="secondary">共 {importFiles.length} 个文件，点击勾选需要导入的文件</Text>
+          <Space size={8}>
+            <Button size="small" onClick={() => setSelectedImportFiles(importFiles.map(f => f.path))}>全选</Button>
+            <Button size="small" onClick={() => setSelectedImportFiles([])}>全不选</Button>
+          </Space>
+        </div>
+        <div style={{ maxHeight: 360, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 6 }}>
+          {importFiles.map((file) => (
+            <label
+              key={file.path}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '7px 10px', cursor: 'pointer',
+                borderBottom: '1px solid #f5f5f5',
+                background: selectedImportFiles.includes(file.path) ? '#f0f7ff' : '#fff',
+                transition: 'background 0.15s',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={selectedImportFiles.includes(file.path)}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    setSelectedImportFiles(prev => [...prev, file.path]);
+                  } else {
+                    setSelectedImportFiles(prev => prev.filter(p => p !== file.path));
+                  }
+                }}
+              />
+              <FileTextOutlined style={{ color: '#1890ff', flexShrink: 0 }} />
+              <Text style={{ flex: 1, fontSize: 12 }} ellipsis={{ tooltip: file.name }}>{file.name}</Text>
+              <Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>{(file.size / 1024).toFixed(1)}KB</Text>
+            </label>
+          ))}
         </div>
       </Modal>
     </div>

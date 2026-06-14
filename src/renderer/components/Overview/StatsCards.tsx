@@ -1,9 +1,8 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Card, Row, Col, Typography } from 'antd';
 import {
   FolderOutlined,
   CheckCircleOutlined,
-  ClockCircleOutlined,
   WarningOutlined,
   ExclamationCircleOutlined,
 } from '@ant-design/icons';
@@ -12,6 +11,31 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { buildProjectStageSegments, getAllStages } from '../../utils/timelineStages';
+
+/** 数字递增动画 Hook */
+function useCountUp(target: number, duration = 600): number {
+  const [display, setDisplay] = useState(0);
+  const rafRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (target === 0) { setDisplay(0); return; }
+    const start = performance.now();
+    const animate = (now: number) => {
+      const elapsed = now - start;
+      const progress = Math.min(elapsed / duration, 1);
+      // ease-out-cubic
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplay(Math.round(eased * target));
+      if (progress < 1) {
+        rafRef.current = requestAnimationFrame(animate);
+      }
+    };
+    rafRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [target, duration]);
+
+  return display;
+}
 
 const { Text } = Typography;
 
@@ -68,7 +92,7 @@ const StatsCards: React.FC = () => {
   const overdueStages = allSegments.filter(isSegmentOverdue).length;
   const aboutToExpireStages = allSegments.filter(isSegmentAboutToExpire).length;
 
-  const stats = [
+  const stats: StatCardData[] = [
     {
       title: '项目总数',
       value: totalProjects,
@@ -104,36 +128,56 @@ const StatsCards: React.FC = () => {
       {stats.map((stat, index) => (
         <Col xs={12} sm={12} md={6} key={index}>
           <Card
-            className="dashboard-card stat-card"
+            className={`dashboard-card stat-card animate-slide-up stagger-${index + 1}`}
             variant="borderless"
             style={{
               height: '100%',
             }}
             styles={{ body: { padding: '18px 18px 16px' } }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <Text type="secondary" style={{ fontSize: 12, fontWeight: 500 }}>{stat.title}</Text>
-                <div style={{ fontSize: 28, fontWeight: 700, marginTop: 9, lineHeight: 1, color: '#0f172a' }}>
-                  {stat.value}
-                </div>
-                <Text type="secondary" style={{ fontSize: 11, marginTop: 10, display: 'block' }} ellipsis>
-                  {stat.subtitle}
-                </Text>
-              </div>
-              <div style={{
-                width: 42, height: 42, borderRadius: 12,
-                background: `${stat.iconBg}15`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                boxShadow: `0 10px 24px ${stat.iconBg}18`,
-              }}>
-                {React.cloneElement(stat.icon as React.ReactElement, { style: { fontSize: 20, color: stat.iconBg } })}
-              </div>
-            </div>
+            <StatCardContent stat={stat} />
           </Card>
         </Col>
       ))}
     </Row>
+  );
+};
+
+/** 单个统计卡片内容（带数字递增动画） */
+interface StatCardData {
+  title: string;
+  value: number;
+  icon: React.ReactNode;
+  iconBg: string;
+  subtitle: string;
+}
+
+const StatCardContent: React.FC<{ stat: StatCardData }> = ({ stat }) => {
+  const animatedValue = useCountUp(stat.value);
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <Text type="secondary" style={{ fontSize: 12, fontWeight: 500 }}>{stat.title}</Text>
+        <div style={{
+          fontSize: 28, fontWeight: 700, marginTop: 9, lineHeight: 1, color: '#0f172a',
+          transition: 'color 0.2s ease',
+        }}>
+          {animatedValue}
+        </div>
+        <Text type="secondary" style={{ fontSize: 11, marginTop: 10, display: 'block' }} ellipsis>
+          {stat.subtitle}
+        </Text>
+      </div>
+      <div style={{
+        width: 42, height: 42, borderRadius: 12,
+        background: `${stat.iconBg}15`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+        boxShadow: `0 10px 24px ${stat.iconBg}18`,
+        transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+      }}>
+        {React.cloneElement(stat.icon as React.ReactElement, { style: { fontSize: 20, color: stat.iconBg } })}
+      </div>
+    </div>
   );
 };
 
