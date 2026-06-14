@@ -350,19 +350,31 @@ const extractJsonObject = (value: string): any | null => {
     return JSON.parse(trimmed);
   } catch {}
 
-  // 3. 尝试提取最外层 JSON 对象
+  // 3. 尝试提取最外层 JSON 对象（贪婪匹配）
   const match = trimmed.match(/\{[\s\S]*\}/);
   if (!match) return null;
   try {
     return JSON.parse(match[0]);
   } catch {}
 
-  // 4. 尝试修复常见问题：末尾多余逗号、单引号等
+  // 4. 尝试修复常见JSON问题
   try {
     let fixable = match[0]
       .replace(/,\s*([}\]])/g, '$1')        // 移除末尾多余逗号
-      .replace(/'/g, '"');                    // 单引号转双引号（简单替换）
+      .replace(/[ -]+/g, '')      // 移除控制字符
+      .replace(/\\"/g, '"')                   // 修复转义引号
+      .replace(/\\n/g, '\\n');                // 保留换行符
     return JSON.parse(fixable);
+  } catch {}
+
+  // 5. 尝试逐行修复JSON
+  try {
+    let lines = match[0].split('\n');
+    let fixed = lines.map(line => {
+      // 修复行内未转义的引号
+      return line.replace(/: "([^"]*)"([^",}\]]*)"([^",}\]]*)/g, ': "$1\\"$2\\"$3"');
+    }).join('\n');
+    return JSON.parse(fixed);
   } catch {}
 
   return null;
@@ -488,9 +500,36 @@ const parseAiStageReport = (value: string): AiStageReport => {
       .replace(/```[\s\S]*?```/g, '')  // 移除代码块
       .replace(/^\s*[\n\r]+/gm, '')     // 移除空行
       .trim();
+
+    // 尝试从原始文本中提取各个字段（处理截断的JSON）
+    const extractField = (field: string): string => {
+      const regex = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, 's');
+      const match = cleanText.match(regex);
+      return match ? match[1].replace(/\\"/g, '"').replace(/\\n/g, '\n') : '';
+    };
+
+    const extractArray = (field: string): string[] => {
+      const regex = new RegExp(`"${field}"\\s*:\\s*\\[([^\\]]*)\\]`, 's');
+      const match = cleanText.match(regex);
+      if (!match) return [];
+      try {
+        return JSON.parse(`[${match[1]}]`);
+      } catch {
+        return match[1].split(',')
+          .map(s => s.trim().replace(/^"|"$/g, ''))
+          .filter(Boolean);
+      }
+    };
+
     return {
       rawText: value,
-      reportSummary: cleanText || 'AI 返回内容无法解析，请重试',
+      reportTitle: extractField('reportTitle'),
+      reportSummary: extractField('reportSummary'),
+      templateFit: extractArray('templateFit'),
+      writingStyleNotes: extractArray('writingStyleNotes'),
+      writingFramework: extractArray('writingFramework'),
+      writingDirection: extractArray('writingDirection'),
+      sectionAdvice: [], // 复杂对象暂不提取
     };
   }
 
