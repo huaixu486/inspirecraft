@@ -846,14 +846,15 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     // 尝试从 ProjectDocument 恢复已保存的 AI 报告
     if (selectedReportDoc?.aiReport) {
       try {
-        const saved = JSON.parse(selectedReportDoc.aiReport);
-        // 修复 reportSummary 字段：如果包含 JSON 字符串则提取摘要
+        let saved = JSON.parse(selectedReportDoc.aiReport);
+        // 修复：如果 reportSummary 包含完整 JSON 字符串，则解析并合并所有字段
         if (saved.reportSummary && typeof saved.reportSummary === 'string') {
           const trimmed = saved.reportSummary.trim();
           if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
             try {
               const innerParsed = JSON.parse(trimmed);
-              saved.reportSummary = innerParsed.reportSummary || innerParsed.summary || '';
+              // 合并内层 JSON 的所有字段到外层
+              saved = { ...innerParsed, rawText: saved.rawText || trimmed };
             } catch {}
           }
         }
