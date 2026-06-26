@@ -1,6 +1,19 @@
 import { create } from 'zustand';
 import { Project, DocumentVersion } from '../../shared/types';
 
+export type WorkflowWorkbenchTarget = 'plan' | 'team' | 'report' | 'review' | 'writing';
+
+export interface WorkflowFocus {
+  projectId: string;
+  workflowId?: string;
+  taskId?: string;
+  relatedDocId?: string;
+  stageName?: string;
+  source?: 'manual' | 'review' | 'stage' | 'report';
+  prompt?: string;
+  target: WorkflowWorkbenchTarget;
+}
+
 interface ProjectState {
   projects: Project[];
   currentProject: Project | null;
@@ -8,15 +21,17 @@ interface ProjectState {
   pendingReportDocId: string | null;  // 双击报告时传递的目标文档ID
   pendingReportDocOnly: boolean;     // 是否只显示该文档（双击进入 vs 按钮进入）
   versions: DocumentVersion[];
+  pendingWorkflowFocus: WorkflowFocus | null;
   isLoading: boolean;
 
   // 项目操作
-  loadProjects: () => Promise<void>;
+  loadProjects: (options?: { silent?: boolean }) => Promise<void>;
   addProject: (project: Project) => Promise<void>;
   setCurrentProject: (project: Project | null) => void;
   setCurrentStageName: (stageName: string) => void;
   setPendingReportDocId: (docId: string | null) => void;
   setPendingReportDocOnly: (only: boolean) => void;
+  setPendingWorkflowFocus: (focus: WorkflowFocus | null) => void;
   updateProject: (id: string, updates: Partial<Project>) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
 
@@ -32,17 +47,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   currentStageName: '',
   pendingReportDocId: null,
   pendingReportDocOnly: false,
+  pendingWorkflowFocus: null,
   versions: [],
   isLoading: false,
 
-  loadProjects: async () => {
-    set({ isLoading: true });
+  loadProjects: async (options) => {
+    if (!options?.silent) set({ isLoading: true });
     try {
       const projects = await window.electronAPI.loadProjects();
-      set({ projects, isLoading: false });
+      set(options?.silent ? { projects } : { projects, isLoading: false });
     } catch (error) {
       console.error('Failed to load projects:', error);
-      set({ isLoading: false });
+      if (!options?.silent) set({ isLoading: false });
     }
   },
 
@@ -65,6 +81,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setPendingReportDocId: (docId) => set({ pendingReportDocId: docId }),
   setPendingReportDocOnly: (only) => set({ pendingReportDocOnly: only }),
+  setPendingWorkflowFocus: (focus) => set({ pendingWorkflowFocus: focus }),
 
   updateProject: async (id, updates) => {
     const projects = get().projects.map((p) =>

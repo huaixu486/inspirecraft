@@ -155,6 +155,15 @@ type AiSuggestionBlock = {
   suggestion: string;
 };
 
+type AiRewritePreview = {
+  id: string;
+  title: string;
+  original: string;
+  replacement: string;
+  reason?: string;
+  status?: 'pending' | 'accepted';
+};
+
 type ReviewSectionFinding = {
   key: string;
   title: string;
@@ -293,7 +302,16 @@ const splitAiSuggestionText = (value = ''): AiSuggestionBlock[] => {
 
 
 const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
-  const { currentProject, currentStageName, versions, loadVersions, addVersion } = useProjectStore();
+  const {
+    currentProject,
+    currentStageName,
+    versions,
+    pendingWorkflowFocus,
+    loadVersions,
+    addVersion,
+    setCurrentStageName,
+    setPendingWorkflowFocus,
+  } = useProjectStore();
   const { templates, reviews, loadTemplates, loadReviews, executeReview } = useTemplateStore();
   const { projectDocs, loadProjectDocs, updateProjectDoc } = useProjectDocStore();
   const { tasks, loadTasks, addTask } = useTaskStore();
@@ -319,6 +337,16 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [suggestionDrafts, setSuggestionDrafts] = useState<Record<string, string>>({});
   const [deletedSuggestionKeys, setDeletedSuggestionKeys] = useState<Record<string, boolean>>({});
   const [createdSuggestionTaskKeys, setCreatedSuggestionTaskKeys] = useState<Record<string, boolean>>({});
+  const [aiAssistPrompt, setAiAssistPrompt] = useState('');
+  const [aiAssistPromptSuggestion, setAiAssistPromptSuggestion] = useState('');
+  const [focusedWorkflowTaskId, setFocusedWorkflowTaskId] = useState('');
+  const [aiRewritePreviews, setAiRewritePreviews] = useState<AiRewritePreview[]>([]);
+  const [isGeneratingRewritePlan, setIsGeneratingRewritePlan] = useState(false);
+  const [applyingRewriteId, setApplyingRewriteId] = useState('');
+  const [selectedReviewTaskKeys, setSelectedReviewTaskKeys] = useState<Record<string, boolean>>({});
+  const [customIssueEditorOpen, setCustomIssueEditorOpen] = useState(false);
+  const [customIssueDraft, setCustomIssueDraft] = useState({ sectionTitle: '', message: '', suggestion: '' });
+  const [customReviewIssuesByReview, setCustomReviewIssuesByReview] = useState<Record<string, ReviewIssue[]>>({});
 
   useEffect(() => {
     loadVersions();
@@ -412,6 +440,39 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   }, [allStages, currentStageName, projectDocs, projectVersions, selectedTemplate, templates, currentProject]);
 
   useEffect(() => {
+    if (!pendingWorkflowFocus || pendingWorkflowFocus.target !== 'review') return;
+    if (!currentProject || pendingWorkflowFocus.projectId !== currentProject.id) return;
+
+    if (pendingWorkflowFocus.stageName && pendingWorkflowFocus.stageName !== currentStageName) {
+      setCurrentStageName(pendingWorkflowFocus.stageName);
+    }
+
+    if (pendingWorkflowFocus.relatedDocId) {
+      const targetDoc = projectDocs.find(doc => doc.id === pendingWorkflowFocus.relatedDocId);
+      if (targetDoc) {
+        const targetTemplateId = targetDoc.templateId || selectedTemplate;
+        if (targetTemplateId) setSelectedTemplate(targetTemplateId);
+        setSelectedDocId(targetDoc.id);
+      }
+    }
+
+    setFocusedWorkflowTaskId(pendingWorkflowFocus.taskId || '');
+    setAiAssistPrompt('');
+    setAiAssistPromptSuggestion(pendingWorkflowFocus.prompt || '');
+    setAiRewritePreviews([]);
+    setPendingWorkflowFocus(null);
+  }, [
+    currentProject?.id,
+    currentStageName,
+    pendingWorkflowFocus,
+    projectDocs,
+    selectedTemplate,
+    setCurrentStageName,
+    setPendingWorkflowFocus,
+  ]);
+
+  useEffect(() => {
+    if (pendingWorkflowFocus?.target === 'review') return;
     const firstDocId = matchedDocs[0]?.id || '';
     if (firstDocId && !matchedDocs.some(doc => doc.id === selectedDocId)) {
       setSelectedDocId(firstDocId);
@@ -419,7 +480,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     if (!firstDocId && selectedDocId) {
       setSelectedDocId('');
     }
-  }, [matchedDocs, selectedDocId]);
+  }, [matchedDocs, pendingWorkflowFocus?.target, selectedDocId]);
 
   // 选中文档后，获取其关联的版本
   const selectedDoc = matchedDocs.find(d => d.id === selectedDocId);
@@ -510,6 +571,17 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const hasTaskForIssue = (reviewId: string, issueId: string) =>
     projectTasks.some(task => task.relatedReviewId === reviewId && task.relatedIssueId === issueId);
 
+  const getIssueTaskKey = (reviewId: string, issueId: string) => reviewId + ':issue:' + issueId;
+
+  const toggleReviewTaskSelection = (key: string, checked: boolean) => {
+    setSelectedReviewTaskKeys(prev => ({ ...prev, [key]: checked }));
+  };
+
+  const getReviewIssues = (review: ReviewResult) => [
+    ...review.issues,
+    ...(customReviewIssuesByReview[review.id] || []),
+  ];
+
   const buildIssueTask = (review: ReviewResult, issue: ReviewIssue, index = 0): TaskItem => {
     const template = templates.find(t => t.id === review.templateId);
     const relatedDoc = projectDocs.find(doc => doc.versionId === review.versionId);
@@ -537,25 +609,90 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     };
   };
 
-  const handleCreateIssueTask = async (review: ReviewResult, issue: ReviewIssue) => {
-    if (hasTaskForIssue(review.id, issue.id)) {
-      message.info('该问题已有关联任务');
-      return;
-    }
-    await addTask(buildIssueTask(review, issue));
-    message.success('已生成审查任务');
+  const buildAiSuggestionTask = (review: ReviewResult, sectionTitle: string, suggestionKey: string, suggestionText: string): TaskItem => {
+    const template = templates.find(t => t.id === review.templateId);
+    const relatedDoc = projectDocs.find(doc => doc.versionId === review.versionId);
+    return {
+      id: `${Date.now()}-${suggestionKey}`,
+      projectId: review.projectId,
+      title: sectionTitle ? `处理 AI 建议：${sectionTitle}` : '处理 AI 审查建议',
+      description: suggestionText.trim(),
+      type: 'manual',
+      status: 'pending',
+      priority: 'medium',
+      source: 'review',
+      relatedDocId: relatedDoc?.id,
+      relatedReviewId: review.id,
+      sectionTitle,
+      stageName: template?.category,
+      createdAt: new Date().toISOString(),
+    };
   };
 
   const handleCreateReviewTasks = async (review: ReviewResult) => {
-    const pendingIssues = review.issues.filter(issue => !hasTaskForIssue(review.id, issue.id));
-    if (pendingIssues.length === 0) {
-      message.info('这次审查的问题都已生成任务');
+    const selectedKeys = Object.entries(selectedReviewTaskKeys).filter(([, checked]) => checked).map(([key]) => key);
+    if (selectedKeys.length === 0) {
+      message.warning('请先勾选要生成任务的问题或建议');
       return;
     }
-    for (let i = 0; i < pendingIssues.length; i++) {
-      await addTask(buildIssueTask(review, pendingIssues[i], i));
+
+    let createdCount = 0;
+    const createdKeys: Record<string, boolean> = {};
+    const allIssues = getReviewIssues(review);
+    for (let i = 0; i < allIssues.length; i++) {
+      const issue = allIssues[i];
+      const key = getIssueTaskKey(review.id, issue.id);
+      if (!selectedReviewTaskKeys[key] || hasTaskForIssue(review.id, issue.id)) continue;
+      await addTask(buildIssueTask(review, issue, i));
+      createdKeys[key] = false;
+      createdCount += 1;
     }
-    message.success(`已生成 ${pendingIssues.length} 个审查任务`);
+
+    const findings = buildReviewSectionFindings(review);
+    for (const section of findings) {
+      const sectionKey = normalizeReviewSectionKey(section.title);
+      const aiSuggestionItems = normalizeReviewDisplayItems(section.aiSuggestions, 5);
+      for (let index = 0; index < aiSuggestionItems.length; index++) {
+        const suggestionKey = review.id + ':' + sectionKey + ':ai:' + index;
+        if (!selectedReviewTaskKeys[suggestionKey] || deletedSuggestionKeys[suggestionKey] || createdSuggestionTaskKeys[suggestionKey]) continue;
+        const value = (suggestionDrafts[suggestionKey] ?? aiSuggestionItems[index]).trim();
+        if (!value) continue;
+        await addTask(buildAiSuggestionTask(review, section.title, suggestionKey, value));
+        setCreatedSuggestionTaskKeys(prev => ({ ...prev, [suggestionKey]: true }));
+        createdKeys[suggestionKey] = false;
+        createdCount += 1;
+      }
+    }
+
+    if (createdCount === 0) {
+      message.info('选中项已生成任务或内容为空');
+      return;
+    }
+    setSelectedReviewTaskKeys(prev => ({ ...prev, ...createdKeys }));
+    message.success(`已生成 ${createdCount} 个任务`);
+  };
+
+  const handleAddCustomReviewIssue = (review: ReviewResult) => {
+    const messageText = customIssueDraft.message.trim();
+    if (!messageText) {
+      message.warning('请先填写审查问题');
+      return;
+    }
+    const issue: ReviewIssue = {
+      id: 'custom-' + Date.now(),
+      type: 'suggestion',
+      severity: 'warning',
+      sectionTitle: customIssueDraft.sectionTitle.trim() || '用户补充',
+      message: messageText,
+      suggestion: customIssueDraft.suggestion.trim() || undefined,
+    };
+    setCustomReviewIssuesByReview(prev => ({
+      ...prev,
+      [review.id]: [...(prev[review.id] || []), issue],
+    }));
+    setSelectedReviewTaskKeys(prev => ({ ...prev, [getIssueTaskKey(review.id, issue.id)]: true }));
+    setCustomIssueDraft({ sectionTitle: '', message: '', suggestion: '' });
+    setCustomIssueEditorOpen(false);
   };
 
   const handleCreateAiSuggestionTask = async (review: ReviewResult, sectionTitle: string, suggestionKey: string, suggestionText: string) => {
@@ -568,23 +705,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       message.info('该 AI 建议已生成任务');
       return;
     }
-    const template = templates.find(t => t.id === review.templateId);
-    const relatedDoc = projectDocs.find(doc => doc.versionId === review.versionId);
-    await addTask({
-      id: `${Date.now()}-${suggestionKey}`,
-      projectId: review.projectId,
-      title: sectionTitle ? `处理 AI 建议：${sectionTitle}` : '处理 AI 审查建议',
-      description: content,
-      type: 'manual',
-      status: 'pending',
-      priority: 'medium',
-      source: 'review',
-      relatedDocId: relatedDoc?.id,
-      relatedReviewId: review.id,
-      sectionTitle,
-      stageName: template?.category,
-      createdAt: new Date().toISOString(),
-    });
+    await addTask(buildAiSuggestionTask(review, sectionTitle, suggestionKey, content));
     setCreatedSuggestionTaskKeys(prev => ({ ...prev, [suggestionKey]: true }));
     message.success('已根据 AI 建议生成任务');
   };
@@ -661,6 +782,118 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     }
     return { insert, delete: deleteCount, equal, total: insert + deleteCount + equal };
   }, [diffResult]);
+
+  const getSelectedDocumentPath = () => {
+    if (!selectedDoc) return '';
+    return selectedDoc.sourceFilePath || getDocumentVersion(selectedDoc)?.filePath || '';
+  };
+
+  const parseAiRewritePreviews = (raw: string): AiRewritePreview[] => {
+    const text = String(raw || '').trim();
+    const jsonText = text.match(/\[[\s\S]*\]/)?.[0] || text.match(/\{[\s\S]*\}/)?.[0] || '';
+    try {
+      const parsed = JSON.parse(jsonText);
+      const items = Array.isArray(parsed) ? parsed : Array.isArray(parsed.items) ? parsed.items : [];
+      return items
+        .map((item: any, index: number) => ({
+          id: 'rewrite-' + Date.now() + '-' + index,
+          title: String(item.title || item.section || '修改建议 ' + (index + 1)).trim(),
+          original: String(item.original || item.originalText || '').trim(),
+          replacement: String(item.replacement || item.revised || item.revisedText || item.suggestion || '').trim(),
+          reason: String(item.reason || item.explanation || '').trim(),
+          status: 'pending' as const,
+        }))
+        .filter(item => item.original && item.replacement);
+    } catch {
+      return [];
+    }
+  };
+
+  const updateAiRewritePreview = (id: string, updates: Partial<AiRewritePreview>) => {
+    setAiRewritePreviews(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
+  };
+
+  const handleGenerateRewritePlan = async () => {
+    const instruction = (aiAssistPrompt || aiAssistPromptSuggestion).trim();
+    const filePath = getSelectedDocumentPath();
+    if (!selectedDoc || !filePath) {
+      message.warning('请先选择要修改的文档');
+      return;
+    }
+    if (!instruction) {
+      message.warning('请先填写或按 Tab 填充修改提示词');
+      return;
+    }
+
+    setIsGeneratingRewritePlan(true);
+    try {
+      const parsed = await window.electronAPI.parseDocument(filePath);
+      if (!parsed.success || !parsed.content) {
+        message.error(parsed.error || '未能读取文档内容');
+        return;
+      }
+      const prompt = [
+        '你是文档审查和改稿助手。请根据用户的修改要求，从文档内容中找出需要替换的原文，并给出可直接替换的建议修改文本。',
+        '',
+        '要求：',
+        '1. 只返回 JSON 数组，不要输出 Markdown。',
+        '2. 每一项包含 title、original、replacement、reason。',
+        '3. original 必须逐字复制自文档内容中的连续原文片段，不能概括。',
+        '4. replacement 必须是可直接替换 original 的正式正文内容，保持原文语气和文档格式要求。',
+        '5. 没有把握匹配原文时，返回空数组。',
+        '',
+        '修改要求：',
+        instruction,
+        '',
+        '文档内容：',
+        '-----BEGIN DOCUMENT-----',
+        parsed.content.slice(0, 16000),
+        '-----END DOCUMENT-----',
+      ].join('\\n');
+      const result = await window.electronAPI.callAI({ prompt });
+      const previews = parseAiRewritePreviews(result);
+      if (previews.length === 0) {
+        message.warning('AI 未生成可直接替换的原文块，请补充更明确的问题描述后重试');
+      }
+      setAiRewritePreviews(previews);
+    } catch (error: any) {
+      message.error('生成修改预览失败：' + (error.message || String(error)));
+    } finally {
+      setIsGeneratingRewritePlan(false);
+    }
+  };
+
+  const handleAcceptRewrite = async (preview: AiRewritePreview) => {
+    const filePath = getSelectedDocumentPath();
+    if (!filePath) {
+      message.warning('未找到当前文档的源文件路径');
+      return;
+    }
+    if (!preview.original.trim() || !preview.replacement.trim()) {
+      message.warning('原文和建议修改都不能为空');
+      return;
+    }
+
+    setApplyingRewriteId(preview.id);
+    try {
+      const result = await window.electronAPI.replaceDocumentText({
+        filePath,
+        originalText: preview.original,
+        replacementText: preview.replacement,
+      });
+      if (!result.success) {
+        message.error(result.error || '替换失败');
+        return;
+      }
+      updateAiRewritePreview(preview.id, { status: 'accepted' });
+      await loadVersions();
+      message.success(result.backupPath ? '已替换原文，并已自动备份原文件' : '已替换原文');
+    } catch (error: any) {
+      message.error('接受修改失败：' + (error.message || String(error)));
+    } finally {
+      setApplyingRewriteId('');
+    }
+  };
 
   const handleAiDiffAnalysis = async () => {
     if (!selectedVersionA || !selectedVersionB) {
@@ -795,6 +1028,56 @@ ${contentB.substring(0, 4000)}
     );
   };
 
+  const renderIssueItems = (review: ReviewResult, issues: ReviewIssue[]) => {
+    if (issues.length === 0) return <Text type="secondary">暂无具体问题描述。</Text>;
+
+    return (
+      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        {issues.map((issue, index) => {
+          const key = getIssueTaskKey(review.id, issue.id);
+          const disabled = hasTaskForIssue(review.id, issue.id);
+          return (
+            <div key={issue.id} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+              <Checkbox
+                checked={Boolean(selectedReviewTaskKeys[key])}
+                disabled={disabled}
+                onChange={(event) => toggleReviewTaskSelection(key, event.target.checked)}
+                style={{ marginTop: 3 }}
+              />
+              <span style={{
+                width: 20,
+                height: 20,
+                lineHeight: '20px',
+                textAlign: 'center',
+                borderRadius: 10,
+                background: '#fff1f0',
+                color: '#ff4d4f',
+                fontSize: 12,
+                flex: '0 0 auto',
+                marginTop: 2,
+              }}>
+                {index + 1}
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Space size={6} wrap style={{ marginBottom: 4 }}>
+                  {getIssueTag(issue.type)}
+                  {disabled && <Tag color="green">已生成任务</Tag>}
+                  {issue.id.startsWith('custom-') && <Tag color="purple">用户补充</Tag>}
+                </Space>
+                <Paragraph style={{ marginBottom: issue.suggestion ? 4 : 0, color: '#1f2937', lineHeight: 1.85, fontSize: 14 }}>
+                  {issue.message}
+                </Paragraph>
+                {issue.suggestion && (
+                  <Text type="secondary" style={{ display: 'block', lineHeight: 1.7 }}>建议：{issue.suggestion}</Text>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </Space>
+    );
+  };
+
   const renderEditableAiSuggestionItems = (review: ReviewResult, sectionTitle: string, items: string[], startIndex = 0) => {
     const sectionKey = normalizeReviewSectionKey(sectionTitle);
     const visibleItems = items
@@ -811,6 +1094,7 @@ ${contentB.substring(0, 4000)}
           const isEditing = editingSuggestionKey === suggestionKey;
           const isExpanded = expandedSuggestionKey === suggestionKey || isEditing;
           const isCreated = createdSuggestionTaskKeys[suggestionKey];
+          const disabledByTask = isCreated;
 
           return (
             <div
@@ -829,6 +1113,12 @@ ${contentB.substring(0, 4000)}
               }}
             >
               <div style={{ display: 'flex', gap: 10, alignItems: 'center', minHeight: 28 }}>
+                <Checkbox
+                  checked={Boolean(selectedReviewTaskKeys[suggestionKey])}
+                  disabled={disabledByTask}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => toggleReviewTaskSelection(suggestionKey, event.target.checked)}
+                />
                 <span style={{
                   width: 22,
                   height: 22,
@@ -916,16 +1206,7 @@ ${contentB.substring(0, 4000)}
                     >
                       {'\u5220\u9664'}
                     </Button>
-                    <Button
-                      size="small"
-                      type="primary"
-                      ghost
-                      icon={<PlusOutlined />}
-                      disabled={isCreated}
-                      onClick={() => handleCreateAiSuggestionTask(review, sectionTitle, suggestionKey, value)}
-                    >
-                      {isCreated ? '\u5df2\u751f\u6210\u4efb\u52a1' : '\u751f\u6210\u4efb\u52a1'}
-                    </Button>
+
                   </Space>
                 </div>
               )}
@@ -955,7 +1236,7 @@ ${contentB.substring(0, 4000)}
       return next;
     };
 
-    review.issues.forEach(issue => {
+    getReviewIssues(review).forEach(issue => {
       ensureSection(issue.sectionTitle || '未归类问题').issues.push(issue);
     });
 
@@ -1004,7 +1285,12 @@ ${contentB.substring(0, 4000)}
               <Space direction="vertical" size={12} style={{ width: '100%' }}>
                 <div style={{ borderLeft: '3px solid #ff7875', background: '#fffafa', padding: '12px 14px', borderRadius: 6 }}>
                   <Text strong style={{ display: 'block', marginBottom: 8, color: '#a8071a' }}>问题</Text>
-                  {renderReviewItems(problemItems, 'problem')}
+                  {renderIssueItems(review, section.issues)}
+                  {section.aiProblems.length > 0 && (
+                    <div style={{ marginTop: section.issues.length > 0 ? 10 : 0 }}>
+                      {renderReviewItems(normalizeReviewDisplayItems(section.aiProblems, 5), 'problem')}
+                    </div>
+                  )}
                 </div>
                 <div style={{ borderLeft: '3px solid #69b1ff', background: '#f8fbff', padding: '12px 14px', borderRadius: 6 }}>
                   <Text strong style={{ display: 'block', marginBottom: 8, color: '#0958d9' }}>建议</Text>
@@ -1018,23 +1304,6 @@ ${contentB.substring(0, 4000)}
                 </div>
               </Space>
 
-              {section.issues.length > 0 && (
-                <Space wrap style={{ marginTop: 12 }}>
-                  {section.issues.map(issue => (
-                    <Button
-                      key={issue.id}
-                      size="small"
-                      type="link"
-                      icon={<PlusOutlined />}
-                      disabled={hasTaskForIssue(review.id, issue.id)}
-                      onClick={() => handleCreateIssueTask(review, issue)}
-                      style={{ padding: 0 }}
-                    >
-                      {hasTaskForIssue(review.id, issue.id) ? '已生成任务' : '生成任务'}
-                    </Button>
-                  ))}
-                </Space>
-              )}
             </div>
           );
         })}
@@ -1061,6 +1330,35 @@ ${contentB.substring(0, 4000)}
         </div>
         <Text type="secondary" style={{ fontSize: 13, lineHeight: 1.5 }}>对比模板要求审查文档，查看AI建议和版本差异</Text>
       </div>
+
+      {aiAssistPromptSuggestion && (
+        <Card
+          title="\u5ba1\u67e5 - AI\u534f\u4f5c"
+          style={{ marginBottom: 16, borderColor: '#91caff' }}
+          extra={focusedWorkflowTaskId ? <Tag color="blue">{'\u6765\u81ea\u5de5\u4f5c\u6d41'}</Tag> : null}
+        >
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Text type="secondary">{'\u70b9\u51fb\u8f93\u5165\u6846\u540e\u6309 Tab\uff0c\u81ea\u52a8\u586b\u5145\u5f53\u524d\u5de5\u4f5c\u6d41\u95ee\u9898\u7684\u63d0\u793a\u8bcd\u3002'}</Text>
+            <Input.TextArea
+              value={aiAssistPrompt}
+              autoSize={{ minRows: 4, maxRows: 10 }}
+              placeholder="\u6309 Tab \u81ea\u52a8\u586b\u5145\u63d0\u793a\u8bcd"
+              onChange={(event) => setAiAssistPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Tab' && !aiAssistPrompt.trim()) {
+                  event.preventDefault();
+                  setAiAssistPrompt(aiAssistPromptSuggestion);
+                }
+              }}
+            />
+            <Space wrap>
+              <Button size="small" onClick={() => setAiAssistPrompt(aiAssistPromptSuggestion)}>{'\u586b\u5145\u63d0\u793a\u8bcd'}</Button>
+              <Button size="small" onClick={() => setAiAssistPrompt('')}>{'\u6e05\u7a7a'}</Button>
+            </Space>
+          </Space>
+        </Card>
+      )}
+
 
       {/* 文档审查 */}
       <Card style={{ marginBottom: 16 }}>
@@ -1210,11 +1508,16 @@ ${contentB.substring(0, 4000)}
           key={latestReview.id}
           title="最新审查结果"
           style={{ marginBottom: 16 }}
-          extra={latestReview.issues.length > 0 ? (
-            <Button size="small" icon={<PlusOutlined />} onClick={() => handleCreateReviewTasks(latestReview)}>
-              生成任务
-            </Button>
-          ) : null}
+          extra={(
+            <Space wrap>
+              <Button size="small" icon={<PlusOutlined />} onClick={() => setCustomIssueEditorOpen(true)}>
+                新增审查问题
+              </Button>
+              <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => handleCreateReviewTasks(latestReview)}>
+                生成选中任务
+              </Button>
+            </Space>
+          )}
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, gap: 16 }}>
             <div>
@@ -1233,9 +1536,37 @@ ${contentB.substring(0, 4000)}
             </div>
           </div>
 
-          {(latestReview.issues.length > 0 || latestReview.aiSuggestions) && (
+          {(latestReview.issues.length > 0 || latestReview.aiSuggestions || customIssueEditorOpen || (customReviewIssuesByReview[latestReview.id] || []).length > 0) && (
             <>
               <Divider>问题与建议</Divider>
+              {customIssueEditorOpen && latestReview && (
+                <Card size="small" style={{ marginBottom: 12, background: '#fbfdff' }}>
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    <Text strong>新增审查问题</Text>
+                    <Input
+                      placeholder="相关章节，可选"
+                      value={customIssueDraft.sectionTitle}
+                      onChange={(event) => setCustomIssueDraft(prev => ({ ...prev, sectionTitle: event.target.value }))}
+                    />
+                    <Input.TextArea
+                      placeholder="问题描述"
+                      value={customIssueDraft.message}
+                      autoSize={{ minRows: 2, maxRows: 5 }}
+                      onChange={(event) => setCustomIssueDraft(prev => ({ ...prev, message: event.target.value }))}
+                    />
+                    <Input.TextArea
+                      placeholder="修改建议，可选"
+                      value={customIssueDraft.suggestion}
+                      autoSize={{ minRows: 2, maxRows: 5 }}
+                      onChange={(event) => setCustomIssueDraft(prev => ({ ...prev, suggestion: event.target.value }))}
+                    />
+                    <Space>
+                      <Button size="small" type="primary" onClick={() => handleAddCustomReviewIssue(latestReview)}>加入列表</Button>
+                      <Button size="small" onClick={() => setCustomIssueEditorOpen(false)}>取消</Button>
+                    </Space>
+                  </Space>
+                </Card>
+              )}
               {renderReviewSectionFindings(latestReview)}
             </>
           )}

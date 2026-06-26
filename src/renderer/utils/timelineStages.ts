@@ -4,13 +4,13 @@ export type { StageConfig } from '../../shared/types';
 
 // 默认系统阶段
 export const DEFAULT_STAGES: StageConfig[] = [
-  { id: 'system-1', name: '提案', keywords: ['提案', '投标'], color: '#1677ff', isSystem: true },
-  { id: 'system-2', name: '指南编写', keywords: ['指南'], color: '#722ed1', isSystem: true },
-  { id: 'system-3', name: '可研', keywords: ['可研', '可行性'], color: '#52c41a', isSystem: true },
-  { id: 'system-4', name: '其他', keywords: [], color: '#8c8c8c', isSystem: true },
+  { id: 'system-1', name: '\u63d0\u6848', keywords: ['\u63d0\u6848', '\u6295\u6807'], color: '#1677ff', isSystem: true },
+  { id: 'system-2', name: '\u6307\u5357\u7f16\u5199', keywords: ['\u6307\u5357'], color: '#722ed1', isSystem: true },
+  { id: 'system-3', name: '\u53ef\u7814', keywords: ['\u53ef\u7814', '\u53ef\u884c\u6027'], color: '#52c41a', isSystem: true },
+  { id: 'system-4', name: '\u5176\u4ed6', keywords: [], color: '#8c8c8c', isSystem: true },
 ];
 
-const isOtherStage = (stage: StageConfig) => stage.id === 'system-4' || stage.name.trim() === '其他';
+const isOtherStage = (stage: StageConfig) => stage.id === 'system-4' || stage.name.trim() === '\u5176\u4ed6';
 
 const placeOtherStageLast = (stages: StageConfig[]): StageConfig[] => {
   const regularStages = stages.filter(stage => !isOtherStage(stage));
@@ -101,7 +101,7 @@ export const detectTimelineStage = (
   allStages: StageConfig[],
   ...parts: Array<string | undefined>
 ): string => {
-  const fallbackStage = allStages.find(stage => stage.keywords.length === 0)?.name || '其他';
+  const fallbackStage = allStages.find(stage => stage.keywords.length === 0)?.name || '\u5176\u4ed6';
   const primaryText = parts[0] || '';
   const secondaryText = parts.slice(1).filter(Boolean).join(' ');
   const candidates = allStages
@@ -157,28 +157,51 @@ export const buildProjectStageSegments = (
       const version = versions.find(v => v.id === doc.versionId);
       return version?.fileName || doc.name;
     });
-    const docStartTimes = docs.map(doc => {
+
+    const isImportedDoc = (doc: ProjectDocument) => Boolean(doc.autoStage && doc.sourceFilePath);
+    const getDocStartMs = (doc: ProjectDocument) => {
       const version = versions.find(v => v.id === doc.versionId);
-      const sourceMs = toMs(doc.sourceFileCreatedAt);
+      if (isImportedDoc(doc)) {
+        const sourceMs = toMs(doc.sourceFileCreatedAt);
+        if (Number.isFinite(sourceMs)) return sourceMs;
+      }
       const versionMs = toMs(version?.createdAt);
-      if (Number.isFinite(sourceMs)) return sourceMs;
       if (Number.isFinite(versionMs)) return versionMs;
       return toMs(doc.createdAt);
-    }).filter(Number.isFinite);
+    };
+    const getDocEndMs = (doc: ProjectDocument) => {
+      if (isImportedDoc(doc)) {
+        const modifiedMs = toMs(doc.sourceFileModifiedAt);
+        if (Number.isFinite(modifiedMs)) return modifiedMs;
+        const createdMs = toMs(doc.sourceFileCreatedAt);
+        if (Number.isFinite(createdMs)) return createdMs;
+      }
+      return toMs(doc.completedAt);
+    };
+    const getDocActivityMs = (doc: ProjectDocument) => {
+      const version = versions.find(v => v.id === doc.versionId);
+      if (isImportedDoc(doc)) {
+        const modifiedMs = toMs(doc.sourceFileModifiedAt);
+        if (Number.isFinite(modifiedMs)) return modifiedMs;
+        const createdMs = toMs(doc.sourceFileCreatedAt);
+        if (Number.isFinite(createdMs)) return createdMs;
+      }
+      return Math.max(
+        ...[doc.completedAt, doc.analyzedAt, version?.createdAt, doc.createdAt].map(toMs).filter(Number.isFinite),
+      );
+    };
 
+    const docStartTimes = docs.map(getDocStartMs).filter(Number.isFinite);
     const projectCreatedMs = toMs(project.createdAt);
-    const hasSourceFiles = docs.some(doc => Boolean(doc.sourceFileCreatedAt));
-    const startMs = stage === '提案' && !hasSourceFiles
+    const hasImportedFiles = docs.some(isImportedDoc);
+    const startMs = stage === '\u63d0\u6848' && !hasImportedFiles
       ? (Number.isFinite(projectCreatedMs) ? projectCreatedMs : Math.min(...docStartTimes))
       : Math.min(...docStartTimes);
 
     const deadlineTimes = validTimes(docs.map(doc => doc.deadline));
-    const completedTimes = validTimes(docs.map(doc => doc.completedAt));
-    const activityTimes = docs.flatMap(doc => {
-      const version = versions.find(v => v.id === doc.versionId);
-      return [doc.sourceFileModifiedAt, doc.sourceFileCreatedAt, version?.createdAt, doc.createdAt];
-    }).map(toMs).filter(Number.isFinite);
-    const allCompleted = docs.length > 0 && docs.every(doc => Boolean(doc.completedAt));
+    const completedTimes = docs.map(getDocEndMs).filter(Number.isFinite);
+    const activityTimes = docs.map(getDocActivityMs).filter(Number.isFinite);
+    const allCompleted = docs.length > 0 && docs.every(doc => isImportedDoc(doc) ? Number.isFinite(getDocEndMs(doc)) : Boolean(doc.completedAt));
 
     const stageMeta = getStageMeta(allStages)[stage] || { color: '#8c8c8c', label: stage };
 

@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   Typography, Button, Space, Tag, Empty, Spin, Select, message, Modal, Input, Popconfirm, Badge, DatePicker, Dropdown,
 } from 'antd';
@@ -7,7 +7,7 @@ import {
   FolderOutlined, FileTextOutlined, FilePdfOutlined, FileOutlined,
   FileExcelOutlined, FilePptOutlined, ArrowLeftOutlined, PlusOutlined,
   ReloadOutlined, FileWordOutlined, DeleteOutlined, FolderOpenOutlined, UndoOutlined,
-  ImportOutlined,
+  ImportOutlined, FolderAddOutlined,
 } from '@ant-design/icons';
 import { Project } from '../../../shared/types';
 import { useTemplateStore } from '../../stores/templateStore';
@@ -82,6 +82,9 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [loading, setLoading] = useState(false);
   const [currentPath, setCurrentPath] = useState(project.folderPath);
   const [addModalOpen, setAddModalOpen] = useState(false);
+  const [folderModalOpen, setFolderModalOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFileType, setNewFileType] = useState('docx');
   const [newFileName, setNewFileName] = useState('');
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
@@ -100,7 +103,18 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const renameTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isDoubleClickRef = useRef(false);
   const [internalDragPaths, setInternalDragPaths] = useState<Set<string>>(new Set());
+  const internalDragPathsRef = useRef<Set<string>>(new Set());
+  const internalCopyModeRef = useRef(false);
+  const pointerDragRef = useRef<{
+    startX: number;
+    startY: number;
+    paths: Set<string>;
+    active: boolean;
+    targetDirPath: string | null;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
   const [internalDragOverPath, setInternalDragOverPath] = useState<string | null>(null);
+  const explorerRootRef = useRef<HTMLDivElement | null>(null);
 
   // 导入文件选择
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -347,6 +361,46 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     }
   };
 
+  // 新建文件夹
+  const handleCreateFolder = async () => {
+    const folderName = newFolderName.trim();
+    if (!folderName) {
+      message.warning('请输入文件夹名称');
+      return;
+    }
+    if (/[<>:"/\\|?*]/.test(folderName) || /[. ]$/.test(folderName)) {
+      message.warning('文件夹名称包含无效字符，或以点/空格结尾');
+      return;
+    }
+
+    setCreatingFolder(true);
+    try {
+      const result = await window.electronAPI.createFolder({
+        folderPath: currentPath,
+        folderName,
+      });
+      if (!result.success || !result.folderPath) {
+        message.error(result.error || '创建文件夹失败');
+        return;
+      }
+
+      const createdPath = result.folderPath;
+      pushUndo({
+        label: `创建文件夹 ${folderName}`,
+        undo: async () => {
+          await window.electronAPI.deleteFolder(createdPath);
+          await loadContents();
+        },
+      });
+      setFolderModalOpen(false);
+      setNewFolderName('');
+      await loadContents();
+      highlightFile(createdPath);
+      message.success(`已创建文件夹 ${folderName}`);
+    } finally {
+      setCreatingFolder(false);
+    }
+  };
   // 模态框关闭时重置
   const handleModalClose = () => {
     setAddModalOpen(false);
@@ -400,17 +454,55 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     }
   };
 
-  // 判断是否为外部文件拖拽
+  // 判断是否为外部文件拖拽。Electron/Chromium 在不同拖拽来源下 types 形态不完全一致，这里统一转数组。
+  const getDragTypes = (event: React.DragEvent) => Array.from(event.dataTransfer.types || []);
+
   const isExternalFileDrag = (event: React.DragEvent) => {
-    return event.dataTransfer.types.includes('Files');
+    const types = getDragTypes(event);
+    if (types.includes('Files')) return true;
+    if (types.includes('text/uri-list')) return true;
+    return Array.from(event.dataTransfer.items || []).some(item => item.kind === 'file');
+  };
+
+  const getPathFromFile = (file: File) => {
+    try {
+      return window.electronAPI.getPathForFile?.(file) || (file as any).path as string | undefined;
+    } catch {
+      return (file as any).path as string | undefined;
+    }
   };
 
   const getDraggedFilePaths = (event: React.DragEvent) => {
-    const files = Array.from(event.dataTransfer.files);
-    return files
-      .map(file => window.electronAPI.getPathForFile?.(file) || (file as any).path as string | undefined)
-      .filter(Boolean) as string[];
+    const paths = new Set<string>();
+    for (const file of Array.from(event.dataTransfer.files || [])) {
+      const path = getPathFromFile(file);
+      if (path) paths.add(path);
+    }
+    for (const item of Array.from(event.dataTransfer.items || [])) {
+      if (item.kind !== 'file') continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+      const path = getPathFromFile(file);
+      if (path) paths.add(path);
+    }
+    const uriList = event.dataTransfer.getData('text/uri-list');
+    for (const line of uriList.split(/\r?\n/)) {
+      if (!line || line.startsWith('#') || !line.startsWith('file://')) continue;
+      const decoded = decodeURIComponent(line.replace(/^file:\/+/, ''));
+      if (decoded) paths.add(decoded.length >= 3 && decoded[1] === ':' ? decoded : `/${decoded}`);
+    }
+    return Array.from(paths);
   };
+
+  const normalizeDragPath = useCallback((value: string) => value.replace(/[/\\]+/g, '\\').toLowerCase(), []);
+
+  const isInvalidFolderDropTarget = useCallback((targetPath: string, paths: Set<string>) => {
+    const target = normalizeDragPath(targetPath);
+    return Array.from(paths).some(sourcePath => {
+      const source = normalizeDragPath(sourcePath);
+      return target === source || target.startsWith(`${source}\\`);
+    });
+  }, [normalizeDragPath]);
 
   // 统一导入：选文件→直接导入，选ZIP/文件夹→弹窗勾选
   const handleImport = async () => {
@@ -496,26 +588,41 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
 
   const handleDropFiles = async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    event.stopPropagation();
     setIsDragOver(false);
     setIsDraggingFileOut(false);
 
-    // 内部拖拽到空白区域：Ctrl = 复制副本，普通 = 无操作
-    if (internalDragPaths.size > 0) {
-      if (event.ctrlKey) {
-        // Ctrl+拖拽到空白：在当前目录创建副本
-        const paths = Array.from(internalDragPaths);
-        let copied = 0;
-        for (const srcPath of paths) {
-          const item = items.find(i => i.path === srcPath);
-          if (!item || item.isDirectory) continue;
-          const result = await window.electronAPI.importFiles({ folderPath: currentPath, filePaths: [srcPath] });
-          if (result.success) copied++;
-        }
-        if (copied > 0) {
-          message.success(`已创建 ${copied} 个副本`);
-          await loadContents();
+    // Ctrl+内部拖拽到当前目录：创建文件或文件夹副本
+    const draggedPaths = Array.from(internalDragPathsRef.current);
+    if (draggedPaths.length > 0) {
+      if (event.ctrlKey || internalCopyModeRef.current) {
+        const result = await window.electronAPI.duplicateFiles({
+          sourcePaths: draggedPaths,
+          targetFolder: currentPath,
+        });
+        if (!result.success) {
+          message.error(result.error || '创建副本失败');
+        } else {
+          const copies = result.copies || [];
+          if (copies.length > 0) {
+            pushUndo({
+              label: `创建 ${copies.length} 个副本`,
+              undo: async () => {
+                for (const copy of copies) {
+                  if (copy.isDirectory) await window.electronAPI.deleteFolder(copy.path);
+                  else await window.electronAPI.deleteFile(copy.path);
+                }
+                await loadContents();
+              },
+            });
+            message.success(`已创建 ${copies.length} 个副本`);
+            await loadContents();
+            copies.forEach(copy => highlightFile(copy.path));
+          }
         }
       }
+      internalDragPathsRef.current = new Set();
+      internalCopyModeRef.current = false;
       setInternalDragPaths(new Set());
       setInternalDragOverPath(null);
       return;
@@ -546,13 +653,15 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
 
   // 拖出文件：Electron 官方链路要求从 HTML dragstart 事件内触发 webContents.startDrag
   const handleFileDragStart = (item: FileItem, event: React.DragEvent<HTMLDivElement>) => {
+    event.stopPropagation();
     const target = event.target as HTMLElement;
     if (item.isDirectory || renamingPath === item.path || target.closest('[data-no-file-drag="true"]')) {
       event.preventDefault();
       return;
     }
-    setSelectedPaths(new Set([item.path]));
+    setSelectedPaths(prev => (prev.has(item.path) ? prev : new Set([item.path])));
     lastClickRef.current = null;
+    suppressClickRef.current = true;
     setIsDraggingFileOut(true);
     setIsDragOver(false);
 
@@ -576,7 +685,10 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     setDragOverDirPath(null);
     if (!isExternalFileDrag(event)) return;
     const filePaths = getDraggedFilePaths(event);
-    if (filePaths.length === 0) return;
+    if (filePaths.length === 0) {
+      message.warning('未读取到可导入的文件路径');
+      return;
+    }
     const result = await window.electronAPI.importFiles({ folderPath: dirPath, filePaths });
     if (!result.success) {
       message.error(result.error || '导入失败');
@@ -673,24 +785,28 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedPaths, renamingPath, items]);
 
-  // 删除文件
+  // 删除文件或文件夹
   const handleDeleteFile = async (item: FileItem) => {
-    const result = await window.electronAPI.deleteFile(item.path);
+    const result = item.isDirectory
+      ? await window.electronAPI.deleteFolder(item.path)
+      : await window.electronAPI.deleteFile(item.path);
     if (result.success) {
-      const ext = item.name.split('.').pop() || '';
-      const nameWithoutExt = item.name.replace(/\.[^.]+$/, '');
-      pushUndo({
-        label: `删除 ${item.name}`,
-        undo: async () => {
-          await window.electronAPI.createBlankFile({
-            folderPath: currentPath,
-            fileName: nameWithoutExt,
-            fileType: ext,
-          });
-          highlightFile(item.path);
-          loadContents();
-        },
-      });
+      if (!item.isDirectory) {
+        const ext = item.name.split('.').pop() || '';
+        const nameWithoutExt = item.name.replace(/\.[^.]+$/, '');
+        pushUndo({
+          label: `删除 ${item.name}`,
+          undo: async () => {
+            await window.electronAPI.createBlankFile({
+              folderPath: currentPath,
+              fileName: nameWithoutExt,
+              fileType: ext,
+            });
+            highlightFile(item.path);
+            await loadContents();
+          },
+        });
+      }
     } else {
       message.error(`删除 ${item.name} 失败`);
     }
@@ -709,28 +825,162 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     loadContents();
   };
 
-  // 内部拖拽：移动或复制文件到目标目录
+  // 内部拖拽：普通拖动为移动，Ctrl+拖动为复制
   const handleInternalDrop = async (targetDirPath: string, copyMode: boolean) => {
-    const paths = Array.from(internalDragPaths);
+    const dragPathSet = new Set(internalDragPathsRef.current);
+    const paths = Array.from(dragPathSet);
     if (paths.length === 0) return;
-    let moved = 0, copied = 0;
-    for (const srcPath of paths) {
-      const item = items.find(i => i.path === srcPath);
-      if (!item || item.isDirectory) continue;
-      const destPath = `${targetDirPath}\\${item.name}`;
-      if (copyMode) {
-        const result = await window.electronAPI.importFiles({ folderPath: targetDirPath, filePaths: [srcPath] });
-        if (result.success) copied++;
-      } else {
-        const result = await window.electronAPI.renameFile({ filePath: srcPath, newName: destPath });
-        if (result.success) moved++;
+
+    try {
+      if (isInvalidFolderDropTarget(targetDirPath, dragPathSet)) {
+        message.warning('不能拖入自身或子文件夹');
+        return;
       }
+
+      if (copyMode) {
+        const result = await window.electronAPI.duplicateFiles({ sourcePaths: paths, targetFolder: targetDirPath });
+        if (!result.success) {
+          message.error(result.error || '复制失败');
+        } else {
+          const copies = result.copies || [];
+          if (copies.length > 0) {
+            pushUndo({
+              label: `复制 ${copies.length} 个项目`,
+              undo: async () => {
+                for (const copy of copies) {
+                  if (copy.isDirectory) await window.electronAPI.deleteFolder(copy.path);
+                  else await window.electronAPI.deleteFile(copy.path);
+                }
+                await loadContents();
+              },
+            });
+            message.success(`已复制 ${copies.length} 个项目`);
+            copies.forEach(copy => highlightFile(copy.path));
+          }
+        }
+      } else {
+        const result = await window.electronAPI.moveFiles({ sourcePaths: paths, targetFolder: targetDirPath });
+        const moved = result.moved || [];
+        for (const entry of moved) {
+          if (entry.isDirectory) continue;
+          const relatedDoc = projectDocs.find(doc => doc.sourceFilePath === entry.sourcePath);
+          if (relatedDoc) {
+            await updateProjectDoc(relatedDoc.id, {
+              sourceFilePath: entry.path,
+              sourceFileModifiedAt: new Date().toISOString(),
+            });
+          }
+        }
+        if (moved.length > 0) message.success(`已移动 ${moved.length} 个项目`);
+        if (!result.success && result.error) message.warning(result.error);
+      }
+      await loadContents();
+    } finally {
+      internalDragPathsRef.current = new Set();
+      internalCopyModeRef.current = false;
+      setInternalDragPaths(new Set());
+      setInternalDragOverPath(null);
     }
-    if (moved > 0) message.success(`已移动 ${moved} 个文件`);
-    if (copied > 0) message.success(`已复制 ${copied} 个文件`);
-    setInternalDragPaths(new Set());
-    setInternalDragOverPath(null);
-    loadContents();
+  };
+
+  // Electron 的原生 HTML 拖放会在页面内目标收到事件前显示拒绝状态。
+  // 本页面移动改用指针命中检测，外部文件拖入仍保留原生 drop 通道。
+  useEffect(() => {
+
+    const getTargetFolder = (x: number, y: number, paths: Set<string>) => {
+      const element = document.elementFromPoint(x, y) as HTMLElement | null;
+      const folder = element?.closest('[data-folder-path]') as HTMLElement | null;
+      const targetPath = folder?.dataset.folderPath || null;
+      return targetPath && !isInvalidFolderDropTarget(targetPath, paths) ? targetPath : null;
+    };
+
+    const resetPointerDrag = () => {
+      pointerDragRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      setInternalDragOverPath(null);
+      setInternalDragPaths(new Set());
+      setIsDragOver(false);
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const drag = pointerDragRef.current;
+      if (!drag) return;
+      if (!drag.active) {
+        const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+        if (distance < 6) return;
+        drag.active = true;
+        suppressClickRef.current = true;
+        internalDragPathsRef.current = drag.paths;
+        setInternalDragPaths(new Set(drag.paths));
+        if (renameTimerRef.current) {
+          clearTimeout(renameTimerRef.current);
+          renameTimerRef.current = null;
+        }
+        setRenamingPath('');
+        document.body.style.userSelect = 'none';
+      }
+
+      drag.targetDirPath = getTargetFolder(event.clientX, event.clientY, drag.paths);
+      internalCopyModeRef.current = event.ctrlKey;
+      setInternalDragOverPath(drag.targetDirPath);
+      // Ctrl 拖到非文件夹区域时，目标就是当前目录，整页显示复制高亮。
+      setIsDragOver(event.ctrlKey && !drag.targetDirPath);
+      document.body.style.cursor = event.ctrlKey ? 'copy' : 'grabbing';
+      event.preventDefault();
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      const drag = pointerDragRef.current;
+      if (!drag) return;
+      const copyMode = event.ctrlKey || internalCopyModeRef.current;
+      const targetPath = drag.targetDirPath || (copyMode ? currentPath : null);
+      if (drag.active && targetPath) {
+        void handleInternalDrop(targetPath, copyMode);
+      } else {
+        internalDragPathsRef.current = new Set();
+        internalCopyModeRef.current = false;
+      }
+      const suppressed = drag.active;
+      resetPointerDrag();
+      if (suppressed) setTimeout(() => { suppressClickRef.current = false; }, 0);
+    };
+
+    const handlePointerCancel = () => {
+      internalDragPathsRef.current = new Set();
+      internalCopyModeRef.current = false;
+      resetPointerDrag();
+      suppressClickRef.current = false;
+    };
+
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerCancel);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerCancel);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [selectedPaths, renamingPath, currentPath, projectDocs, isInvalidFolderDropTarget]);
+
+  const handleItemPointerDown = (item: FileItem, event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || renamingPath === item.path) return;
+    const target = event.target as HTMLElement;
+    if (
+      target.closest('[data-no-file-drag="true"]') ||
+      target.closest('[data-native-file-drag="true"]') ||
+      target.closest('input, button, textarea')
+    ) return;
+    const paths = selectedPaths.has(item.path) ? new Set(selectedPaths) : new Set([item.path]);
+    pointerDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      paths,
+      active: false,
+      targetDirPath: null,
+    };
   };
 
   const fileTypeOptions = [
@@ -746,6 +996,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
 
   return (
     <div
+      ref={explorerRootRef}
       style={{
         height: '100%',
         overflow: 'auto',
@@ -757,15 +1008,20 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       }}
       onDragOver={(event) => {
         // 内部拖拽到空白区域
-        if (internalDragPaths.size > 0) {
+        if (internalDragPathsRef.current.size > 0) {
           event.preventDefault();
-          event.dataTransfer.dropEffect = event.ctrlKey ? 'copy' : 'none';
-          if (event.ctrlKey) setIsDragOver(true);
+          event.stopPropagation();
+          if (event.ctrlKey) internalCopyModeRef.current = true;
+          const copyMode = event.ctrlKey || internalCopyModeRef.current;
+          event.dataTransfer.dropEffect = copyMode ? 'copy' : 'none';
+          setIsDragOver(copyMode);
           return;
         }
-        if (isDraggingFileOut || !isExternalFileDrag(event)) return;
+        if (!isExternalFileDrag(event)) return;
         event.preventDefault();
+        event.stopPropagation();
         event.dataTransfer.dropEffect = 'copy';
+        setIsDraggingFileOut(false);
         setIsDragOver(true);
       }}
       onDragLeave={(event) => {
@@ -801,9 +1057,21 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
           </Badge>
           <Button icon={<ReloadOutlined />} onClick={loadContents} size="small">刷新</Button>
           <Button icon={<ImportOutlined />} size="small" onClick={handleImport}>导入</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)} size="small">
-            新建文件
-          </Button>
+          <Dropdown
+            menu={{
+              items: [
+                { key: 'file', icon: <FileOutlined />, label: '新建文件' },
+                { key: 'folder', icon: <FolderAddOutlined />, label: '新建文件夹' },
+              ],
+              onClick: ({ key }) => {
+                if (key === 'folder') setFolderModalOpen(true);
+                else setAddModalOpen(true);
+              },
+            }}
+            trigger={['click']}
+          >
+            <Button type="primary" icon={<PlusOutlined />} size="small">新建</Button>
+          </Dropdown>
         </Space>
       </div>
 
@@ -873,9 +1141,14 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
         <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
       ) : items.length === 0 ? (
         <Empty description="此文件夹为空" image={Empty.PRESENTED_IMAGE_SIMPLE}>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
-            新建文件
-          </Button>
+          <Space>
+            <Button type="primary" icon={<FileOutlined />} onClick={() => setAddModalOpen(true)}>
+              新建文件
+            </Button>
+            <Button icon={<FolderAddOutlined />} onClick={() => setFolderModalOpen(true)}>
+              新建文件夹
+            </Button>
+          </Space>
         </Empty>
       ) : (
         <div>
@@ -910,29 +1183,39 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
             return (
               <div
                 key={item.path}
-                draggable={renamingPath !== item.path}
+                draggable={false}
+                data-folder-path={item.isDirectory ? item.path : undefined}
+                onPointerDown={(e) => handleItemPointerDown(item, e)}
                 onDragStart={(e) => {
-                  if (item.isDirectory) {
-                    // 目录拖拽：准备内部移动
-                    if (!selectedPaths.has(item.path)) setSelectedPaths(new Set([item.path]));
-                    setInternalDragPaths(new Set([item.path]));
-                    e.dataTransfer.effectAllowed = 'move';
-                  } else {
-                    handleFileDragStart(item, e);
-                    // 同时设置内部拖拽
-                    const paths = selectedPaths.has(item.path) ? selectedPaths : new Set([item.path]);
-                    setInternalDragPaths(paths);
-                  }
+                  const paths = selectedPaths.has(item.path) ? new Set(selectedPaths) : new Set([item.path]);
+                  if (!selectedPaths.has(item.path)) setSelectedPaths(paths);
+                  internalDragPathsRef.current = paths;
+                  internalCopyModeRef.current = e.ctrlKey;
+                  setInternalDragPaths(paths);
+                  e.dataTransfer.effectAllowed = e.ctrlKey ? 'copy' : 'move';
+                  e.dataTransfer.setData('application/x-project-internal-drag', '1');
+                  e.dataTransfer.setData('text/plain', Array.from(paths).join('\n'));
                 }}
                 onDragEnd={() => {
                   setIsDraggingFileOut(false);
+                  internalDragPathsRef.current = new Set();
+                  internalCopyModeRef.current = false;
                   setInternalDragPaths(new Set());
                   setInternalDragOverPath(null);
+                  setIsDragOver(false);
                 }}
                 onDragOver={(e) => {
-                  if (item.isDirectory && internalDragPaths.size > 0) {
+                  const dragPathSet = internalDragPathsRef.current;
+                  if (item.isDirectory && dragPathSet.size > 0) {
                     e.preventDefault();
-                    e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
+                    e.stopPropagation();
+                    if (isInvalidFolderDropTarget(item.path, dragPathSet)) {
+                      e.dataTransfer.dropEffect = 'none';
+                      setInternalDragOverPath(null);
+                      return;
+                    }
+                    if (e.ctrlKey) internalCopyModeRef.current = true;
+                    e.dataTransfer.dropEffect = (e.ctrlKey || internalCopyModeRef.current) ? 'copy' : 'move';
                     setInternalDragOverPath(item.path);
                   } else if (item.isDirectory) {
                     handleDragOverDir(e, item.path);
@@ -943,30 +1226,48 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
                   handleDragLeaveDir(e, item.path);
                 }}
                 onDrop={(e) => {
-                  if (item.isDirectory && internalDragPaths.size > 0) {
+                  if (item.isDirectory && internalDragPathsRef.current.size > 0) {
                     e.preventDefault();
                     e.stopPropagation();
-                    handleInternalDrop(item.path, e.ctrlKey);
+                    handleInternalDrop(item.path, e.ctrlKey || internalCopyModeRef.current);
                   } else if (item.isDirectory) {
                     handleDropToDir(e, item.path);
                   }
                 }}
                 style={{
                   display: 'flex', alignItems: 'center', padding: '8px 12px',
-                  borderRadius: 6, cursor: item.isDirectory ? 'pointer' : 'grab', marginBottom: 2, userSelect: 'none',
+                  borderRadius: 6, cursor: 'grab', marginBottom: 2, userSelect: 'none',
                   background: isDirDragOver ? '#e6f7ff' : isSelected ? '#e6f7ff' : isHighlighted ? '#f0f5ff' : 'transparent',
                   border: isDirDragOver ? '2px dashed #1890ff' : isSelected ? '1px solid #91d5ff' : '1px solid transparent',
                   transition: 'background 0.15s, border-color 0.15s',
                   opacity: isInDrag ? 0.5 : 1,
                 }}
-                onClick={(e) => item.isDirectory ? handleDoubleClick(item) : handleFileClick(item, e)}
-                onDoubleClick={() => !item.isDirectory && handleDoubleClick(item)}
+                onClick={(e) => {
+                  if (suppressClickRef.current) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    return;
+                  }
+                  handleFileClick(item, e);
+                }}
+                onDoubleClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleDoubleClick(item);
+                }}
                 onMouseEnter={e => { if (!isSelected && !isDirDragOver) e.currentTarget.style.background = '#f5f5f5'; }}
                 onMouseLeave={e => { if (!isSelected && !isDirDragOver) e.currentTarget.style.background = 'transparent'; }}
               >
                 <div
+                  data-native-file-drag={!item.isDirectory ? 'true' : undefined}
+                  draggable={!item.isDirectory && renamingPath !== item.path}
+                  onDragStart={!item.isDirectory ? (e) => handleFileDragStart(item, e) : undefined}
+                  onDragEnd={!item.isDirectory ? () => {
+                    setIsDraggingFileOut(false);
+                    setTimeout(() => { suppressClickRef.current = false; }, 0);
+                  } : undefined}
                   style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 0, userSelect: 'none' }}
-                  title={!item.isDirectory ? '拖动到其他软件发送文件' : undefined}
+                  title={!item.isDirectory ? '拖动名称可发送文件；拖动行空白处可移动，按住 Ctrl 可复制' : '拖动行可移动文件夹，按住 Ctrl 可复制；双击进入文件夹'}
                 >
                   {fileIcon(item.ext, item.isDirectory)}
                   <div style={{ flex: 1, marginLeft: 10, minWidth: 0 }}>
@@ -1035,6 +1336,35 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
         </div>
       )}
 
+      {/* 新建文件夹弹窗 */}
+      <Modal
+        title="新建文件夹"
+        open={folderModalOpen}
+        onOk={handleCreateFolder}
+        onCancel={() => {
+          if (creatingFolder) return;
+          setFolderModalOpen(false);
+          setNewFolderName('');
+        }}
+        okText="创建"
+        cancelText="取消"
+        confirmLoading={creatingFolder}
+        width={400}
+        destroyOnClose
+      >
+        <Text strong style={{ display: 'block', marginBottom: 6 }}>文件夹名称</Text>
+        <Input
+          autoFocus
+          placeholder="输入文件夹名称"
+          value={newFolderName}
+          onChange={event => setNewFolderName(event.target.value)}
+          onPressEnter={handleCreateFolder}
+          maxLength={120}
+        />
+        <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 11 }}>
+          文件夹将创建在当前目录中
+        </Text>
+      </Modal>
       {/* 新建文件弹窗 */}
       <Modal
         title="新建文件"

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Space, Typography } from 'antd';
 import {
   CalendarOutlined,
@@ -23,6 +23,7 @@ import { useProjectDocStore } from './stores/projectDocStore';
 import { Project } from '../shared/types';
 
 const { Title, Text } = Typography;
+const MemoOverview = React.memo(Overview);
 
 type GlobalPage = 'overview' | 'calendar' | 'settings' | 'project-files' | 'project-plan' | 'project-team' | 'project-templates' | 'project-report' | 'project-review' | 'project-writing';
 type ProjectDetailPage = 'files' | 'plan' | 'team' | 'templates' | 'report' | 'review' | 'writing';
@@ -51,7 +52,15 @@ class ErrorBoundary extends React.Component<
 const App: React.FC = () => {
   const [globalPage, setGlobalPage] = useState<GlobalPage>('overview');
   const [panelInitialTab, setPanelInitialTab] = useState('overview');
-  // 设置页动画状态
+  const lastNonOverviewPageRef = useRef<GlobalPage | null>(null);
+  const logoRef = useRef<HTMLDivElement>(null);
+  const didInitialProjectRefreshRef = useRef(false);
+  const pageNavTimersRef = useRef<number[]>([]);
+  const [pageNavAnim, setPageNavAnim] = useState<{
+    phase: 'idle' | 'leaving' | 'entering' | 'pulse';
+    direction: 'toOverview' | 'fromOverview';
+  }>({ phase: 'idle', direction: 'toOverview' });
+  // Settings page animation state
   const [settingsAnim, setSettingsAnim] = useState<{
     phase: 'idle' | 'closed' | 'opening' | 'closing';
     x: number;
@@ -80,6 +89,47 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (globalPage !== 'overview' && globalPage !== 'settings') {
+      lastNonOverviewPageRef.current = globalPage;
+    }
+  }, [globalPage]);
+
+  useEffect(() => {
+    if (globalPage !== 'overview') return;
+    if (!didInitialProjectRefreshRef.current) {
+      didInitialProjectRefreshRef.current = true;
+      return;
+    }
+
+    const idleApi = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    let idleTimer: number | undefined;
+    const timer = window.setTimeout(() => {
+      if (typeof idleApi.requestIdleCallback === 'function') {
+        idleTimer = idleApi.requestIdleCallback(() => {
+          loadProjects({ silent: true });
+        }, { timeout: 2000 });
+      } else {
+        loadProjects({ silent: true });
+      }
+    }, 900);
+
+    return () => {
+      window.clearTimeout(timer);
+      if (idleTimer !== undefined && typeof idleApi.cancelIdleCallback === 'function') {
+        idleApi.cancelIdleCallback(idleTimer);
+      }
+    };
+  }, [globalPage, loadProjects]);
+  useEffect(() => {
+    return () => {
+      pageNavTimersRef.current.forEach(timer => window.clearTimeout(timer));
+      pageNavTimersRef.current = [];
+    };
+  }, []);
+  useEffect(() => {
     let scrollTimer: NodeJS.Timeout;
     const showScrollbar = (el: HTMLElement) => {
       if (!el?.classList) return;
@@ -107,18 +157,52 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const openProjectPanel = (project: Project, initialTab = 'overview') => {
+  const clearPageNavTimers = useCallback(() => {
+    pageNavTimersRef.current.forEach(timer => window.clearTimeout(timer));
+    pageNavTimersRef.current = [];
+  }, []);
+
+  const schedulePageNavTimer = useCallback((callback: () => void, delay: number) => {
+    const timer = window.setTimeout(() => {
+      pageNavTimersRef.current = pageNavTimersRef.current.filter(item => item !== timer);
+      callback();
+    }, delay);
+    pageNavTimersRef.current.push(timer);
+  }, []);
+
+  const navigateToPage = useCallback((targetPage: GlobalPage) => {
+    if (pageNavAnim.phase !== 'idle' || targetPage === globalPage) return;
+
+    const currentPage = globalPage;
+    const direction = targetPage === 'overview' ? 'toOverview' : 'fromOverview';
+    clearPageNavTimers();
+
+    if (currentPage !== 'overview' && currentPage !== 'settings') {
+      lastNonOverviewPageRef.current = currentPage;
+    }
+
+    setPageNavAnim({ phase: 'entering', direction });
+    setGlobalPage(targetPage);
+    schedulePageNavTimer(() => {
+      setPageNavAnim({ phase: 'idle', direction });
+    }, 160);
+  }, [clearPageNavTimers, globalPage, pageNavAnim.phase, schedulePageNavTimer]);
+
+  const navigateToOverview = useCallback(() => {
+    navigateToPage('overview');
+  }, [navigateToPage]);
+
+  const openProjectPanel = useCallback((project: Project, initialTab = 'overview') => {
     setCurrentProject(project);
     if (initialTab === 'files') {
-      // 双击项目 → 直接进入文件详情页
-      setGlobalPage('project-files');
+      navigateToPage('project-files');
     } else {
       setPanelInitialTab(initialTab);
-      setGlobalPage('overview');
+      navigateToOverview();
     }
-  };
+  }, [navigateToOverview, navigateToPage, setCurrentProject]);
 
-  const openProjectDetail = (page: ProjectDetailPage) => {
+  const openProjectDetail = useCallback((page: ProjectDetailPage) => {
     const pageMap: Record<ProjectDetailPage, GlobalPage> = {
       files: 'project-files',
       plan: 'project-plan',
@@ -128,17 +212,34 @@ const App: React.FC = () => {
       review: 'project-review',
       writing: 'project-writing',
     };
-    setGlobalPage(pageMap[page]);
-  };
+    navigateToPage(pageMap[page]);
+  }, [navigateToPage]);
 
-  // 设置页：从按钮位置展开
+  const handleLogoNavigate = useCallback(() => {
+    const targetPage = globalPage === 'overview'
+      ? lastNonOverviewPageRef.current
+      : 'overview';
+
+    if (!targetPage || targetPage === globalPage) {
+      const direction = globalPage === 'overview' ? 'fromOverview' : 'toOverview';
+      clearPageNavTimers();
+      setPageNavAnim({ phase: 'pulse', direction });
+      schedulePageNavTimer(() => {
+        setPageNavAnim({ phase: 'idle', direction });
+      }, 180);
+      return;
+    }
+
+    navigateToPage(targetPage);
+  }, [clearPageNavTimers, globalPage, navigateToPage, schedulePageNavTimer]);
+  // Open settings from the floating button.
   const handleOpenSettings = useCallback(() => {
     const btn = settingsFabRef.current;
     if (!btn) { setGlobalPage('settings'); return; }
     const rect = btn.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
-    // 先设为 closed 状态（circle 0%），下一帧再设为 open（circle 150%），触发 CSS transition
+    // Trigger the circular settings overlay animation.
     setSettingsAnim({ phase: 'closed', x: cx, y: cy });
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -146,58 +247,56 @@ const App: React.FC = () => {
       });
     });
   }, []);
-
-  // 从设置页返回：收缩回按钮位置
+  // Close settings back to the floating button.
   const handleCloseSettings = useCallback(() => {
     const btn = settingsFabRef.current;
-    if (!btn) { setGlobalPage('overview'); setSettingsAnim({ phase: 'idle', x: 0, y: 0 }); return; }
+    if (!btn) { navigateToOverview(); setSettingsAnim({ phase: 'idle', x: 0, y: 0 }); return; }
     const rect = btn.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
-    // 先设为 opening（circle 150%），下一帧设为 closed（circle 0%），触发收缩动画
+    // Shrink the circular settings overlay back to the button.
     setSettingsAnim({ phase: 'opening', x: cx, y: cy });
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         setSettingsAnim({ phase: 'closed', x: cx, y: cy });
-        // 动画结束后清理
+        // Clear state after the animation finishes.
         setTimeout(() => {
-          setGlobalPage('overview');
+          navigateToOverview();
           setSettingsAnim({ phase: 'idle', x: 0, y: 0 });
         }, 380);
       });
     });
   }, []);
 
-  const renderContent = () => {
-    if (globalPage === 'calendar') return <DiffViewer onBack={() => setGlobalPage('overview')} />;
-    // 设置页由覆盖层动画渲染，不在主内容区渲染
-    if (globalPage === 'settings' && settingsAnim.phase === 'idle') return <AISettings />;
-    if (globalPage === 'project-files' && currentProject) {
-      return <ProjectFileExplorer project={currentProject} onBack={() => setGlobalPage('overview')} />;
+  const renderActiveContent = (page: GlobalPage) => {
+    if (page === 'calendar') return <DiffViewer onBack={navigateToOverview} />;
+    if (page === 'settings' && settingsAnim.phase === 'idle') return <AISettings />;
+    if (page === 'project-files' && currentProject) {
+      return <ProjectFileExplorer project={currentProject} onBack={navigateToOverview} />;
     }
-    if (globalPage === 'project-plan') return <PlanManager onBack={() => setGlobalPage('overview')} />;
-    if (globalPage === 'project-team') return <ProgressBoard onBack={() => setGlobalPage('overview')} />;
-    if (globalPage === 'project-templates') return <TemplateManager onBack={() => setGlobalPage('overview')} />;
-    if (globalPage === 'project-report') return <TaskPlanner onBack={() => setGlobalPage('overview')} />;
-    if (globalPage === 'project-review') return <DocumentReviewer onBack={() => setGlobalPage('overview')} />;
-    if (globalPage === 'project-writing') return <DocumentWriter onBack={() => setGlobalPage('overview')} />;
-    return <Overview onEnterProject={openProjectPanel} panelInitialTab={panelInitialTab} onOpenProjectDetail={openProjectDetail} />;
+    if (page === 'project-plan') return <PlanManager onBack={navigateToOverview} />;
+    if (page === 'project-team') return <ProgressBoard onBack={navigateToOverview} />;
+    if (page === 'project-templates') return <TemplateManager onBack={navigateToOverview} />;
+    if (page === 'project-report') return <TaskPlanner onBack={navigateToOverview} />;
+    if (page === 'project-review') return <DocumentReviewer onBack={navigateToOverview} />;
+    if (page === 'project-writing') return <DocumentWriter onBack={navigateToOverview} />;
+    return null;
   };
 
   const pageTitleMap: Record<GlobalPage, string> = {
     overview: 'ProjectHub',
-    calendar: '日历',
-    settings: '设置',
-    'project-files': '文件详情',
-    'project-plan': '计划详情',
-    'project-team': '团队协同',
-    'project-templates': '模板管理',
-    'project-report': '报告工作台',
-    'project-review': '审查工作台',
-    'project-writing': 'AI协同',
+    calendar: '\u65e5\u5386',
+    settings: '\u8bbe\u7f6e',
+    'project-files': '\u6587\u4ef6\u8be6\u60c5',
+    'project-plan': '\u8ba1\u5212\u8be6\u60c5',
+    'project-team': '\u56e2\u961f\u534f\u540c',
+    'project-templates': '\u6a21\u677f\u7ba1\u7406',
+    'project-report': '\u62a5\u544a\u5de5\u4f5c\u53f0',
+    'project-review': '\u5ba1\u67e5\u5de5\u4f5c\u53f0',
+    'project-writing': 'AI\u534f\u540c',
   };
   const title = pageTitleMap[globalPage];
-  const subtitle = globalPage === 'overview' ? '项目总览' : currentProject?.name || '全局工具';
+  const subtitle = globalPage === 'overview' ? '\u9879\u76ee\u603b\u89c8' : currentProject?.name || '\u5168\u5c40\u5de5\u5177';
 
   return (
     <div className="app-shell app-shell-polished" style={{ height: '100vh', overflow: 'hidden', position: 'relative' }}>
@@ -213,7 +312,8 @@ const App: React.FC = () => {
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div
-            className="app-topbar-logo"
+            ref={logoRef}
+            className={`app-topbar-logo${pageNavAnim.phase !== 'idle' ? ' app-topbar-logo-navigating' : ''}`}
             style={{
               width: 38,
               height: 38,
@@ -228,6 +328,16 @@ const App: React.FC = () => {
               boxShadow: '0 10px 22px rgba(22, 119, 255, 0.24)',
               cursor: 'pointer',
               flexShrink: 0,
+            }}
+            onClick={handleLogoNavigate}
+            title={globalPage === 'overview' ? '\u8fd4\u56de\u4e0a\u6b21\u6253\u5f00\u7684\u9875\u9762' : '\u56de\u5230\u4e3b\u9875'}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                handleLogoNavigate();
+              }
             }}
           >
             P
@@ -245,17 +355,17 @@ const App: React.FC = () => {
         <Space size={8}>
           <Button
             icon={<FileTextOutlined />}
-            onClick={() => setGlobalPage('project-templates')}
+            onClick={() => navigateToPage('project-templates')}
             type={globalPage === 'project-templates' ? 'primary' : 'default'}
           >
-            模板
+            {'\u6a21\u677f'}
           </Button>
           <Button
             icon={<CalendarOutlined />}
-            onClick={() => setGlobalPage('calendar')}
+            onClick={() => navigateToPage('calendar')}
             type={globalPage === 'calendar' ? 'primary' : 'default'}
           >
-            日历
+            {'\u65e5\u5386'}
           </Button>
         </Space>
       </div>
@@ -265,22 +375,58 @@ const App: React.FC = () => {
         style={{
           height: 'calc(100vh - 62px)',
           overflow: 'hidden',
-          padding: 18,
+          padding: globalPage === 'overview' ? 0 : 18,
           background: 'transparent',
+          scrollbarGutter: globalPage === 'overview' ? 'auto' : 'stable',
           display: 'flex',
           flexDirection: 'column',
         }}
       >
         <ErrorBoundary>
           <div
-            className="page-transition"
+            className="app-page-stack"
             style={{
               flex: '1 1 auto',
               minHeight: 0,
-              overflow: 'auto',
+              position: 'relative',
+              overflow: 'hidden',
             }}
           >
-            {renderContent()}
+            <div
+              className={`page-transition page-transition-${pageNavAnim.direction}${globalPage === 'overview' && pageNavAnim.phase !== 'idle' ? ` page-transition-${pageNavAnim.phase}` : ''}`}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                overflow: 'hidden',
+                display: globalPage === 'overview' ? 'flex' : 'none',
+                flexDirection: 'column',
+                zIndex: globalPage === 'overview' ? 2 : 0,
+                pointerEvents: globalPage === 'overview' ? 'auto' : 'none',
+              }}
+              aria-hidden={globalPage !== 'overview'}
+            >
+              <MemoOverview onEnterProject={openProjectPanel} panelInitialTab={panelInitialTab} onOpenProjectDetail={openProjectDetail} />
+            </div>
+            {globalPage !== 'overview' && (
+              <div
+                key={globalPage}
+                className={`page-transition page-transition-${pageNavAnim.direction}${pageNavAnim.phase !== 'idle' ? ` page-transition-${pageNavAnim.phase}` : ''} app-non-overview-page`}
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  overflowY: 'auto',
+                  overflowX: 'hidden',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  minHeight: 0,
+                  zIndex: 3,
+                  background: 'transparent',
+                  scrollbarGutter: 'stable',
+                }}
+              >
+                {renderActiveContent(globalPage)}
+              </div>
+            )}
           </div>
         </ErrorBoundary>
       </main>
@@ -291,7 +437,7 @@ const App: React.FC = () => {
         icon={<SettingOutlined style={{ color: settingsAnim.phase !== 'idle' ? '#1677ff' : undefined }} />}
         type="default"
         onClick={settingsAnim.phase !== 'idle' ? handleCloseSettings : handleOpenSettings}
-        title="设置"
+        title="\u8bbe\u7f6e"
         className={`app-settings-fab${settingsAnim.phase !== 'idle' ? ' app-settings-fab-active' : ''}`}
         style={{
           position: 'fixed',
@@ -304,8 +450,7 @@ const App: React.FC = () => {
           boxShadow: settingsAnim.phase !== 'idle' ? '0 0 0 3px rgba(22, 119, 255, 0.15)' : undefined,
         }}
       />
-
-      {/* 设置页圆形展开/收缩动画覆盖层 */}
+      {/* Settings overlay animation. */}
       {settingsAnim.phase !== 'idle' && (
         <div
           className="settings-overlay"
@@ -330,3 +475,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

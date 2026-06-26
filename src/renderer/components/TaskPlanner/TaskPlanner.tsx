@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+﻿import React, { useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Card,
@@ -35,7 +35,7 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
 import { useTemplateStore } from '../../stores/templateStore';
-import { ProjectDocument, TaskItem, WritingTemplate } from '../../../shared/types';
+import { ProjectDocument, SectionAnalysis, TaskItem, WritingTemplate } from '../../../shared/types';
 import { buildProjectStageSegments, detectTimelineStage, getAllStages, getProjectProgress } from '../../utils/timelineStages';
 
 const { Text, Paragraph, Title } = Typography;
@@ -67,6 +67,142 @@ const sourceLabels: Record<NonNullable<TaskItem['source']>, string> = {
 
 const getDocCreatedAt = (doc: ProjectDocument) => doc.sourceFileCreatedAt || doc.createdAt;
 
+const cleanReportHeadingTitle = (value: string) => {
+  const line = String(value || '').replace(/[\t　]+/g, ' ').trim();
+  if (!line) return '';
+  const headingLike = /^第[一二三四五六七八九十百千万零〇两\d]+章/.test(line)
+    || /^[一二三四五六七八九十百千万零〇两]+[、.．）)]/.test(line)
+    || /^\d{1,2}[、.．）)]/.test(line);
+  if (!headingLike) return line;
+  return line
+    .replace(/\.{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/[·•…]{2,}\s*\d{1,4}\s*$/, '')
+    .replace(/([\u4e00-\u9fa5A-Za-z）)])\s*\d{1,4}\s*$/, '$1')
+    .trim();
+};
+
+const isTocLikeReportHeading = (value: string) => {
+  const line = String(value || '').replace(/[\t　]+/g, ' ').trim();
+  return /\.{2,}\s*\d{1,4}\s*$|[·•…]{2,}\s*\d{1,4}\s*$|[\u4e00-\u9fa5A-Za-z）)]\s*\d{1,4}\s*$/.test(line);
+};
+
+const normalizeReportHeadingKey = (value: string) => cleanReportHeadingTitle(value)
+  .trim()
+  .replace(/^第[一二三四五六七八九十百千万零〇两\d]+章[、.．：:\s]*/, '')
+  .replace(/^[一二三四五六七八九十百千万零〇两]+[、.．）)]\s*/, '')
+  .replace(/^\d{1,3}[、.．）)]\s*/, '')
+  .replace(/\s+/g, '')
+  .replace(/[：:；;，,。.【】\[\]（）()《》<>]/g, '')
+  .toLowerCase();
+
+const isCanonicalReportTopLevelHeading = (value: string) => {
+  const line = String(value || '').replace(/[\t　]+/g, ' ').trim();
+  return /^第[一二三四五六七八九十百千万零〇两\d]+章(?:[、.．：:\s]+|(?=[\u4e00-\u9fa5]))\S+/.test(line)
+    || /^[一二三四五六七八九十百千万零〇两]+[、.．）)]\s*\S+/.test(line);
+};
+
+const isArabicNumberedReportHeading = (value: string) => {
+  const line = String(value || '').replace(/[\t　]+/g, ' ').trim();
+  return /^\d{1,2}[、.．）)]\s*(?!\d)\S+/.test(line)
+    || /^\d{1,2}\s+[\u4e00-\u9fa5]\S*/.test(line);
+};
+
+const isReportTopLevelHeading = (value: string) => {
+  const line = String(value || '').replace(/[\t　]+/g, ' ').trim();
+  if (!line || line.length > 90) return false;
+  if (/\.{3,}\s*\d+\s*$|[·•…]{3,}\s*\d+\s*$/.test(line)) return false;
+  if (/[。；;，,：:]$/.test(line)) return false;
+  if (/^[+\-]?\d+(?:\.\d+)?\s*(?:kN|N|MN|MPa|kPa|Pa|kg|mm|cm|km|m\/s|km\/h|kV|Hz|%|℃|°)\b/i.test(line)) return false;
+  if (/^\d+(?:[.．]\d+)+/.test(line)) return false;
+
+  return isCanonicalReportTopLevelHeading(line) || isArabicNumberedReportHeading(line);
+};
+
+const isStandaloneReportChapterMarker = (value: string) => {
+  const line = String(value || '').replace(/[\t　]+/g, ' ').trim();
+  if (!line || line.length > 24) return false;
+  return /^第[一二三四五六七八九十百千万零〇两\d]+章$/.test(line)
+    || /^[一二三四五六七八九十百千万零〇两]+[、.．）)]$/.test(line)
+    || /^\d{1,2}[、.．）)]$/.test(line);
+};
+
+const canUseNextLineAsReportHeadingTitle = (value: string) => {
+  const line = String(value || '').replace(/[\t　]+/g, ' ').trim();
+  if (!line || line.length > 80) return false;
+  if (isReportTopLevelHeading(line) || isStandaloneReportChapterMarker(line)) return false;
+  if (/^[\d\s.,，。:：;；%+-]+$/.test(line)) return false;
+  if (/^[+\-]?\d+(?:\.\d+)?\s*(?:kN|N|MN|MPa|kPa|Pa|kg|mm|cm|km|m\/s|km\/h|kV|Hz|%|℃|°)\b/i.test(line)) return false;
+  if (/^(图|表)\s*\d/.test(line)) return false;
+  if (/[。；;，,]$/.test(line)) return false;
+  return /[\u4e00-\u9fa5A-Za-z]/.test(line);
+};
+
+// 报告工作台只关心当前文档自身的一级章节，模板标题不得进入这里。
+const extractCurrentDocumentSections = (content: string): SectionAnalysis[] => {
+  const lines = String(content || '').split(/\r?\n/);
+  const normalizedLines = lines.map((raw, index) => ({
+    title: raw.replace(/[\t　]+/g, ' ').trim(),
+    index,
+  }));
+
+  let headings: Array<{ title: string; index: number; bodyStartIndex: number }> = [];
+  normalizedLines.forEach((line, index) => {
+    if (!line.title) return;
+
+    if (isStandaloneReportChapterMarker(line.title)) {
+      const next = normalizedLines.slice(index + 1, index + 4).find(item => item.title);
+      if (next && canUseNextLineAsReportHeadingTitle(next.title)) {
+        headings.push({
+          title: `${line.title} ${next.title}`,
+          index: line.index,
+          bodyStartIndex: next.index + 1,
+        });
+      }
+      return;
+    }
+
+    if (isReportTopLevelHeading(line.title)) {
+      headings.push({ title: line.title, index: line.index, bodyStartIndex: line.index + 1 });
+    }
+  });
+  if (!headings.length) return [];
+
+  const hasCanonicalTopLevel = headings.some(heading => isCanonicalReportTopLevelHeading(heading.title));
+  if (hasCanonicalTopLevel) {
+    headings = headings.filter(heading => !isArabicNumberedReportHeading(heading.title));
+  }
+  if (!headings.length) return [];
+
+  const candidates = headings.map((heading, index) => {
+    const end = headings[index + 1]?.index ?? lines.length;
+    const body = lines.slice(heading.bodyStartIndex, end).join('\n').trim();
+    return {
+      ...heading,
+      title: cleanReportHeadingTitle(heading.title),
+      isTocLike: isTocLikeReportHeading(heading.title),
+      body,
+      wordCount: body.replace(/\s/g, '').length,
+    };
+  });
+  const bestByTitle = new Map<string, typeof candidates[number]>();
+  candidates.forEach(candidate => {
+    const key = normalizeReportHeadingKey(candidate.title);
+    if (!key) return;
+    const existing = bestByTitle.get(key);
+    // 目录和正文重复时，正文通常拥有更多内容，优先保留正文位置。
+    if (!existing || (existing.isTocLike && !candidate.isTocLike) || (existing.isTocLike === candidate.isTocLike && candidate.wordCount > existing.wordCount)) bestByTitle.set(key, candidate);
+  });
+
+  return [...bestByTitle.values()]
+    .sort((a, b) => a.index - b.index)
+    .map((section, index) => ({
+      nodeId: `document-heading:renderer:${index}:${section.index}`,
+      title: section.title,
+      status: section.wordCount >= 80 ? 'completed' : section.wordCount > 0 ? 'partial' : 'missing',
+      wordCount: section.wordCount,
+      aiComment: section.wordCount === 0 ? '已识别到章节标题，但标题下暂未提取到正文。' : undefined,
+    }));
+};
 
 const getTemplateStageName = (template: WritingTemplate, allStages: any[]) =>
   template.category || detectTimelineStage(allStages, template.name, template.description);
@@ -435,6 +571,62 @@ const normalizeSectionAdvice = (value: unknown): AiSectionAdvice[] => {
   return items;
 };
 
+// 即使模型响应在尾部被截断，也尽量从 sectionAdvice 数组中恢复已完整输出的章节对象。
+const extractSectionAdviceFromRaw = (value: string): AiSectionAdvice[] => {
+  const marker = /["'](?:sectionAdvice|chapterAdvice|sectionPlans|sections)["']\s*:/i.exec(value);
+  if (!marker) return [];
+  const arrayStart = value.indexOf('[', marker.index + marker[0].length);
+  if (arrayStart < 0) return [];
+
+  const recovered: AiSectionAdvice[] = [];
+  let objectStart = -1;
+  let depth = 0;
+  let inString = false;
+  let quote = '';
+  let escaped = false;
+
+  for (let index = arrayStart + 1; index < value.length; index += 1) {
+    const char = value[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      inString = true;
+      quote = char;
+      continue;
+    }
+    if (char === '{') {
+      if (depth === 0) objectStart = index;
+      depth += 1;
+      continue;
+    }
+    if (char === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && objectStart >= 0) {
+        const candidate = value.slice(objectStart, index + 1)
+          .replace(/,\s*([}\]])/g, '$1');
+        try {
+          recovered.push(...normalizeSectionAdvice([JSON.parse(candidate)]));
+        } catch {
+          // 单个对象损坏不影响后续完整对象的恢复。
+        }
+        objectStart = -1;
+      }
+      continue;
+    }
+    if (char === ']' && depth === 0) break;
+  }
+
+  return recovered;
+};
+
 const normalizeWorkflowPlan = (value: unknown): AiWorkflowPlanItem[] => {
   if (!Array.isArray(value)) return [];
   return value
@@ -529,7 +721,11 @@ const parseAiStageReport = (value: string): AiStageReport => {
       writingStyleNotes: extractArray('writingStyleNotes'),
       writingFramework: extractArray('writingFramework'),
       writingDirection: extractArray('writingDirection'),
-      sectionAdvice: [], // 复杂对象暂不提取
+      materialPlan: extractArray('materialPlan'),
+      draftPlan: extractArray('draftPlan'),
+      humanTasks: extractArray('humanTasks'),
+      aiTasks: extractArray('aiTasks'),
+      sectionAdvice: extractSectionAdviceFromRaw(cleanText),
     };
   }
 
@@ -543,6 +739,8 @@ const parseAiStageReport = (value: string): AiStageReport => {
     // 如果 reportSummary 是对象，尝试提取文本
     reportSummary = parsed.reportSummary.text || parsed.reportSummary.content || JSON.stringify(parsed.reportSummary);
   }
+
+  const parsedSectionAdvice = normalizeSectionAdvice(parsed.sectionAdvice || parsed.chapterAdvice || parsed.sectionPlans || parsed.sections);
 
   return {
     reportTitle: String(parsed.reportTitle || parsed.title || '').trim(),
@@ -560,7 +758,7 @@ const parseAiStageReport = (value: string): AiStageReport => {
     humanTasks: normalizeStringList(parsed.humanTasks),
     aiTasks: normalizeStringList(parsed.aiTasks),
     workflowPlan: normalizeWorkflowPlan(parsed.workflowPlan || parsed.workflow || parsed.orderedTasks),
-    sectionAdvice: normalizeSectionAdvice(parsed.sectionAdvice || parsed.chapterAdvice || parsed.sectionPlans || parsed.sections),
+    sectionAdvice: parsedSectionAdvice.length ? parsedSectionAdvice : extractSectionAdviceFromRaw(value),
     rawText: value,
   };
 };
@@ -591,6 +789,7 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [isGeneratingAiReport, setIsGeneratingAiReport] = useState(false);
   const [refreshingAnalysisKey, setRefreshingAnalysisKey] = useState('');
   const [aiStageReport, setAiStageReport] = useState<AiStageReport | null>(null);
+  const [isRefreshingDocStatus, setIsRefreshingDocStatus] = useState(false);
   const [workflowDraftItems, setWorkflowDraftItems] = useState<WorkflowDraftItem[]>([]);
   const [nextActionDraftItems, setNextActionDraftItems] = useState<NextActionDraftItem[]>([]);
   const [form] = Form.useForm();
@@ -773,18 +972,35 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     if (selectedReportDoc.templateId === selectedDocTemplate.id) return;
     updateProjectDoc(selectedReportDoc.id, { templateId: selectedDocTemplate.id });
   }, [selectedReportDoc?.id, selectedReportDoc?.templateId, selectedDocTemplate?.id]);
-  const selectedSections = Array.isArray(selectedReportDoc?.sections) ? selectedReportDoc.sections : [];
+  const savedSelectedSections = Array.isArray(selectedReportDoc?.sections) ? selectedReportDoc.sections : [];
   const selectedDocContent = selectedDocVersion?.content || '';
+  const hasSavedCurrentDocumentStructure = savedSelectedSections.length > 0 && savedSelectedSections.every(section =>
+    String(section.nodeId || '').startsWith('document-heading:')
+  );
+  const currentDocumentSections = useMemo(
+    () => extractCurrentDocumentSections(selectedDocContent),
+    [selectedDocContent]
+  );
+  const selectedSections = currentDocumentSections.length > 0
+    ? currentDocumentSections
+    : hasSavedCurrentDocumentStructure ? savedSelectedSections : [];
+  const hasCurrentDocumentStructure = selectedSections.length > 0 && selectedSections.every(section =>
+    String(section.nodeId || '').startsWith('document-heading:')
+  );
   const selectedAnalysisHasIncompleteSections = selectedSections.some(section =>
     section.status === 'missing' || section.status === 'partial'
   );
   const canRefreshSelectedAnalysisFromFile = Boolean(selectedReportDoc?.sourceFilePath || selectedDocVersion?.filePath);
-  const isSelectedAnalysisStale = isSectionAnalysisStaleForTemplate(selectedReportDoc, selectedDocTemplate, selectedSections);
-  const isSelectedAnalysisLikelyFalseMissing = isLikelyFalseMissingSectionAnalysis(selectedSections, selectedDocContent);
+  const isSelectedAnalysisStale = isSectionAnalysisStaleForTemplate(selectedReportDoc, selectedDocTemplate, savedSelectedSections);
+  const isSelectedAnalysisLikelyFalseMissing = isLikelyFalseMissingSectionAnalysis(savedSelectedSections, selectedDocContent);
+  const sourceChangedAfterAnalysis = Boolean(
+    selectedReportDoc?.sourceFileModifiedAt &&
+    (!selectedReportDoc.analyzedAt || new Date(selectedReportDoc.sourceFileModifiedAt).getTime() > new Date(selectedReportDoc.analyzedAt).getTime())
+  );
   const shouldRefreshSelectedAnalysis =
-    isSelectedAnalysisStale ||
-    isSelectedAnalysisLikelyFalseMissing ||
-    (selectedAnalysisHasIncompleteSections && canRefreshSelectedAnalysisFromFile);
+    !hasCurrentDocumentStructure ||
+    sourceChangedAfterAnalysis ||
+    isSelectedAnalysisLikelyFalseMissing;
 
   useEffect(() => {
     if (!selectedReportDoc || !selectedDocTemplate || !shouldRefreshSelectedAnalysis) return;
@@ -819,21 +1035,35 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       if (cancelled || !content) return;
 
       try {
-        const result = await window.electronAPI.analyzeProjectDoc({
-          content,
-          template: selectedDocTemplate,
-          useAI: false,
-        });
-        if (!cancelled && result.success && result.sections) {
+        const localSections = extractCurrentDocumentSections(content);
+        let sections = localSections;
+        let overallProgress = localSections.length
+          ? Math.round(localSections.reduce((sum, section) => sum + (section.status === 'completed' ? 1 : section.status === 'partial' ? 0.5 : 0), 0) / localSections.length * 100)
+          : 0;
+
+        if (!sections.length) {
+          const result = await window.electronAPI.analyzeProjectDoc({
+            content,
+            template: selectedDocTemplate,
+            useAI: false,
+            actualStructure: true,
+          });
+          if (result.success) {
+            sections = result.sections || [];
+            overallProgress = result.overallProgress ?? 0;
+          }
+        }
+
+        if (!cancelled) {
           await updateProjectDoc(selectedReportDoc.id, {
             templateId: selectedDocTemplate.id,
-            sections: result.sections,
-            overallProgress: result.overallProgress ?? 0,
+            sections,
+            overallProgress,
             analyzedAt: new Date().toISOString(),
           });
         }
       } catch (error) {
-        console.warn('Failed to refresh stale section analysis:', error);
+        console.warn('Failed to refresh current document section analysis:', error);
       }
     };
     run();
@@ -876,10 +1106,10 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const incompleteSections = [...missingSections, ...partialSections];
   const totalSections = selectedSections.length;
   const completionScore = completedSections.length + partialSections.length * 0.5;
-  const stageProgressPercent = selectedReportDoc?.overallProgress ?? (totalSections ? Math.round(completionScore / totalSections * 100) : 0);
+  const stageProgressPercent = totalSections ? Math.round(completionScore / totalSections * 100) : (selectedReportDoc?.overallProgress ?? 0);
   const completionFormulaText = totalSections
-    ? `完成度 = (已完成 ${completedSections.length} + 部分完成 ${partialSections.length} × 0.5) / 模板章节 ${totalSections} = ${selectedReportDoc?.overallProgress || 0}%`
-    : '暂无模板章节，无法计算完成度';
+    ? `完成度 = (已完成 ${completedSections.length} + 部分完成 ${partialSections.length} × 0.5) / 当前文档章节 ${totalSections} = ${stageProgressPercent}%`
+    : '当前文档暂未识别到章节，无法计算完成度';
 
   useEffect(() => {
     // 尝试从 ProjectDocument 恢复已保存的 AI 报告
@@ -897,8 +1127,11 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
             } catch {}
           }
         }
-        setAiStageReport(saved);
-        setWorkflowDraftItems(createWorkflowDraftItemsFromReport(saved));
+        const restored = (!saved.sectionAdvice?.length && saved.rawText)
+          ? { ...saved, ...parseAiStageReport(saved.rawText), rawText: saved.rawText }
+          : saved;
+        setAiStageReport(restored);
+        setWorkflowDraftItems(createWorkflowDraftItemsFromReport(restored));
       } catch {
         setAiStageReport(null);
         setWorkflowDraftItems([]);
@@ -964,12 +1197,35 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     .filter(section => (section.problems?.length || 0) > 0 || (section.suggestions?.length || 0) > 0);
 
   const sectionAdviceItems = useMemo<AiSectionAdvice[]>(() => {
+    const currentDocumentTitles = selectedSections.map(section => section.title).filter(Boolean);
     const explicit = aiStageReport?.sectionAdvice || [];
-    if (explicit.length > 0) return cleanSectionAdviceItems(explicit);
+    if (explicit.length > 0) {
+      const cleanedExplicit = cleanSectionAdviceItems(explicit);
+      if (!currentDocumentTitles.length) return cleanedExplicit;
 
-    const titles: string[] = topLevelTemplateTitles.length
-      ? topLevelTemplateTitles
-      : selectedSections.map(section => section.title).filter(Boolean);
+      return currentDocumentTitles
+        .map((title) => {
+          const normalizedTitle = normalizeSectionTitleForCompare(title);
+          const matchedAdvice = cleanedExplicit.find(section => {
+            const normalizedAdvice = normalizeSectionTitleForCompare(section.title || '');
+            return normalizedAdvice === normalizedTitle ||
+              normalizedAdvice.includes(normalizedTitle) ||
+              normalizedTitle.includes(normalizedAdvice);
+          });
+          if (matchedAdvice) return { ...matchedAdvice, title: cleanReportHeadingTitle(title) };
+
+          const matchedSection = selectedSections.find(section => normalizeSectionTitleForCompare(section.title || '') === normalizedTitle);
+          if (!matchedSection || matchedSection.status === 'completed') return null;
+          const problems = matchedSection.status === 'missing'
+            ? ['当前文档中未稳定提取到该章节正文。']
+            : [`当前文档已识别到该章节，但内容仍偏薄或缺少支撑材料（约 ${matchedSection.wordCount || 0} 字）。`];
+          const suggestions = ['围绕当前文档该章节补齐事实、数据、依据和表达口径，再由 AI 做扩写、结构优化或润色。'];
+          return { title: cleanReportHeadingTitle(title), problems, suggestions };
+        })
+        .filter(Boolean) as AiSectionAdvice[];
+    }
+
+    const titles: string[] = currentDocumentTitles;
     const generalSuggestions: string[] = [
       ...(aiStageReport?.writingFramework || []),
       ...(aiStageReport?.writingDirection || []),
@@ -1015,11 +1271,11 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           suggestions.push('按模板要求补齐该章节的核心事实、数据、依据和表达口径，再交给 AI 做扩写或润色。');
         }
 
-        return { title, problems, suggestions };
+        return { title: cleanReportHeadingTitle(title), problems, suggestions };
       })
       .filter(item => item.problems.length > 0 || item.suggestions.length > 0)
       .slice(0, 12);
-  }, [aiStageReport, selectedSections, topLevelTemplateTitles]);
+  }, [aiStageReport, selectedSections]);
 
   const taskStats = useMemo(() => {
     const open = scopedProjectTasks.filter((t) => t.status !== 'completed').length;
@@ -1124,6 +1380,9 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const workflowTasks = filteredTasks.filter(task => Boolean(task.workflowId));
   const aiTasks = filteredTasks.filter(task => task.type === 'ai' && !task.workflowId);
   const manualTasks = filteredTasks.filter(task => task.type === 'manual' && !task.workflowId);
+  const hasStandaloneTasks = manualTasks.length > 0 || aiTasks.length > 0;
+  const hasWorkflowDraft = workflowDraftItems.length > 0;
+  const showWorkflowTasks = workflowTasks.length > 0 && !hasWorkflowDraft;
 
   if (!currentProject) {
     return (
@@ -1224,32 +1483,62 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
   const refreshReportDocAnalysis = async (content: string) => {
     if (!selectedReportDoc || !selectedDocTemplate || !content.trim()) return null;
-    const hasUsableSectionStats = selectedSections.some(section => section.wordCount > 0 || section.status !== 'missing');
-    const isStale = isSectionAnalysisStaleForTemplate(selectedReportDoc, selectedDocTemplate, selectedSections);
-    const likelyFalseMissing = isLikelyFalseMissingSectionAnalysis(selectedSections, content);
-    if (hasUsableSectionStats && !isStale && !likelyFalseMissing) return null;
 
     try {
-      const result = await window.electronAPI.analyzeProjectDoc({
-        content,
-        template: selectedDocTemplate,
-        useAI: false,
-      });
-      if (result.success && result.sections) {
-        const refreshed = {
-          sections: result.sections,
-          overallProgress: result.overallProgress ?? selectedReportDoc.overallProgress,
-        };
-        await updateProjectDoc(selectedReportDoc.id, {
-          ...refreshed,
-          analyzedAt: new Date().toISOString(),
+      let sections = extractCurrentDocumentSections(content);
+      let overallProgress = sections.length
+        ? Math.round(sections.reduce((sum, section) => sum + (section.status === 'completed' ? 1 : section.status === 'partial' ? 0.5 : 0), 0) / sections.length * 100)
+        : 0;
+
+      if (!sections.length) {
+        const result = await window.electronAPI.analyzeProjectDoc({
+          content,
+          template: selectedDocTemplate,
+          useAI: false,
+          actualStructure: true,
         });
-        return refreshed;
+        if (!result.success) return null;
+        sections = result.sections || [];
+        overallProgress = result.overallProgress ?? selectedReportDoc.overallProgress;
       }
+
+      const refreshed = { sections, overallProgress };
+      await updateProjectDoc(selectedReportDoc.id, {
+        ...refreshed,
+        analyzedAt: new Date().toISOString(),
+      });
+      return refreshed;
     } catch (error) {
       console.warn('Failed to refresh report doc analysis:', error);
     }
     return null;
+  };
+  const handleRefreshReportDocStatus = async () => {
+    if (!selectedReportDoc) {
+      message.warning('请先选择阶段文档');
+      return;
+    }
+    if (!selectedDocTemplate) {
+      message.warning('当前文档未关联模板，无法获取文档状态');
+      return;
+    }
+
+    setIsRefreshingDocStatus(true);
+    try {
+      const reportDocument = await loadReportDocumentContent();
+      if (!reportDocument.content.trim()) {
+        message.warning(`未能读取文档内容：${reportDocument.source}`);
+        return;
+      }
+      const refreshed = await refreshReportDocAnalysis(reportDocument.content);
+      if (!refreshed || refreshed.sections.length === 0) {
+        message.warning('未识别到当前文档章节，请检查文档标题格式');
+        return;
+      }
+      message.success(`已获取文档状态：识别到 ${refreshed.sections.length} 个章节`);
+    } finally {
+      setIsRefreshingDocStatus(false);
+    }
   };
   const handleGenerateAiStageReport = async () => {
     if (!selectedReportDoc) {
@@ -1276,9 +1565,8 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         `- [${issue.severity}] ${issue.sectionTitle || ''} ${issue.message}${issue.suggestion ? `；建议：${issue.suggestion}` : ''}`
       )).join('\n') || '暂无审查Tab结果';
       const reportDocument = await loadReportDocumentContent();
-      const refreshedAnalysis = await refreshReportDocAnalysis(reportDocument.content);
-      const effectiveSections = refreshedAnalysis?.sections || selectedSections;
-      const effectiveProgress = refreshedAnalysis?.overallProgress ?? selectedReportDoc.overallProgress;
+      const effectiveSections = selectedSections;
+      const effectiveProgress = stageProgressPercent;
       const sectionStatus = effectiveSections.map(section => (
         `- ${section.title}：${section.status}，字数 ${section.wordCount}${section.aiComment ? `，评语：${section.aiComment}` : ''}`
       )).join('\n');
@@ -1305,18 +1593,18 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 8. workflowPlan 必须按真实写作流转排序；通常优先 AI 框架/初稿，然后人工补资料确认，再 AI 扩写/润色，再人工成稿确认。
 9. 每个任务要具体、可执行，避免空泛建议。
 10. 审查Tab已有结果只能作为背景参考，不能在这里重新做审查或下结论。
-11. 前台主要展示 sectionAdvice。${isExampleTemplate ? '当前是范文模板：sectionAdvice 按写作方向输出，不要求使用范文原始标题，也不要判定范文标题缺失。' : '当前是直接套用模板：必须按模板一级标题逐项输出；有问题才输出，没有问题的一级标题可以省略。'}
+11. 前台主要展示 sectionAdvice。sectionAdvice 的 title 必须优先使用“当前文档章节状态”中的当前文档一级标题；不要使用范文标题替代当前文档标题。${isExampleTemplate ? '当前是范文模板：范文只用于写作方向，不判定范文标题缺失。' : '当前是直接套用模板：可参考模板要求判断问题，但展示标题仍使用当前文档标题。'}
 12. ${isExampleTemplate ? '范文模板只参考“整体概述 -> 技术层面由浅入深展开 -> 试验/应用 -> 总结展望”等路径，不把范文事实或标题当硬约束。' : '直接套用模板的全局结构约束不要重复写入每个章节的 suggestions；只有缺少标题、顺序错误或结构错乱时才指出。'}
 
-JSON 字段：
+JSON 字段（必须先完整输出 sectionAdvice，再输出其余数组，避免长响应截断时丢失前台核心内容）：
 {
   "reportTitle": "标题",
   "reportSummary": "阶段文档写作框架与方向摘要，300-600字",
+  "sectionAdvice": [{"title": "必须使用当前文档章节状态中的当前文档一级标题", "problems": ["结合该章现有正文指出具体问题，不得复制其他章节的通用句"], "suggestions": ["该章节下一步怎么写、补什么、AI如何改，必须可执行"]}],
   "templateFit": ["模板要求转化成的写作约束"],
   "writingStyleNotes": ["从范文/参考内容提取的结构、方法和表达特征"],
   "writingFramework": ["供AI内部参考的章节框架，不作为前台主要展示"],
   "writingDirection": ["供AI内部参考的写作方向，不作为前台主要展示"],
-  "sectionAdvice": [{"title": "模板一级标题，如 一、总体目标", "problems": ["该章节当前存在的问题，必须具体"], "suggestions": ["该章节下一步怎么写、补什么、AI如何改，必须可执行"]}],
   "materialPlan": ["需要人工准备或确认的材料、数据、附件、口径"],
   "draftPlan": ["AI可执行的初稿、扩写、润色、整理任务"],
   "humanTasks": ["人工资料/口径/成稿确认任务"],
@@ -1667,7 +1955,17 @@ ${documentContent.slice(0, 9000)}`;
   );
 
   return (
-    <div>
+    <div
+      className="report-workbench-page"
+      style={{
+        height: '100%',
+        minHeight: 0,
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        paddingRight: 4,
+        scrollbarGutter: 'stable',
+      }}
+    >
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, alignItems: 'flex-start' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
@@ -1690,7 +1988,7 @@ ${documentContent.slice(0, 9000)}`;
             <Col span={6}><Statistic title="待处理任务" value={taskStats.open} /></Col>
             <Col span={6}><Statistic title="审查待办" value={taskStats.review} /></Col>
           </Row>
-          <Progress percent={selectedReportDoc?.overallProgress || projectProgress} style={{ marginTop: 12, marginBottom: 0 }} />
+          <Progress percent={stageProgressPercent || projectProgress} style={{ marginTop: 12, marginBottom: 0 }} />
         </Card>
 
         <Card title="阶段文档报告">
@@ -1752,7 +2050,7 @@ ${documentContent.slice(0, 9000)}`;
                     </Space>
                   </div>
                   {selectedReportDoc && (
-                    <Progress percent={selectedReportDoc.overallProgress} size="small" showInfo={false} style={{ marginTop: 8, marginBottom: 0 }} />
+                    <Progress percent={stageProgressPercent} size="small" showInfo={false} style={{ marginTop: 8, marginBottom: 0 }} />
                   )}
                 </button>
 
@@ -1796,33 +2094,61 @@ ${documentContent.slice(0, 9000)}`;
 
             {selectedReportDoc && (
               <>
-                <Row gutter={12}>
-                  <Col span={6}>
-                    <div style={{ border: '1px solid #edf0f5', borderRadius: 8, padding: 12 }}>
-                      <Text type="secondary">当前版本</Text>
-                      <Title level={5} style={{ margin: '6px 0 0' }}>{versionSummary}</Title>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+                    gap: 12,
+                  }}
+                >
+                  {[
+                    { label: '当前版本', value: versionSummary, note: '当前选中文档', color: '#1677ff', icon: <FileTextOutlined /> },
+                    { label: '文档完成度', value: `${stageProgressPercent}%`, note: `${completionScore}/${totalSections || 0} 章节分`, color: '#52c41a', icon: <CheckCircleOutlined /> },
+                    { label: '章节问题', value: missingSections.length + partialSections.length, note: `缺失 ${missingSections.length} · 部分 ${partialSections.length}`, color: '#fa8c16', icon: <SyncOutlined /> },
+                    { label: '关联待办', value: openSelectedDocTasks.length, note: '未完成任务', color: '#722ed1', icon: <RobotOutlined /> },
+                  ].map((item) => (
+                    <div
+                      key={item.label}
+                      style={{
+                        position: 'relative',
+                        minWidth: 0,
+                        minHeight: 96,
+                        border: '1px solid #e8edf5',
+                        borderRadius: 10,
+                        padding: '14px 16px',
+                        background: 'linear-gradient(180deg, #ffffff 0%, #fbfdff 100%)',
+                        boxShadow: '0 6px 18px rgba(15, 23, 42, 0.04)',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: item.color }} />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+                        <div style={{ minWidth: 0 }}>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{item.label}</Text>
+                          <Title level={5} ellipsis={{ tooltip: String(item.value) }} style={{ margin: '7px 0 2px', fontSize: 17, lineHeight: 1.35 }}>
+                            {item.value}
+                          </Title>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{item.note}</Text>
+                        </div>
+                        <div
+                          style={{
+                            width: 32,
+                            height: 32,
+                            borderRadius: 8,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: item.color,
+                            background: `${item.color}14`,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {item.icon}
+                        </div>
+                      </div>
                     </div>
-                  </Col>
-                  <Col span={6}>
-                    <div style={{ border: '1px solid #edf0f5', borderRadius: 8, padding: 12 }}>
-                      <Text type="secondary">文档完成度</Text>
-                      <Title level={5} style={{ margin: '6px 0 0' }}>{selectedReportDoc.overallProgress}%</Title>
-                      <Text type="secondary" style={{ fontSize: 12 }}>{completionScore}/{totalSections || 0} 章节分</Text>
-                    </div>
-                  </Col>
-                  <Col span={6}>
-                    <div style={{ border: '1px solid #edf0f5', borderRadius: 8, padding: 12 }}>
-                      <Text type="secondary">章节问题</Text>
-                      <Title level={5} style={{ margin: '6px 0 0' }}>{missingSections.length + partialSections.length}</Title>
-                    </div>
-                  </Col>
-                  <Col span={6}>
-                    <div style={{ border: '1px solid #edf0f5', borderRadius: 8, padding: 12 }}>
-                      <Text type="secondary">关联待办</Text>
-                      <Title level={5} style={{ margin: '6px 0 0' }}>{openSelectedDocTasks.length}</Title>
-                    </div>
-                  </Col>
-                </Row>
+                  ))}
+                </div>
 
                 <Row gutter={16}>
                   <Col span={10}>
@@ -1839,7 +2165,12 @@ ${documentContent.slice(0, 9000)}`;
                   </Col>
                   <Col span={14}>
                     <div style={{ border: '1px solid #edf0f5', borderRadius: 8, padding: 14, height: '100%' }}>
-                      <Title level={5} style={{ marginTop: 0 }}>阶段文档状态</Title>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                        <Title level={5} style={{ margin: 0 }}>阶段文档状态</Title>
+                        <Button size="small" loading={isRefreshingDocStatus} onClick={handleRefreshReportDocStatus}>
+                          获取文档状态
+                        </Button>
+                      </div>
                       <Space direction="vertical" size={10} style={{ width: '100%' }}>
                         <div>
                           <Text type="secondary">已完成章节</Text>
@@ -1852,34 +2183,38 @@ ${documentContent.slice(0, 9000)}`;
                           <Tag color="blue">待办 {openSelectedDocTasks.length}</Tag>
                         </Space>
                         <Text type="secondary">{completionFormulaText}</Text>
-                        {incompleteSections.length > 0 && (
+                        {selectedSections.length > 0 && (
                           <div style={{ borderTop: '1px solid #edf0f5', paddingTop: 10 }}>
-                            <Text strong>未完成项</Text>
+                            <Text strong>章节列表</Text>
                             <List
                               size="small"
-                              dataSource={incompleteSections}
+                              dataSource={selectedSections}
                               style={{ marginTop: 6 }}
-                              renderItem={(section) => (
-                                <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
-                                  <List.Item.Meta
-                                    title={
-                                      <Space wrap>
-                                        <Tag color={section.status === 'missing' ? 'red' : 'orange'}>
-                                          {section.status === 'missing' ? '缺失' : '部分完成'}
-                                        </Tag>
-                                        <Text>{section.title}</Text>
-                                        <Text type="secondary">{section.wordCount} 字</Text>
-                                      </Space>
-                                    }
-                                    description={
-                                      section.aiComment ||
-                                      (section.status === 'missing'
-                                        ? '模板要求有该章节，但当前正文未匹配到对应标题或内容。'
-                                        : '已识别到该章节，但内容仍需补充完善。')
-                                    }
-                                  />
-                                </List.Item>
-                              )}
+                              renderItem={(section) => {
+                                const statusColor = section.status === 'missing' ? 'red' : section.status === 'partial' ? 'orange' : 'green';
+                                const statusText = section.status === 'missing' ? '缺失' : section.status === 'partial' ? '部分完成' : '已完成';
+                                return (
+                                  <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
+                                    <List.Item.Meta
+                                      title={
+                                        <Space wrap>
+                                          <Tag color={statusColor}>{statusText}</Tag>
+                                          <Text>{cleanReportHeadingTitle(section.title)}</Text>
+                                          <Text type="secondary">{section.wordCount} 字</Text>
+                                        </Space>
+                                      }
+                                      description={
+                                        section.aiComment ||
+                                        (section.status === 'missing'
+                                          ? '当前文档中未稳定提取到该章节正文。'
+                                          : section.status === 'partial'
+                                            ? '已识别到该章节，但内容仍需补充完善。'
+                                            : '已识别到该章节，内容相对完整。')
+                                      }
+                                    />
+                                  </List.Item>
+                                );
+                              }}
                             />
                           </div>
                         )}
@@ -2004,14 +2339,14 @@ ${documentContent.slice(0, 9000)}`;
                         <div style={{ border: '1px solid #dbeafe', background: '#fff', borderRadius: 10, padding: 14 }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 12 }}>
                             <Title level={5} style={{ margin: 0 }}>按章节的问题与建议</Title>
-                            <Text type="secondary" style={{ fontSize: 12 }}>按模板一级标题组织；无问题章节不显示</Text>
+                            <Text type="secondary" style={{ fontSize: 12 }}>按当前文档一级标题组织；无问题章节不显示</Text>
                           </div>
                           {sectionAdviceItems.length > 0 ? (
                             <Space direction="vertical" size={12} style={{ width: '100%' }}>
                               {sectionAdviceItems.map((section, sectionIndex) => (
                                 <div key={`${section.title}-${sectionIndex}`} style={{ border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
                                   <div style={{ padding: '10px 12px', background: '#f8fafc', borderBottom: '1px solid #e5e7eb', display: 'flex', justifyContent: 'space-between', gap: 10 }}>
-                                    <Text strong>{section.title}</Text>
+                                    <Text strong>{cleanReportHeadingTitle(section.title)}</Text>
                                     <Tag color="blue" style={{ margin: 0 }}>一级标题</Tag>
                                   </div>
                                   <Row gutter={0}>
@@ -2249,11 +2584,43 @@ ${documentContent.slice(0, 9000)}`;
             </Space>
           }
         >
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12 }}>
-            {renderTaskGroup('人工任务', '资料、口径、改稿、成稿确认', manualTasks, '#52c41a')}
-            {renderTaskGroup('AI任务', '框架、提纲、初稿、扩写、润色', aiTasks, '#1677ff')}
-            {renderTaskGroup('工作流任务', '报告页确认后的顺序执行计划', workflowTasks, '#722ed1')}
-          </div>
+          {(hasStandaloneTasks || showWorkflowTasks) ? (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: showWorkflowTasks && hasStandaloneTasks
+                  ? 'minmax(240px, 0.8fr) minmax(240px, 0.8fr) minmax(520px, 1.4fr)'
+                  : showWorkflowTasks
+                    ? 'minmax(0, 1fr)'
+                    : 'repeat(2, minmax(260px, 1fr))',
+                gap: 12,
+                alignItems: 'start',
+              }}
+            >
+              {hasStandaloneTasks && renderTaskGroup('人工任务', '资料、口径、改稿、成稿确认', manualTasks, '#52c41a')}
+              {hasStandaloneTasks && renderTaskGroup('AI任务', '框架、提纲、初稿、扩写、润色', aiTasks, '#1677ff')}
+              {showWorkflowTasks && renderTaskGroup('工作流任务', '报告页确认后的顺序执行计划', workflowTasks, '#722ed1')}
+            </div>
+          ) : (
+            <Empty
+              description={hasWorkflowDraft ? '工作流草稿确认生成后，会在这里显示工作流任务' : '暂无任务'}
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+            />
+          )}
+          {!hasStandaloneTasks && !showWorkflowTasks && !hasWorkflowDraft && (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                gap: 12,
+                marginTop: 12,
+                alignItems: 'start',
+              }}
+            >
+              {renderTaskGroup('人工任务', '资料、口径、改稿、成稿确认', manualTasks, '#52c41a')}
+              {renderTaskGroup('AI任务', '框架、提纲、初稿、扩写、润色', aiTasks, '#1677ff')}
+            </div>
+          )}
         </Card>
       </Space>
 

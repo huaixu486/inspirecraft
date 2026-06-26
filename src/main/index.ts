@@ -1,4 +1,4 @@
-﻿import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } from 'electron';
 import { net } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -315,10 +315,69 @@ function saveProjectDocsToDisk(docs: ProjectDocument[]) {
 // 中文数字映射
 const cnNumMap: Record<string, number> = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12 };
 
+function normalizeTechnicalValueText(value: string): string {
+  return String(value || '')
+    .replace(/[，]/g, ',')
+    .replace(/[．。]/g, '.')
+    .replace(/[：]/g, ':')
+    .replace(/[（]/g, '(')
+    .replace(/[）]/g, ')')
+    .replace(/[－–—]/g, '-')
+    .replace(/[～]/g, '~')
+    .replace(/\s+/g, '');
+}
+
+function stripDocumentHeadingPrefix(value: string): string {
+  return String(value || '')
+    .trim()
+    .replace(/^第[一二三四五六七八九十百千万零〇两\d]+[章节部分篇][、.．：:\s]*/, '')
+    .replace(/^[一二三四五六七八九十百千万零〇两]+[、.．）)]\s*/, '')
+    .replace(/^\d+(?:[.．-]\d+)*[、.．）)]?\s*/, '')
+    .replace(/^[（(][一二三四五六七八九十百千万零〇两\d]+[）)]\s*/, '');
+}
+
+function isLikelyTechnicalValueLine(value: string): boolean {
+  const original = normalizeTechnicalValueText(value);
+  const stripped = normalizeTechnicalValueText(stripDocumentHeadingPrefix(value));
+  const raw = original || stripped;
+  if (!raw) return false;
+
+  const lower = raw.toLowerCase();
+  const hasCjk = /[\u4e00-\u9fa5]/.test(lower);
+  const unit = '(?:km/h|m/s|kn|mn|mpa|kpa|pa|kg|mm|cm|km|kv|ma|hz|min|ms|rpm|kw|db|n|g|t|m|v|a|s|h|w|%|deg|rad|°|℃|nm|Ω)';
+  const number = '[+-]?\\d+(?:\\.\\d+)?';
+  const headingLikeEnding = /(?:系统|方案|设计|架构|功能|模块|流程|方法|算法|模型|平台|装置|应用|试验|测试|验证|分析|结果|原理|结构|小结|概述|现状|总结|展望)$/;
+  if (hasCjk && headingLikeEnding.test(raw)) return false;
+
+  const valueWithUnit = new RegExp(`^${number}${unit}(?:[~\\-至到,，;；、/]?${number}${unit}?)*`, 'i');
+  if ((valueWithUnit.test(raw) || valueWithUnit.test(stripped)) && !headingLikeEnding.test(raw)) return true;
+
+  const pureValueList = new RegExp(`^(?:${number}|${number}${unit})(?:[~\\-至到,，;；、/]?(?:${number}|${number}${unit}))*$`, 'i');
+  if (!hasCjk && (pureValueList.test(raw) || pureValueList.test(stripped))) return true;
+
+  const strippedKnown = lower
+    .replace(new RegExp(unit, 'gi'), '')
+    .replace(/\d+(?:\.\d+)?/g, '')
+    .replace(/[+\-~～至到,，;；、:：\/\\()[\]{}<>≤≥=×x*%°℃′'″"·]/g, '');
+  if (!hasCjk && strippedKnown.length === 0 && /\d/.test(lower)) return true;
+  if (!hasCjk && new RegExp(unit, 'i').test(lower) && /^[\d.+\-~～,，;；、:：\/\\()[\]{}<>≤≥=×x*%°℃′'″"·a-zωΩ]+$/i.test(lower)) return true;
+  return false;
+}
+
+function isLikelyTableOfContentsLine(value: string): boolean {
+  const line = String(value || '').trim();
+  if (!line) return false;
+  if (/\.{3,}\s*\d+\s*$/.test(line)) return true;
+  if (/[·•…]{3,}\s*\d+\s*$/.test(line)) return true;
+  return /\s{2,}\d+\s*$/.test(line) && /^([一二三四五六七八九十百千万零〇两]+[、.．）)]|第[一二三四五六七八九十百千万零〇两\d]+[章节部分篇]|\d+(?:[.．-]\d+)+)/.test(line);
+}
+
 // 检测标题行
 function isHeadingLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed || trimmed.length > 120) return false;
+  if (isLikelyTableOfContentsLine(trimmed)) return false;
+  if (isLikelyTechnicalValueLine(trimmed)) return false;
   return /^([一二三四五六七八九十百千万零〇两]+[、.．）)]|第[一二三四五六七八九十百千万零〇两\d]+[章节部分篇]|\d+(?:[.．-]\d+)*[、.．）)]?|[（(][一二三四五六七八九十百千万零〇两\d]+[）)])\s*\S/.test(trimmed);
 }
 
@@ -334,12 +393,7 @@ function getHeadingLevel(line: string): number {
 }
 
 function stripHeadingPrefix(value: string): string {
-  return String(value || '')
-    .trim()
-    .replace(/^第[一二三四五六七八九十百千万零〇两\d]+[章节部分篇][、.．：:\s]*/, '')
-    .replace(/^[一二三四五六七八九十百千万零〇两]+[、.．）)]\s*/, '')
-    .replace(/^\d+(?:[.．-]\d+)*[、.．）)]?\s*/, '')
-    .replace(/^[（(][一二三四五六七八九十百千万零〇两\d]+[）)]\s*/, '');
+  return stripDocumentHeadingPrefix(value);
 }
 
 function escapeRegExp(value: string): string {
@@ -347,8 +401,7 @@ function escapeRegExp(value: string): string {
 }
 
 function startsWithHeadingPattern(line: string): boolean {
-  const trimmed = String(line || '').trim();
-  return /^([一二三四五六七八九十百千万零〇两]+[、.．）)]|第[一二三四五六七八九十百千万零〇两\d]+[章节部分篇]|\d+(?:[.．-]\d+)*[、.．）)]?|[（(][一二三四五六七八九十百千万零〇两\d]+[）)])\s*\S/.test(trimmed);
+  return isHeadingLine(String(line || ''));
 }
 
 function normalizeHeadingForMatch(value: string): string {
@@ -573,22 +626,69 @@ function findSectionForTemplateNode(
   return null;
 }
 
-function flattenNodes(nodes: TemplateNode[]): TemplateNode[] {
+function isOperationalTemplateNode(node: TemplateNode, template?: WritingTemplate): boolean {
+  const title = String(node.title || '').trim();
+  if (!title || isLikelyTechnicalValueLine(title)) return false;
+  if (template?.templateType === 'example') return (node.level || 1) <= 1;
+  return true;
+}
+
+function flattenNodes(nodes: TemplateNode[], template?: WritingTemplate): TemplateNode[] {
   const result: TemplateNode[] = [];
-  for (const node of nodes) {
+  for (const node of nodes || []) {
+    if (!isOperationalTemplateNode(node, template)) continue;
     result.push(node);
-    if (node.children && node.children.length > 0) {
-      result.push(...flattenNodes(node.children));
+    if (template?.templateType !== 'example' && node.children && node.children.length > 0) {
+      result.push(...flattenNodes(node.children, template));
     }
   }
   return result;
+}
+
+// 按当前文档自身的标题生成章节状态，不把模板或范文标题混入文档结构。
+function analyzeActualDocumentStructure(content: string): SectionAnalysis[] {
+  const extracted = extractSections(content);
+  if (!extracted.length) return [];
+
+  const topLevel = extracted.filter(section => section.level === 1);
+  const minimumLevel = Math.min(...extracted.map(section => section.level));
+  const candidates = topLevel.length
+    ? topLevel
+    : extracted.filter(section => section.level === minimumLevel);
+  const bestByTitle = new Map<string, typeof candidates[number]>();
+
+  candidates.forEach(section => {
+    const key = normalizeHeadingForMatch(section.title);
+    if (!key) return;
+    const existing = bestByTitle.get(key);
+    // PDF 的目录和正文可能各出现一次同名标题，保留正文量更多的那一次。
+    if (!existing || countContentChars(section.content) > countContentChars(existing.content)) {
+      bestByTitle.set(key, section);
+    }
+  });
+
+  return [...bestByTitle.values()]
+    .sort((a, b) => a.startPos - b.startPos)
+    .map((section, index) => {
+      const wordCount = countContentChars(section.content);
+      const status: SectionAnalysis['status'] = wordCount >= 80
+        ? 'completed'
+        : wordCount > 0 ? 'partial' : 'missing';
+      return {
+        nodeId: `document-heading:${index}:${section.startPos}`,
+        title: section.title,
+        status,
+        wordCount,
+        aiComment: wordCount === 0 ? '已识别到章节标题，但标题下暂未提取到正文。' : undefined,
+      };
+    });
 }
 
 // 基础分析（正则，无 AI）
 function analyzeBasic(content: string, template: WritingTemplate): SectionAnalysis[] {
   const extracted = extractSections(content);
   const normalizedContent = normalizeContentForSectionMatch(content);
-  const allNodes = flattenNodes(template.nodes);
+  const allNodes = flattenNodes(template.nodes, template);
   const isExampleTemplate = template.templateType === 'example';
   const results: SectionAnalysis[] = [];
 
@@ -1202,24 +1302,130 @@ ipcMain.handle('file:importFiles', async (_event: any, params: { folderPath: str
   try {
     const { folderPath, filePaths } = params;
     if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
+    if (!fs.statSync(folderPath).isDirectory()) return { success: false, error: '目标位置不是文件夹' };
+
+    const targetResolved = path.resolve(folderPath);
     const imported: { name: string; path: string }[] = [];
     for (const sourcePath of filePaths) {
       if (!sourcePath || !fs.existsSync(sourcePath)) continue;
+      const sourceResolved = path.resolve(sourcePath);
       const stat = fs.statSync(sourcePath);
-      if (!stat.isFile()) continue;
-      const ext = path.extname(sourcePath);
+      const isDirectory = stat.isDirectory();
+      if (!isDirectory && !stat.isFile()) continue;
+
+      // 防止把文件夹复制到自身或子文件夹里，避免递归膨胀。
+      if (isDirectory && (targetResolved === sourceResolved || targetResolved.startsWith(sourceResolved + path.sep))) {
+        continue;
+      }
+
+      const ext = isDirectory ? '' : path.extname(sourcePath);
       const base = path.basename(sourcePath, ext);
       let destPath = path.join(folderPath, path.basename(sourcePath));
       let index = 1;
-      while (fs.existsSync(destPath) && path.resolve(destPath) !== path.resolve(sourcePath)) {
+      while (fs.existsSync(destPath) && path.resolve(destPath) !== sourceResolved) {
         destPath = path.join(folderPath, `${base} (${index})${ext}`);
         index += 1;
       }
-      if (path.resolve(destPath) === path.resolve(sourcePath)) continue;
-      fs.copyFileSync(sourcePath, destPath);
+      if (path.resolve(destPath) === sourceResolved) continue;
+
+      if (isDirectory) {
+        fs.cpSync(sourcePath, destPath, { recursive: true, errorOnExist: true });
+      } else {
+        fs.copyFileSync(sourcePath, destPath, fs.constants.COPYFILE_EXCL);
+      }
       imported.push({ name: path.basename(destPath), path: destPath });
     }
     return { success: true, files: imported };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('file:move', async (_event: any, params: { sourcePaths: string[]; targetFolder: string }) => {
+  try {
+    const { sourcePaths, targetFolder } = params;
+    if (!targetFolder) return { success: false, error: '目标文件夹无效' };
+    if (!fs.existsSync(targetFolder)) fs.mkdirSync(targetFolder, { recursive: true });
+    if (!fs.statSync(targetFolder).isDirectory()) return { success: false, error: '目标位置不是文件夹' };
+
+    const targetResolved = path.resolve(targetFolder);
+    const moved: { name: string; path: string; sourcePath: string; isDirectory: boolean }[] = [];
+    const errors: string[] = [];
+
+    for (const sourcePath of sourcePaths) {
+      if (!sourcePath || !fs.existsSync(sourcePath)) {
+        errors.push(`${path.basename(sourcePath || '') || '项目'}不存在`);
+        continue;
+      }
+      const sourceResolved = path.resolve(sourcePath);
+      const stat = fs.statSync(sourcePath);
+      const isDirectory = stat.isDirectory();
+      if (!isDirectory && !stat.isFile()) continue;
+      if (path.dirname(sourceResolved) === targetResolved) continue;
+      if (isDirectory && (targetResolved === sourceResolved || targetResolved.startsWith(sourceResolved + path.sep))) {
+        errors.push(`不能把“${path.basename(sourcePath)}”移动到自身或其子文件夹中`);
+        continue;
+      }
+
+      const destPath = path.join(targetFolder, path.basename(sourcePath));
+      if (fs.existsSync(destPath)) {
+        errors.push(`“${path.basename(sourcePath)}”已存在于目标文件夹`);
+        continue;
+      }
+
+      try {
+        fs.renameSync(sourcePath, destPath);
+      } catch (error: any) {
+        if (error?.code !== 'EXDEV') throw error;
+        if (isDirectory) {
+          fs.cpSync(sourcePath, destPath, { recursive: true, errorOnExist: true });
+          fs.rmSync(sourcePath, { recursive: true, force: false });
+        } else {
+          fs.copyFileSync(sourcePath, destPath, fs.constants.COPYFILE_EXCL);
+          fs.unlinkSync(sourcePath);
+        }
+      }
+      moved.push({ name: path.basename(destPath), path: destPath, sourcePath, isDirectory });
+    }
+
+    return { success: errors.length === 0, moved, errors, error: errors.join('；') || undefined };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('file:duplicate', async (_event: any, params: { sourcePaths: string[]; targetFolder: string }) => {
+  try {
+    const { sourcePaths, targetFolder } = params;
+    if (!fs.existsSync(targetFolder)) fs.mkdirSync(targetFolder, { recursive: true });
+    const copies: { name: string; path: string; isDirectory: boolean }[] = [];
+
+    for (const sourcePath of sourcePaths) {
+      if (!sourcePath || !fs.existsSync(sourcePath)) continue;
+      const stat = fs.statSync(sourcePath);
+      const isDirectory = stat.isDirectory();
+      if (!isDirectory && !stat.isFile()) continue;
+
+      const ext = isDirectory ? '' : path.extname(sourcePath);
+      const base = path.basename(sourcePath, ext);
+      let suffix = ' - 副本';
+      let destPath = path.join(targetFolder, `${base}${suffix}${ext}`);
+      let index = 2;
+      while (fs.existsSync(destPath)) {
+        suffix = ` - 副本 (${index})`;
+        destPath = path.join(targetFolder, `${base}${suffix}${ext}`);
+        index += 1;
+      }
+
+      if (isDirectory) {
+        fs.cpSync(sourcePath, destPath, { recursive: true, errorOnExist: true });
+      } else {
+        fs.copyFileSync(sourcePath, destPath, fs.constants.COPYFILE_EXCL);
+      }
+      copies.push({ name: path.basename(destPath), path: destPath, isDirectory });
+    }
+
+    return { success: true, copies };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
@@ -1302,8 +1508,47 @@ ipcMain.handle('project:save', async (_event: any, project: Project) => {
   saveProjectsToDisk(projects);
 });
 
+function getLatestProjectFolderModifiedAt(folderPath: string): string | undefined {
+  if (!folderPath || !fs.existsSync(folderPath)) return undefined;
+
+  let latest = 0;
+  let visited = 0;
+  const stack = [folderPath];
+  const ignoredDirs = new Set(['.git', 'node_modules', 'dist', 'build']);
+
+  while (stack.length > 0 && visited < 5000) {
+    const current = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      const stat = fs.statSync(current);
+      latest = Math.max(latest, stat.mtimeMs);
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      visited += 1;
+      if (visited >= 5000) break;
+      const fullPath = path.join(current, entry.name);
+      try {
+        const stat = fs.statSync(fullPath);
+        latest = Math.max(latest, stat.mtimeMs);
+        if (entry.isDirectory() && !ignoredDirs.has(entry.name)) {
+          stack.push(fullPath);
+        }
+      } catch {}
+    }
+  }
+
+  return latest > 0 ? new Date(latest).toISOString() : undefined;
+}
+
 ipcMain.handle('project:loadAll', async () => {
-  return loadProjectsFromDisk();
+  return loadProjectsFromDisk().map(project => ({
+    ...project,
+    folderModifiedAt: getLatestProjectFolderModifiedAt(project.folderPath) || project.updatedAt,
+  }));
 });
 
 ipcMain.handle('project:delete', async (_event: any, projectId: string) => {
@@ -2066,6 +2311,121 @@ function isReadableExtractedText(value: string): boolean {
 }
 
 // 解析 Word 文档
+
+function encodeXmlText(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function getBackupPath(filePath: string): string {
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath);
+  const base = path.basename(filePath, ext);
+  const stamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
+  return path.join(dir, `${base}.bak-${stamp}${ext}`);
+}
+
+function normalizeForSearch(value: string): { text: string; map: number[] } {
+  const chars: string[] = [];
+  const map: number[] = [];
+  Array.from(value).forEach((char, index) => {
+    if (/\s/.test(char)) return;
+    chars.push(char);
+    map.push(index);
+  });
+  return { text: chars.join(''), map };
+}
+
+function findTextRange(haystack: string, needle: string): { start: number; end: number; mode: 'exact' | 'compact' } | null {
+  const exactIndex = haystack.indexOf(needle);
+  if (exactIndex >= 0) return { start: exactIndex, end: exactIndex + needle.length, mode: 'exact' };
+  const compactHaystack = normalizeForSearch(haystack);
+  const compactNeedle = normalizeForSearch(needle);
+  if (!compactNeedle.text) return null;
+  const compactIndex = compactHaystack.text.indexOf(compactNeedle.text);
+  if (compactIndex < 0) return null;
+  return {
+    start: compactHaystack.map[compactIndex],
+    end: compactHaystack.map[compactIndex + compactNeedle.text.length - 1] + 1,
+    mode: 'compact',
+  };
+}
+
+function replaceDocxXmlText(xml: string, originalText: string, replacementText: string) {
+  const segments: Array<{ start: number; end: number; inner: string; text: string }> = [];
+  const textRegex = /(<w:t\b[^>]*>)([\s\S]*?)(<\/w:t>)/g;
+  let fullText = '';
+  let match: RegExpExecArray | null;
+  while ((match = textRegex.exec(xml))) {
+    const text = decodeXmlText(match[2]);
+    segments.push({ start: fullText.length, end: fullText.length + text.length, inner: match[2], text });
+    fullText += text;
+  }
+
+  const range = findTextRange(fullText, originalText);
+  if (!range) return { replaced: false, xml, mode: 'none' as const };
+
+  let inserted = false;
+  let segmentIndex = 0;
+  const nextXml = xml.replace(textRegex, (_all, open: string, inner: string, close: string) => {
+    const segment = segments[segmentIndex++];
+    if (!segment || segment.end <= range.start || segment.start >= range.end) return open + inner + close;
+    const overlapStart = Math.max(range.start, segment.start);
+    const overlapEnd = Math.min(range.end, segment.end);
+    const before = overlapStart > segment.start ? segment.text.slice(0, overlapStart - segment.start) : '';
+    const after = overlapEnd < segment.end ? segment.text.slice(overlapEnd - segment.start) : '';
+    const nextText = inserted ? after : before + replacementText + after;
+    inserted = true;
+    return open + encodeXmlText(nextText) + close;
+  });
+
+  return { replaced: true, xml: nextXml, mode: range.mode };
+}
+
+async function replaceDocumentText(params: { filePath: string; originalText: string; replacementText: string }) {
+  const filePath = String(params?.filePath || '');
+  const originalText = String(params?.originalText || '').trim();
+  const replacementText = String(params?.replacementText || '').trim();
+  if (!filePath || !fs.existsSync(filePath)) return { success: false, error: '文件不存在或路径无效' };
+  if (!originalText) return { success: false, error: '原文内容不能为空' };
+  if (!replacementText) return { success: false, error: '建议修改内容不能为空' };
+
+  const ext = path.extname(filePath).toLowerCase();
+  const backupPath = getBackupPath(filePath);
+  fs.copyFileSync(filePath, backupPath);
+
+  try {
+    if (ext === '.txt' || ext === '.md') {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const range = findTextRange(raw, originalText);
+      if (!range) return { success: false, error: '未在文档中找到匹配的原文内容，请调整原文后重试', backupPath };
+      fs.writeFileSync(filePath, raw.slice(0, range.start) + replacementText + raw.slice(range.end), 'utf-8');
+      return { success: true, replacedCount: 1, backupPath, matchMode: range.mode };
+    }
+
+    if (ext === '.docx') {
+      const zip = await JSZip.loadAsync(fs.readFileSync(filePath));
+      const docFile = zip.file('word/document.xml');
+      if (!docFile) return { success: false, error: '未找到 docx 主文档内容', backupPath };
+      const xml = await docFile.async('string');
+      const result = replaceDocxXmlText(xml, originalText, replacementText);
+      if (!result.replaced) return { success: false, error: '未在 docx 中找到匹配的原文内容，请调整原文后重试', backupPath };
+      zip.file('word/document.xml', result.xml);
+      fs.writeFileSync(filePath, await zip.generateAsync({ type: 'nodebuffer' }));
+      return { success: true, replacedCount: 1, backupPath, matchMode: result.mode };
+    }
+
+    return { success: false, error: '暂只支持 .docx、.txt、.md 的自动替换', backupPath };
+  } catch (error: any) {
+    try {
+      if (fs.existsSync(backupPath)) fs.copyFileSync(backupPath, filePath);
+    } catch {}
+    return { success: false, error: error.message || '替换失败，已尝试恢复原文件', backupPath };
+  }
+}
+
+
+ipcMain.handle('file:replaceDocumentText', async (_event: any, params: { filePath: string; originalText: string; replacementText: string }) => replaceDocumentText(params));
+
 ipcMain.handle('file:parseWord', async (_event: any, filePath: string) => {
   try {
     const buffer = fs.readFileSync(filePath);
@@ -2437,7 +2797,7 @@ ipcMain.handle('review:execute', async (_event: any, params: {
   const issues: ReviewIssue[] = [];
   const content = version.content;
   const isExampleTemplate = template.templateType === 'example';
-  const allTemplateNodes = flattenNodes(template.nodes);
+  const allTemplateNodes = flattenNodes(template.nodes, template);
   const extractedSections = extractSections(content);
   const normalizedContent = normalizeContentForSectionMatch(content);
   const sectionMatches = new Map<string, ReturnType<typeof findSectionForTemplateNode>>();
@@ -2900,18 +3260,21 @@ ipcMain.handle('projectDoc:analyze', async (_event: any, params: {
   content: string;
   template: WritingTemplate;
   useAI?: boolean;
+  actualStructure?: boolean;
 }) => {
   try {
-    const { content, template, useAI } = params;
+    const { content, template, useAI, actualStructure } = params;
 
-    // 基础分析
-    const sections = analyzeBasic(content, template);
+    // 报告工作台使用当前文档自身结构；模板匹配仍保留给审查等功能。
+    const sections = actualStructure
+      ? analyzeActualDocumentStructure(content)
+      : analyzeBasic(content, template);
 
     // AI 深度分析
-    if (useAI) {
+    if (useAI && !actualStructure) {
       if (getActiveAIModel(loadAIConfigFromDisk())) {
         const extracted = extractSections(content);
-        const allTemplateNodes = flattenNodes(template.nodes);
+        const allTemplateNodes = flattenNodes(template.nodes, template);
         for (const section of sections) {
           if (section.status === 'missing') continue;
           const matched = extracted.find(e => matchHeading(e.title, section.title));
@@ -3029,6 +3392,28 @@ ipcMain.handle('workspace:deleteFolder', async (_event: any, folderPath: string)
   }
 });
 
+// 在当前目录创建普通文件夹
+ipcMain.handle('file:createFolder', async (_event: any, params: { folderPath: string; folderName: string }) => {
+  try {
+    const parentPath = path.resolve(String(params.folderPath || '').trim());
+    const rawName = String(params.folderName || '').trim();
+    const safeName = path.basename(rawName);
+    if (!rawName) return { success: false, error: '文件夹名称不能为空' };
+    if (safeName !== rawName || /[<>:"/\\|?*]/.test(rawName)) {
+      return { success: false, error: '文件夹名称包含无效字符' };
+    }
+    if (/[. ]$/.test(rawName)) {
+      return { success: false, error: '文件夹名称不能以点或空格结尾' };
+    }
+    if (!fs.existsSync(parentPath)) fs.mkdirSync(parentPath, { recursive: true });
+    const folderPath = path.join(parentPath, safeName);
+    if (fs.existsSync(folderPath)) return { success: false, error: '同名文件或文件夹已存在' };
+    fs.mkdirSync(folderPath);
+    return { success: true, folderPath };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
 // 创建空白文件
 ipcMain.handle('file:createBlank', async (_event: any, params: { folderPath: string; fileName: string; fileType: string }) => {
   try {
@@ -3080,6 +3465,9 @@ ipcMain.handle('file:createFromTemplate', async (_event: any, params: { folderPa
     const outputExt = `.${outputFileType}`;
 
     if (!template.filePath || !fs.existsSync(template.filePath)) {
+      if (template.templateType !== 'example') {
+        return { success: false, error: '直接套用模板的源文件不存在，请重新编辑模板并导入源文件' };
+      }
       const destPath = path.join(folderPath, `${fileName}${outputExt}`);
       if (!fs.existsSync(destPath)) {
         await createFileByType(destPath, outputFileType, template);
@@ -3088,9 +3476,16 @@ ipcMain.handle('file:createFromTemplate', async (_event: any, params: { folderPa
     }
 
     const sourceExt = path.extname(template.filePath).toLowerCase();
+    if (template.templateType !== 'example') {
+      // 直接套用模板必须原样复制，不能重新生成，否则会丢失源文档的排版、图片和页眉页脚。
+      const directDestPath = path.join(folderPath, `${fileName}${sourceExt || outputExt}`);
+      fs.copyFileSync(template.filePath, directDestPath, fs.constants.COPYFILE_EXCL);
+      return { success: true, filePath: directDestPath };
+    }
+
     const destPath = path.join(folderPath, `${fileName}${outputExt}`);
     if (sourceExt === outputExt.toLowerCase() && outputFileType !== 'docx') {
-      fs.copyFileSync(template.filePath, destPath);
+      fs.copyFileSync(template.filePath, destPath, fs.constants.COPYFILE_EXCL);
     } else {
       await createFileByType(destPath, outputFileType, template);
     }
@@ -3675,6 +4070,3 @@ app.on('activate', () => {
     createWindow();
   }
 });
-
-
-

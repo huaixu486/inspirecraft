@@ -9,12 +9,16 @@ interface ElectronAPI {
   getPathForFile: (file: File) => string;
   renameFile: (params: { filePath: string; newName: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
   importFiles: (params: { folderPath: string; filePaths: string[] }) => Promise<{ success: boolean; files?: { name: string; path: string }[]; error?: string }>;
+  duplicateFiles: (params: { sourcePaths: string[]; targetFolder: string }) => Promise<{ success: boolean; copies?: { name: string; path: string; isDirectory: boolean }[]; error?: string }>;
+  moveFiles: (params: { sourcePaths: string[]; targetFolder: string }) => Promise<{ success: boolean; moved?: { name: string; path: string; sourcePath: string; isDirectory: boolean }[]; errors?: string[]; error?: string }>;
   deleteFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  createFolder: (params: { folderPath: string; folderName: string }) => Promise<{ success: boolean; folderPath?: string; error?: string }>;
   readFile: (filePath: string) => Promise<string>;
   readDir: (dirPath: string) => Promise<string[]>;
   listSystemFonts: () => Promise<{ success: boolean; fonts: string[]; error?: string }>;
   parseWordDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; error?: string }>;
   parseDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; convertedFilePath?: string; error?: string }>;
+  replaceDocumentText: (params: { filePath: string; originalText: string; replacementText: string }) => Promise<{ success: boolean; replacedCount?: number; backupPath?: string; matchMode?: 'exact' | 'compact'; error?: string }>;
   parseDocumentSilent?: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; convertedFilePath?: string; error?: string }>;
   extractTemplateFormatRules?: (filePath: string) => Promise<{ success: boolean; formatRules?: any; paragraphs?: any[]; evidence?: string[]; sampleCount?: number; paragraphCount?: number; error?: string }>;
   parsePdfDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; error?: string }>;
@@ -73,7 +77,7 @@ interface ElectronAPI {
   saveProjectDoc: (doc: any) => Promise<void>;
   loadProjectDocs: () => Promise<any[]>;
   deleteProjectDoc: (docId: string) => Promise<void>;
-  analyzeProjectDoc: (params: { content: string; template: any; useAI?: boolean }) => Promise<{ success: boolean; sections?: any[]; overallProgress?: number; error?: string }>;
+  analyzeProjectDoc: (params: { content: string; template: any; useAI?: boolean; actualStructure?: boolean }) => Promise<{ success: boolean; sections?: any[]; overallProgress?: number; error?: string }>;
 
   // 文件创建
   createBlankFile: (params: { folderPath: string; fileName: string; fileType: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;

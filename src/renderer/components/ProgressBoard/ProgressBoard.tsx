@@ -25,8 +25,24 @@ interface ProgressBoardProps {
   onBack?: () => void;
 }
 
+type AiRewritePreview = {
+  id: string;
+  title: string;
+  original: string;
+  replacement: string;
+  reason?: string;
+  status?: 'pending' | 'accepted';
+};
+
 const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
-  const { currentProject, versions } = useProjectStore();
+  const {
+    currentProject,
+    versions,
+    pendingWorkflowFocus,
+    setPendingWorkflowFocus,
+    setCurrentStageName,
+    loadVersions,
+  } = useProjectStore();
   const { projectDocs, loadProjectDocs } = useProjectDocStore();
   const { customStages } = useSettingsStore();
   const { tasks, loadTasks } = useTaskStore();
@@ -34,6 +50,126 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
   const [selectedWritingTemplateId, setSelectedWritingTemplateId] = useState<string>('');
   const [selectedWritingDocIds, setSelectedWritingDocIds] = useState<string[]>([]);
   const [writingContent, setWritingContent] = useState('');
+  const [workflowPromptSuggestion, setWorkflowPromptSuggestion] = useState('');
+  const [focusedWorkflowTaskId, setFocusedWorkflowTaskId] = useState('');
+  const [aiRewritePreviews, setAiRewritePreviews] = useState<AiRewritePreview[]>([]);
+  const [isGeneratingRewritePlan, setIsGeneratingRewritePlan] = useState(false);
+  const [applyingRewriteId, setApplyingRewriteId] = useState('');
+
+  const parseAiRewritePreviews = (raw: string): AiRewritePreview[] => {
+    const text = String(raw || '').trim();
+    const jsonText = text.match(/\[[\s\S]*\]/)?.[0] || text.match(/\{[\s\S]*\}/)?.[0] || '';
+    try {
+      const parsed = JSON.parse(jsonText);
+      const items = Array.isArray(parsed) ? parsed : Array.isArray(parsed.items) ? parsed.items : [];
+      return items
+        .map((item: any, index: number) => ({
+          id: 'team-rewrite-' + Date.now() + '-' + index,
+          title: String(item.title || item.section || '修改建议 ' + (index + 1)).trim(),
+          original: String(item.original || item.originalText || '').trim(),
+          replacement: String(item.replacement || item.revised || item.revisedText || item.suggestion || '').trim(),
+          reason: String(item.reason || item.explanation || '').trim(),
+          status: 'pending' as const,
+        }))
+        .filter(item => item.original && item.replacement);
+    } catch {
+      return [];
+    }
+  };
+
+  const updateAiRewritePreview = (id: string, updates: Partial<AiRewritePreview>) => {
+    setAiRewritePreviews(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
+  };
+
+  const getTargetWritingDoc = () => {
+    const docId = selectedWritingDocIds[0];
+    return docId ? projectDocsList.find(doc => doc.id === docId) : undefined;
+  };
+
+  const getTargetWritingDocPath = () => {
+    const doc = getTargetWritingDoc();
+    if (!doc) return '';
+    const version = doc.versionId ? projectVersions.find(item => item.id === doc.versionId) : undefined;
+    return doc.sourceFilePath || version?.filePath || '';
+  };
+
+  const handleGenerateRewritePlan = async () => {
+    const instruction = (writingContent || workflowPromptSuggestion).trim();
+    const filePath = getTargetWritingDocPath();
+    if (!filePath) {
+      message.warning('请先在参考文档中选择要修改的文档');
+      return;
+    }
+    if (!instruction) {
+      message.warning('请先填写或按 Tab 填充工作流提示词');
+      return;
+    }
+
+    setIsGeneratingRewritePlan(true);
+    try {
+      const parsed = await window.electronAPI.parseDocument(filePath);
+      if (!parsed.success || !parsed.content) {
+        message.error(parsed.error || '未能读取文档内容');
+        return;
+      }
+      const prompt = [
+        '你是文档审查和改稿助手。请根据用户的修改要求，从文档内容中找出需要替换的原文，并给出可直接替换的建议修改文本。',
+        '',
+        '要求：',
+        '1. 只返回 JSON 数组，不要输出 Markdown。',
+        '2. 每一项包含 title、original、replacement、reason。',
+        '3. original 必须逐字复制自文档内容中的连续原文片段，不能概括。',
+        '4. replacement 必须是可直接替换 original 的正式正文内容，保持原文语气和文档格式要求。',
+        '5. 没有把握匹配原文时，返回空数组。',
+        '',
+        '修改要求：',
+        instruction,
+        '',
+        '文档内容：',
+        '-----BEGIN DOCUMENT-----',
+        parsed.content.slice(0, 16000),
+        '-----END DOCUMENT-----',
+      ].join('\n');
+      const result = await window.electronAPI.callAI({ prompt });
+      const previews = parseAiRewritePreviews(result);
+      if (previews.length === 0) {
+        message.warning('AI 未生成可直接替换的原文块，请补充更明确的问题描述后重试');
+      }
+      setAiRewritePreviews(previews);
+    } catch (error: any) {
+      message.error('生成修改预览失败：' + (error.message || String(error)));
+    } finally {
+      setIsGeneratingRewritePlan(false);
+    }
+  };
+
+  const handleAcceptRewrite = async (preview: AiRewritePreview) => {
+    const filePath = getTargetWritingDocPath();
+    if (!filePath) {
+      message.warning('未找到当前文档的源文件路径');
+      return;
+    }
+
+    setApplyingRewriteId(preview.id);
+    try {
+      const result = await window.electronAPI.replaceDocumentText({
+        filePath,
+        originalText: preview.original,
+        replacementText: preview.replacement,
+      });
+      if (!result.success) {
+        message.error(result.error || '替换失败');
+        return;
+      }
+      updateAiRewritePreview(preview.id, { status: 'accepted' });
+      await loadVersions();
+      message.success(result.backupPath ? '已替换原文，并已自动备份原文件' : '已替换原文');
+    } catch (error: any) {
+      message.error('接受修改失败：' + (error.message || String(error)));
+    } finally {
+      setApplyingRewriteId('');
+    }
+  };
 
   const handleQuickExport = async () => {
     const template = templates.find(t => t.id === selectedWritingTemplateId);
@@ -115,6 +251,35 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
   const highPriorityTasks = openTasks.filter(task => task.priority === 'high');
   const reviewTasks = openTasks.filter(task => task.source === 'review');
   const latestReview = [...projectReviews].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+
+  useEffect(() => {
+    if (!pendingWorkflowFocus || pendingWorkflowFocus.target !== 'team') return;
+    if (!currentProject || pendingWorkflowFocus.projectId !== currentProject.id) return;
+
+    if (pendingWorkflowFocus.stageName) {
+      setCurrentStageName(pendingWorkflowFocus.stageName);
+    }
+
+    if (pendingWorkflowFocus.relatedDocId) {
+      const targetDoc = projectDocsList.find(doc => doc.id === pendingWorkflowFocus.relatedDocId);
+      if (targetDoc) {
+        if (targetDoc.templateId) setSelectedWritingTemplateId(targetDoc.templateId);
+        setSelectedWritingDocIds([targetDoc.id]);
+      }
+    }
+
+    setFocusedWorkflowTaskId(pendingWorkflowFocus.taskId || '');
+    setWorkflowPromptSuggestion(pendingWorkflowFocus.prompt || '');
+    setWritingContent('');
+    setAiRewritePreviews([]);
+    setPendingWorkflowFocus(null);
+  }, [
+    currentProject?.id,
+    pendingWorkflowFocus,
+    projectDocsList,
+    setCurrentStageName,
+    setPendingWorkflowFocus,
+  ]);
 
   const stageRows = stageSegments.map(segment => {
     const docs = projectDocsList.filter(doc => segment.sourceDocIds.includes(doc.id));

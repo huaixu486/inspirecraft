@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, Collapse, message, Popconfirm, DatePicker, Input } from 'antd';
+import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, Collapse, message, Popconfirm, DatePicker, Input, Checkbox } from 'antd';
 
 const { TextArea } = Input;
 import {
@@ -12,16 +12,16 @@ import dayjs from 'dayjs';
 import { useProjectStore } from '../../stores/projectStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
-import { ProjectDocument, WritingTemplate } from '../../../shared/types';
+import { ProjectDocument, WritingTemplate, TaskItem } from '../../../shared/types';
 import {
   buildProjectStageSegments,
   getStageMeta,
   getAllStages,
-  getProjectProgress,
   TimelineStageSegment,
   detectTimelineStage,
 } from '../../utils/timelineStages';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useTaskStore } from '../../stores/taskStore';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -66,9 +66,18 @@ const AnimatedExpand: React.FC<{
 export type ProjectDetailPage = 'files' | 'plan' | 'team' | 'templates' | 'report' | 'review' | 'writing';
 
 const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: ProjectDetailPage) => void }> = ({ initialTab = 'overview', onOpenDetail }) => {
-  const { currentProject, setCurrentProject, versions } = useProjectStore();
+  const {
+    currentProject,
+    setCurrentProject,
+    versions,
+    setCurrentStageName,
+    setPendingReportDocId,
+    setPendingReportDocOnly,
+    setPendingWorkflowFocus,
+  } = useProjectStore();
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc, deleteProjectDoc } = useProjectDocStore();
+  const { tasks, updateTask, addTask, deleteTask } = useTaskStore();
   const { customStages } = useSettingsStore();
   const allStages = getAllStages(customStages);
   const stageMeta = getStageMeta(allStages);
@@ -144,10 +153,122 @@ const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: Project
   const planSegments = buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages);
 
   // 当前项目阶段完成度：已完成阶段 / 当前项目已创建阶段
-  const avgProgress = getProjectProgress(currentProject, projectDocsList, templates, projectVersions, allStages);
+  const systemStageCount = allStages.length || 1;
+  const detectedStageCount = planSegments.length;
   const completedStageCount = planSegments.filter(s => Boolean(s.completedAt)).length;
-  const activeStageCount = planSegments.filter(s => !s.completedAt).length;
-  const createdStageCount = planSegments.length;
+  const activeStageCount = Math.max(0, detectedStageCount - completedStageCount);
+  const avgProgress = Math.round((detectedStageCount / systemStageCount) * 100);
+
+  const isReportRelatedTask = (task: TaskItem) =>
+    task.source === 'report' || task.source === 'review' || Boolean(task.workflowId || task.workflowName);
+  const recentPlanTasks = tasks
+    .filter(task => task.projectId === currentProject.id && isReportRelatedTask(task))
+    .sort((a, b) => {
+      const statusScore = (item: TaskItem) => item.status === 'completed' ? 1 : 0;
+      if (statusScore(a) !== statusScore(b)) return statusScore(a) - statusScore(b);
+      const aOrder = a.workflowOrder ?? Number.MAX_SAFE_INTEGER;
+      const bOrder = b.workflowOrder ?? Number.MAX_SAFE_INTEGER;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    })
+    .slice(0, 5);
+  const handleToggleTaskComplete = async (task: TaskItem, checked: boolean) => {
+    await updateTask(task.id, {
+      status: checked ? 'completed' : 'pending',
+      completedAt: checked ? new Date().toISOString() : undefined,
+    });
+  };
+
+  const isAiRevisionTask = (task: TaskItem) => {
+    if (task.type !== 'ai') return false;
+    const text = [task.title, task.description, task.workflowName, task.sectionTitle].filter(Boolean).join(' ');
+    return /\u4fee\u6539|\u4fee\u8ba2|\u6539\u5199|\u6539\u7a3f|\u4f18\u5316|\u6da6\u8272|\u8865\u5199|\u6269\u5199|\u6309\u5ba1\u67e5|\u5ba1\u67e5\u610f\u89c1|\u95ee\u9898|\u5efa\u8bae|\u5b8c\u5584|\u8c03\u6574/.test(text);
+  };
+
+  const resolveWorkflowWorkbench = (task: TaskItem): ProjectDetailPage => {
+    if (task.source === 'review' || task.relatedReviewId || task.relatedIssueId) return 'review';
+    if (isAiRevisionTask(task)) return 'team';
+    if (task.source === 'report') return task.type === 'ai' ? 'team' : 'report';
+    if (task.relatedDocId && task.type === 'ai') return 'team';
+    if (task.relatedDocId) return 'report';
+    if (task.source === 'stage' || task.stageName) return 'plan';
+    if (task.type === 'ai') return 'team';
+    return 'team';
+  };
+
+  const buildWorkflowPrompt = (task: TaskItem) => {
+    const doc = task.relatedDocId ? projectDocsList.find(item => item.id === task.relatedDocId) : selectedDoc;
+    return [
+      `请根据当前工作流任务处理文档内容。`,
+      `任务：${task.title}`,
+      task.sectionTitle ? `章节：${task.sectionTitle}` : '',
+      doc ? `文档：${getDocDisplayName(doc)}` : '',
+      task.stageName ? `阶段：${task.stageName}` : '',
+      task.description ? `问题/要求：${task.description}` : '',
+      `请输出可直接用于修改该部分正文的处理建议、改写方向和必要的补充材料清单。`,
+    ].filter(Boolean).join('\n');
+  };
+
+  const openWorkflowTask = (task: TaskItem) => {
+    const target = resolveWorkflowWorkbench(task);
+    if (task.stageName) setCurrentStageName(task.stageName);
+    setPendingWorkflowFocus({
+      projectId: currentProject.id,
+      workflowId: task.workflowId,
+      taskId: task.id,
+      relatedDocId: task.relatedDocId,
+      stageName: task.stageName,
+      source: task.source,
+      prompt: buildWorkflowPrompt(task),
+      target,
+    });
+    if (target === 'report') {
+      setPendingReportDocId(task.relatedDocId || null);
+      setPendingReportDocOnly(false);
+    } else {
+      setPendingReportDocId(null);
+      setPendingReportDocOnly(false);
+    }
+    openDetail(target);
+  };
+
+  const syncReportWorkflowTasks = async (doc: ProjectDocument, aiReport: any, stage: string) => {
+    const workflowItems = Array.isArray(aiReport?.workflowPlan) ? aiReport.workflowPlan : [];
+    const existingReportTasks = useTaskStore.getState().tasks.filter(task =>
+      task.projectId === currentProject.id && task.source === 'report' && task.relatedDocId === doc.id
+    );
+    await Promise.all(existingReportTasks.map(task => deleteTask(task.id)));
+
+    const normalizedItems = workflowItems
+      .map((item: any) => ({
+        type: item?.type === 'ai' ? 'ai' : 'manual',
+        title: String(item?.title || '').trim(),
+        description: String(item?.description || item?.reason || '').trim(),
+        priority: item?.priority === 'high' || item?.priority === 'low' ? item.priority : 'medium',
+      }))
+      .filter((item: { title: string }) => item.title);
+
+    if (normalizedItems.length === 0) return;
+
+    const now = new Date().toISOString();
+    const workflowId = 'report-' + doc.id + '-' + Date.now();
+    await Promise.all(normalizedItems.map((item: any, index: number) => addTask({
+      id: workflowId + '-' + (index + 1),
+      projectId: currentProject.id,
+      title: item.title,
+      description: item.description,
+      type: item.type,
+      status: 'pending',
+      priority: item.priority,
+      source: 'report',
+      relatedDocId: doc.id,
+      stageName: stage,
+      workflowId,
+      workflowName: aiReport?.reportTitle || '\u62a5\u544a\u751f\u6210\u8ba1\u5212',
+      workflowOrder: index + 1,
+      createdAt: now,
+    })));
+  };
 
   const statusMap: Record<string, { color: string; label: string }> = {
     active: { color: 'blue', label: '进行中' },
@@ -353,6 +474,7 @@ ${content.slice(0, 9000)}`;
       aiReport: JSON.stringify(aiReport),
       analyzedAt: new Date().toISOString(),
     });
+    await syncReportWorkflowTasks(doc, aiReport, stage);
     return aiReport;
   };
 
@@ -589,38 +711,37 @@ ${content.slice(0, 9000)}`;
       label: '概览',
       children: (
         <div>
-          <Title level={5} style={{ fontSize: 14, marginBottom: 8 }}>项目描述</Title>
+          <Title level={5} style={{ fontSize: 14, marginBottom: 8 }}>{'\u9879\u76ee\u63cf\u8ff0'}</Title>
           <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 20 }}>
-            {currentProject.description || '暂无描述'}
+            {currentProject.description || '\u6682\u65e0\u63cf\u8ff0'}
           </Paragraph>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>状态</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{'\u72b6\u6001'}</Text>
               <Tag color={statusInfo.color} style={{ margin: 0, fontSize: 11 }}>{statusInfo.label}</Tag>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>创建时间</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{'\u521b\u5efa\u65f6\u95f4'}</Text>
               <Text style={{ fontSize: 12 }}>{formatDate(currentProject.createdAt)}</Text>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>文件版本</Text>
-              <Text style={{ fontSize: 12 }}>{projectVersions.length} 个</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{'\u6587\u4ef6\u7248\u672c'}</Text>
+              <Text style={{ fontSize: 12 }}>{projectVersions.length} {'\u4e2a'}</Text>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>关联文档</Text>
-              <Text style={{ fontSize: 12 }}>{projectDocsList.length} 份</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{'\u5173\u8054\u6587\u6863'}</Text>
+              <Text style={{ fontSize: 12 }}>{projectDocsList.length} {'\u4efd'}</Text>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>关联文件夹</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{'\u5173\u8054\u6587\u4ef6\u5939'}</Text>
               <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: currentProject.folderPath }}>
-                {currentProject.folderPath ? currentProject.folderPath.split(/[/\\]/).pop() : '未关联'}
+                {currentProject.folderPath ? currentProject.folderPath.split(/[/\\]/).pop() : '\u672a\u5173\u8054'}
               </Text>
             </div>
           </div>
 
-          {/* 阶段完成度 - 圆形进度 + 百分比统计 */}
-          <Title level={5} style={{ fontSize: 14, marginBottom: 12 }}>阶段完成度</Title>
+          <Title level={5} style={{ fontSize: 14, marginBottom: 12 }}>{'\u9636\u6bb5\u5b8c\u6210\u5ea6'}</Title>
           <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
             <Progress
               type="circle"
@@ -629,104 +750,78 @@ ${content.slice(0, 9000)}`;
               strokeColor={avgProgress >= 80 ? '#52c41a' : avgProgress >= 40 ? '#1890ff' : '#faad14'}
             />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
-              {(() => {
-                const total = createdStageCount || 1;
-                return (
-                  <>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#52c41a', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>已完成</Text></Space>
-                      <Text style={{ fontSize: 12 }}>{Math.round(completedStageCount / total * 100)}%</Text>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#1890ff', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>进行中</Text></Space>
-                      <Text style={{ fontSize: 12 }}>{Math.round(activeStageCount / total * 100)}%</Text>
-                    </div>
-                  </>
-                );
-              })()}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#52c41a', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>{'\u5df2\u5b8c\u6210'}</Text></Space>
+                <Text style={{ fontSize: 12 }}>{Math.round(completedStageCount / systemStageCount * 100)}%</Text>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#1890ff', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>{'\u8fdb\u884c\u4e2d'}</Text></Space>
+                <Text style={{ fontSize: 12 }}>{Math.round(activeStageCount / systemStageCount * 100)}%</Text>
+              </div>
             </div>
           </div>
 
-          {/* 下一步计划/建议 */}
-          {planSegments.length > 0 && (
-            <>
-              <Title level={5} style={{ fontSize: 14, marginBottom: 10 }}>下一步计划</Title>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-                {planSegments.filter(s => !s.completedAt).slice(0, 3).map(segment => {
-                  const color = stageMeta[segment.stage].color;
-                  const segOverdue = isOverdue(segment.deadline, segment.completedAt);
-                  const segAboutToExpire = isAboutToExpire(segment.deadline, segment.completedAt);
-                  return (
-                    <div key={`${segment.stage}-${segment.sourceDocIds.join('-')}`} style={{
-                      padding: '8px 10px', borderRadius: 6, border: `1px solid ${segOverdue ? '#ffccc7' : segAboutToExpire ? '#ffe58f' : '#f0f0f0'}`,
-                      background: segOverdue ? '#fff7f6' : segAboutToExpire ? '#fffbe6' : '#fafafa',
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                        <span style={{ width: 6, height: 6, borderRadius: 2, background: segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : color, flexShrink: 0 }} />
-                        <Text strong style={{ fontSize: 12 }}>{segment.label}</Text>
-                        {segment.deadline && (
-                          <Text type="secondary" style={{ fontSize: 10, marginLeft: 'auto' }}>截止 {formatDate(segment.deadline)}</Text>
-                        )}
+          <Title level={5} style={{ fontSize: 14, marginBottom: 10 }}>{'\u4e0b\u4e00\u6b65\u8ba1\u5212'}</Title>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {recentPlanTasks.length === 0 ? (
+              <div style={{ padding: '18px 12px', textAlign: 'center' }}>
+                <ClockCircleOutlined style={{ fontSize: 22, color: '#bfbfbf', marginBottom: 8 }} />
+                <div><Text type="secondary" style={{ fontSize: 12 }}>{'\u6682\u672a\u751f\u6210\u8ba1\u5212'}</Text></div>
+              </div>
+            ) : (
+              recentPlanTasks.map(task => {
+                const checked = task.status === 'completed';
+                const color = task.priority === 'high' ? '#ff4d4f' : task.priority === 'medium' ? '#faad14' : '#52c41a';
+                return (
+                  <div
+                    key={task.id}
+                    role="button"
+                    tabIndex={0}
+                    title="进入对应工作台"
+                    onClick={() => openWorkflowTask(task)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openWorkflowTask(task);
+                      }
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 8,
+                      padding: '8px 10px',
+                      borderRadius: 6,
+                      border: '1px solid #eef2f7',
+                      background: checked ? '#f6ffed' : '#fafafa',
+                      cursor: 'pointer',
+                      transition: 'border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease',
+                    }}
+                  >
+                    <Checkbox
+                      checked={checked}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={event => { void handleToggleTaskComplete(task, event.target.checked); }}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ width: 6, height: 6, borderRadius: 2, background: color, flexShrink: 0 }} />
+                        <Text strong={!checked} delete={checked} style={{ fontSize: 12, minWidth: 0 }} ellipsis={{ tooltip: task.title }}>{task.title}</Text>
                       </div>
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        {segOverdue ? '已逾期，请尽快完成' : segAboutToExpire ? '今天到期，请抓紧完成' : `包含 ${segment.sourceDocNames.length} 个文件，继续推进中`}
+                      {(task.description || task.workflowName || task.stageName) && (
+                        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }} ellipsis={{ tooltip: task.description }}>
+                          {task.description || task.workflowName || task.stageName}
+                        </Text>
+                      )}
+                      <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 3 }}>
+                        点击进入{resolveWorkflowWorkbench(task) === 'report' ? '报告工作台' : resolveWorkflowWorkbench(task) === 'review' ? '审查工作台' : resolveWorkflowWorkbench(task) === 'plan' ? '计划工作台' : resolveWorkflowWorkbench(task) === 'writing' ? 'AI协同' : '团队-AI协同'}
                       </Text>
                     </div>
-                  );
-                })}
-                {planSegments.filter(s => !s.completedAt).length === 0 && (
-                  <div style={{ padding: '12px', textAlign: 'center' }}>
-                    <CheckCircleOutlined style={{ fontSize: 24, color: '#52c41a', marginBottom: 8 }} />
-                    <div><Text type="secondary" style={{ fontSize: 12 }}>所有阶段已完成</Text></div>
                   </div>
-                )}
-              </div>
-            </>
-          )}
-
-          {/* 近期任务汇总 - 跨项目统计 */}
-          {(() => {
-            const { projects: allProjects } = useProjectStore.getState();
-            const allDocs = useProjectDocStore.getState().projectDocs;
-            const allTemplates = useTemplateStore.getState().templates;
-            const stageOrder = allStages.map(s => s.name);
-            const stageSummary = stageOrder.map(stage => {
-              let total = 0;
-              let completed = 0;
-              for (const p of allProjects) {
-                const segs = buildProjectStageSegments(p, allDocs.filter(d => d.projectId === p.id), allTemplates, [], allStages);
-                const seg = segs.find(s => s.stage === stage);
-                if (seg) {
-                  total += 1;
-                  if (seg.completedAt) completed += 1;
-                }
-              }
-              return { stage, total, completed };
-            }).filter(s => s.total > 0);
-
-            if (stageSummary.length === 0) return null;
-            return (
-              <>
-                <Title level={5} style={{ fontSize: 14, marginBottom: 10 }}>近期任务</Title>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {stageSummary.map(({ stage, total, completed }) => (
-                    <div key={stage} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: stageMeta[stage].color, flexShrink: 0 }} />
-                      <Text style={{ fontSize: 12, flex: 1 }}>{stageMeta[stage].label}</Text>
-                      <Text style={{ fontSize: 12, fontWeight: 600 }}>{completed}/{total}</Text>
-                      <Progress
-                        percent={Math.round(completed / total * 100)}
-                        size="small"
-                        style={{ width: 60, margin: 0 }}
-                        showInfo={false}
-                        strokeColor={completed === total ? '#52c41a' : '#1890ff'}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </>
-            );
-          })()}
+                );
+              })
+            )}
+          </div>
         </div>
       ),
     },
@@ -1343,8 +1438,8 @@ ${content.slice(0, 9000)}`;
           }}>
             <FolderOutlined style={{ fontSize: 20, color: '#1890ff' }} />
           </div>
-          <div>
-            <Title level={5} style={{ margin: 0, fontSize: 15 }}>{currentProject.name}</Title>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <Title level={5} title={currentProject.name} ellipsis style={{ margin: 0, fontSize: 15, maxWidth: 260 }}>{currentProject.name}</Title>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <Tag color={statusInfo.color} style={{ margin: 0, fontSize: 11 }}>{statusInfo.label}</Tag>
               <Text type="secondary" style={{ fontSize: 12 }}>{avgProgress}% 阶段完成度</Text>

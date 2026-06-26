@@ -112,12 +112,14 @@ export const syncProjectStageFiles = async (
       sourceFileCreatedAt: file.createdAt,
       sourceFileModifiedAt: file.modifiedAt,
       autoStage: true,
+      completedAt: file.modifiedAt || file.createdAt,
     };
 
     if (existing) {
       const changed = existing.name !== file.name ||
         existing.sourceFileCreatedAt !== file.createdAt ||
-        existing.sourceFileModifiedAt !== file.modifiedAt;
+        existing.sourceFileModifiedAt !== file.modifiedAt ||
+        !existing.completedAt;
       if (changed) {
         await deps.updateProjectDoc(existing.id, common);
         updated += 1;

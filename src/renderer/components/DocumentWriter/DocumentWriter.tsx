@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+﻿import React, { useState, useMemo } from 'react';
 import {
   Button, Card, Select, Typography, Space, Tag, Collapse, Input,
   Progress, message, Divider, Tooltip, Empty, Spin,
@@ -20,6 +20,22 @@ interface Props {
 }
 
 // 扁平化模板节点
+
+const isLikelyGeneratedStructureNoise = (title = '') => {
+  const stripped = String(title)
+    .replace(/^第[一二三四五六七八九十百千万\d]+[章节部篇][\s　]*/, '')
+    .replace(/^[一二三四五六七八九十百千万\d]+[、.．）)]\s*/, '')
+    .replace(/^\d+(?:[.．-]\d+)*[、.．）)]?\s*/, '')
+    .replace(/^[（(][一二三四五六七八九十百千万\d]+[）)]\s*/, '')
+    .replace(/\s+/g, '');
+  if (!stripped) return true;
+  const lower = stripped.toLowerCase();
+  const hasCjk = /[\u4e00-\u9fa5]/.test(lower);
+  const unit = /(?:km\/h|m\/s|kn|mn|mpa|kpa|pa|kg|mm|cm|km|kv|ma|hz|min|ms|rpm|kw|db|n|g|t|m|v|a|s|h|w|%|deg|rad|°|℃|nm|Ω)/i;
+  if (!hasCjk && /\d/.test(lower) && unit.test(lower)) return true;
+  if (!hasCjk && /^[\d.+\-~～,，;；、:：/\\()[\]{}<>≤≥=×x*%°℃′'″"·a-zωΩ]+$/i.test(lower)) return true;
+  return false;
+};
 const flattenNodes = (nodes: TemplateNode[] = [], depth = 0): (TemplateNode & { depth: number })[] =>
   nodes.flatMap(node => [
     { ...node, depth },
@@ -54,10 +70,14 @@ const DocumentWriter: React.FC<Props> = ({ onBack }) => {
 
   const isExampleTemplate = selectedTemplate?.templateType === 'example';
 
-  const flatNodes = useMemo(
-    () => flattenNodes(selectedTemplate?.nodes),
-    [selectedTemplate?.nodes],
-  );
+  const flatNodes = useMemo(() => {
+    const nodes = flattenNodes(selectedTemplate?.nodes)
+      .filter(node => !isLikelyGeneratedStructureNoise(node.title));
+    if (selectedTemplate?.templateType === 'example') {
+      return nodes.filter(node => (node.level || 1) <= 1);
+    }
+    return nodes;
+  }, [selectedTemplate?.nodes, selectedTemplate?.templateType]);
 
   // 可选的项目文档列表
   const projectDocsList = useMemo(

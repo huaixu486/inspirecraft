@@ -12,12 +12,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPathForFile: (file: any) => webUtils.getPathForFile(file),
   renameFile: (params: { filePath: string; newName: string }) => ipcRenderer.invoke('file:rename', params),
   importFiles: (params: { folderPath: string; filePaths: string[] }) => ipcRenderer.invoke('file:importFiles', params),
+  duplicateFiles: (params: { sourcePaths: string[]; targetFolder: string }) => ipcRenderer.invoke('file:duplicate', params),
+  moveFiles: (params: { sourcePaths: string[]; targetFolder: string }) => ipcRenderer.invoke('file:move', params),
   deleteFile: (filePath: string) => ipcRenderer.invoke('file:delete', filePath),
+  createFolder: (params: { folderPath: string; folderName: string }) => ipcRenderer.invoke('file:createFolder', params),
   readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
   readDir: (dirPath: string) => ipcRenderer.invoke('file:readDir', dirPath),
   listSystemFonts: () => ipcRenderer.invoke('system:listFonts'),
   parseWordDocument: (filePath: string) => ipcRenderer.invoke('file:parseWord', filePath),
   parseDocument: (filePath: string) => ipcRenderer.invoke('file:parseDocument', filePath),
+  replaceDocumentText: (params: { filePath: string; originalText: string; replacementText: string }) => ipcRenderer.invoke('file:replaceDocumentText', params),
   parseDocumentSilent: (filePath: string) => ipcRenderer.invoke('file:parseDocumentSilent', filePath),
   extractTemplateFormatRules: (filePath: string) => ipcRenderer.invoke('file:extractTemplateFormatRules', filePath),
   parsePdfDocument: (filePath: string) => ipcRenderer.invoke('file:parsePdf', filePath),
@@ -81,7 +85,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveProjectDoc: (doc: any) => ipcRenderer.invoke('projectDoc:save', doc),
   loadProjectDocs: () => ipcRenderer.invoke('projectDoc:loadAll'),
   deleteProjectDoc: (docId: string) => ipcRenderer.invoke('projectDoc:delete', docId),
-  analyzeProjectDoc: (params: { content: string; template: any; useAI?: boolean }) =>
+  analyzeProjectDoc: (params: { content: string; template: any; useAI?: boolean; actualStructure?: boolean }) =>
     ipcRenderer.invoke('projectDoc:analyze', params),
 
   // 文件创建

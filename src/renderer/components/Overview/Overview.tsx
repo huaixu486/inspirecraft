@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import { Typography } from 'antd';
 import StatsCards from './StatsCards';
 import GanttChart from './GanttChart';
@@ -30,7 +30,7 @@ const Overview: React.FC<Props> = ({ onEnterProject, panelInitialTab, onOpenProj
           flex: '1 1 auto',
           minWidth: 0,
           transition: 'width 0.2s ease, flex-basis 0.2s ease',
-          paddingRight: currentProject ? 14 : 0,
+          paddingRight: 0,
         }}
       >
         <div className="overview-header overview-header-polished animate-slide-up" style={{ marginBottom: 18 }}>

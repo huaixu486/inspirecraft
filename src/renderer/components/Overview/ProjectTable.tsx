@@ -1,8 +1,8 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Card, Table, Tag, Progress, Typography, Space, Button, Dropdown, Modal, Form, Input, message } from 'antd';
 import {
   FolderOutlined, CalendarOutlined, WarningOutlined, ExclamationCircleOutlined,
-  PlusOutlined, FolderOpenOutlined, FileZipOutlined,
+  PlusOutlined, FolderOpenOutlined, FileZipOutlined, SearchOutlined,
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
@@ -25,14 +25,90 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const { templates } = useTemplateStore();
   const { workspacePath, customStages } = useSettingsStore();
-  const allStages = getAllStages(customStages);
-  const stageMeta = getStageMeta(allStages);
+  const allStages = useMemo(() => getAllStages(customStages), [customStages]);
+  const stageMeta = useMemo(() => getStageMeta(allStages), [allStages]);
 
-  // 按更新时间降序排序
-  const sortedProjects = useMemo(
-    () => [...projects].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
-    [projects],
-  );
+  const [searchKeyword, setSearchKeyword] = useState('');
+  const autoScanProjectIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!projects.length || !allStages.length) return;
+    const idleApi = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    let cancelled = false;
+    let idleHandle: number | undefined;
+
+    const scan = async () => {
+      for (const project of projects) {
+        if (cancelled || !project.folderPath || autoScanProjectIdsRef.current.has(project.id)) continue;
+        autoScanProjectIdsRef.current.add(project.id);
+        try {
+          const latestDocs = useProjectDocStore.getState().projectDocs;
+          const result = await syncProjectStageFiles(project, {
+            allStages,
+            projectDocs: latestDocs,
+            templates,
+            addProjectDoc,
+            updateProjectDoc,
+          });
+          if (result.created || result.updated) {
+            await useProjectStore.getState().loadProjects({ silent: true });
+          }
+        } catch (error) {
+          console.warn('Auto stage scan failed:', error);
+        }
+      }
+    };
+
+    if (typeof idleApi.requestIdleCallback === 'function') {
+      idleHandle = idleApi.requestIdleCallback(() => { void scan(); }, { timeout: 2500 });
+    } else {
+      const timer = window.setTimeout(() => { void scan(); }, 800);
+      idleHandle = timer;
+    }
+
+    return () => {
+      cancelled = true;
+      if (idleHandle !== undefined) {
+        if (typeof idleApi.cancelIdleCallback === 'function') idleApi.cancelIdleCallback(idleHandle);
+        else window.clearTimeout(idleHandle);
+      }
+    };
+  }, [projects, allStages, templates, addProjectDoc, updateProjectDoc]);
+
+  const formatProjectTime = (value?: string) => {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '-';
+    return date.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
+
+  // 按项目文件夹内最新文件/目录修改时间降序排序，并支持名称、描述、路径搜索。
+  const visibleProjects = useMemo(() => {
+    const keyword = searchKeyword.trim().toLowerCase();
+    return [...projects]
+      .filter(project => {
+        if (!keyword) return true;
+        return [
+          project.name,
+          project.description,
+          project.folderPath,
+          project.folderPath?.split(/[/\\]/).pop(),
+        ].some(value => String(value || '').toLowerCase().includes(keyword));
+      })
+      .sort((a, b) => {
+        const aTime = new Date(a.folderModifiedAt || a.updatedAt || a.createdAt).getTime();
+        const bTime = new Date(b.folderModifiedAt || b.updatedAt || b.createdAt).getTime();
+        return (Number.isNaN(bTime) ? 0 : bTime) - (Number.isNaN(aTime) ? 0 : aTime);
+      });
+  }, [projects, searchKeyword]);
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -133,9 +209,16 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       dataIndex: 'name',
       key: 'name',
       render: (name: string) => (
-        <Space size={8}>
-          <FolderOutlined style={{ color: '#1890ff', fontSize: 16 }} />
-          <Text strong style={{ fontSize: 13 }}>{name}</Text>
+        <Space size={8} style={{ width: '100%', minWidth: 0 }}>
+          <FolderOutlined style={{ color: '#1890ff', fontSize: 16, flexShrink: 0 }} />
+          <Text
+            strong
+            title={name}
+            ellipsis
+            style={{ display: 'block', maxWidth: 180, fontSize: 13 }}
+          >
+            {name}
+          </Text>
         </Space>
       ),
     },
@@ -222,6 +305,16 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       },
     },
     {
+      title: '最近文件',
+      key: 'folderModifiedAt',
+      width: 130,
+      render: (_: any, record: Project) => (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {formatProjectTime(record.folderModifiedAt || record.updatedAt)}
+        </Text>
+      ),
+    },
+    {
       title: '下一步计划',
       key: 'nextPlan',
       render: (_: any, record: Project) => (
@@ -261,10 +354,20 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
         </Space>
       }
     >
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <Input
+          allowClear
+          prefix={<SearchOutlined />}
+          placeholder="搜索项目名称、描述或文件夹路径"
+          value={searchKeyword}
+          onChange={event => setSearchKeyword(event.target.value)}
+          style={{ width: 280 }}
+        />
+      </div>
       <Table
         className="overview-project-table"
         columns={columns}
-        dataSource={sortedProjects}
+        dataSource={visibleProjects}
         rowKey="id"
         pagination={false}
         size="middle"

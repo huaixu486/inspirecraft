@@ -9,6 +9,7 @@ export interface Project {
   templateId?: string; // 关联的模板ID
   createdAt: string;
   updatedAt: string;
+  folderModifiedAt?: string; // 项目文件夹内最近文件/目录修改时间
 }
 
 // 文档版本类型
@@ -189,6 +190,7 @@ export interface WritingTemplate {
   exampleAnalysis?: string; // 范文模板的AI分析摘要
   createdAt: string;
   updatedAt: string;
+  folderModifiedAt?: string; // 项目文件夹内最近文件/目录修改时间
 }
 
 // ==================== 审查相关类型 ====================
