@@ -21,6 +21,8 @@ type GlobalPage = 'overview' | 'calendar' | 'settings' | 'project-files' | 'proj
 
 interface Props {
   globalPage: GlobalPage;
+  embedded?: boolean;
+  hideProjectTitle?: boolean;
 }
 
 /** 全局页 → WorkbenchPage 映射 */
@@ -35,7 +37,7 @@ const globalToWorkbench: Record<string, WorkbenchPage> = {
   'calendar': 'calendar',
 };
 
-const WorkbenchContextBar: React.FC<Props> = ({ globalPage }) => {
+const WorkbenchContextBar: React.FC<Props> = ({ globalPage, embedded = false, hideProjectTitle = false }) => {
   const currentProject = useProjectStore(s => s.currentProject);
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
   const projectDocs = useProjectDocStore(s => s.projectDocs);
@@ -112,22 +114,26 @@ const WorkbenchContextBar: React.FC<Props> = ({ globalPage }) => {
       display: 'flex',
       alignItems: 'center',
       gap: 12,
-      padding: '8px 18px',
-      background: 'linear-gradient(135deg, #fafbfc 0%, #f5f7fa 100%)',
-      borderBottom: '1px solid #f0f0f0',
+      padding: embedded ? '8px 0 0' : '8px 18px',
+      background: embedded ? 'transparent' : 'linear-gradient(135deg, #fafbfc 0%, #f5f7fa 100%)',
+      borderBottom: embedded ? 'none' : '1px solid #f0f0f0',
       flexWrap: 'wrap',
-      minHeight: 44,
+      minHeight: embedded ? 30 : 44,
     }}>
-      {/* 项目名 */}
-      <Tooltip title="点击返回总览">
-        <Text strong style={{ fontSize: 13, cursor: 'pointer', color: '#0f172a' }}
-          onClick={() => setCurrentProject(null)}>
-          {currentProject.name}
-        </Text>
-      </Tooltip>
+      {!hideProjectTitle && (
+        <>
+          <Tooltip title="点击返回总览">
+            <Text strong style={{ fontSize: 13, cursor: 'pointer', color: '#0f172a' }}
+              onClick={() => setCurrentProject(null)}>
+              {currentProject.name}
+            </Text>
+          </Tooltip>
 
-      <span style={{ color: '#d9d9d9', fontSize: 11 }}>|</span>
+          <span style={{ color: '#d9d9d9', fontSize: 11 }}>|</span>
+        </>
+      )}
 
+      {/* 当前阶段 */}
       {/* 当前阶段 */}
       {currentStage && (
         <Tag color={stageColor} style={{ margin: 0, fontSize: 11 }}>

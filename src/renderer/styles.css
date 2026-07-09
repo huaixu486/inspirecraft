@@ -479,7 +479,8 @@ body.template-editor-modal-open {
 }
 
 .overview-detail-rail {
-  box-shadow: none;
+  box-shadow: -8px 0 24px rgba(15, 23, 42, 0.08);
+  border-left: 1px solid rgba(203, 213, 225, 0.8);
   backdrop-filter: none;
 }
 
@@ -836,9 +837,45 @@ body.template-editor-modal-open {
 }
 
 .stage-progress-pie-ring-value span {
+  color: var(--stage-progress-color);
   font-size: 18px;
   font-weight: 700;
   line-height: 1;
+}
+
+.stage-progress-linear {
+  width: 100%;
+  min-width: 0;
+}
+
+.stage-progress-linear-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.stage-progress-linear-track {
+  position: relative;
+  width: 100%;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #edf2f7;
+  contain: layout paint style;
+}
+
+.stage-progress-linear-fill {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  border-radius: inherit;
+  transform-origin: left center;
+  transition:
+    transform 420ms linear,
+    background-color 180ms linear;
+  will-change: transform;
 }
 
 /* === v3/v4 overrides removed — using dual-half-circle transform approach above === */
@@ -2188,6 +2225,8 @@ body.template-editor-modal-open {
 .overview-main {
   padding: 16px;
   box-sizing: border-box;
+  will-change: padding-right;
+  transition: padding-right 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .overview-header-polished {
@@ -2692,20 +2731,18 @@ body.template-editor-modal-open {
 /* Homepage split layout: keep the main pane rounded when the detail rail is open. */
 .overview-shell-polished.overview-shell-with-detail {
   column-gap: 10px;
-  background: rgba(238, 246, 252, 0.96);
 }
 
 .overview-shell-polished.overview-shell-with-detail .overview-main {
   border-radius: 0 14px 14px 0 !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
-  clip-path: inset(0 round 0 14px 14px 0);
   background: rgba(255, 255, 255, 0.94);
   box-shadow: 0 0 0 1px rgba(226, 232, 240, 0.72) inset;
 }
 
 .overview-shell-polished.overview-shell-with-detail .overview-detail-rail {
-  border-left: 0 !important;
+  border-left: 1px solid rgba(203, 213, 225, 0.8);
 }
 
 .overview-shell-polished.overview-shell-with-detail .overview-main .dashboard-card:last-child,

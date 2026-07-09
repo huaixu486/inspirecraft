@@ -103,6 +103,40 @@ interface StageProgressRingProps {
   percent: number;
 }
 
+const STAGE_PROGRESS_COLOR_DURATION = 420;
+
+const parseStageProgressColor = (value: string) => {
+  const normalizedValue = value.trim();
+  const rgb = normalizedValue.match(/^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i);
+  if (rgb) {
+    return {
+      r: Math.max(0, Math.min(255, Number(rgb[1]))),
+      g: Math.max(0, Math.min(255, Number(rgb[2]))),
+      b: Math.max(0, Math.min(255, Number(rgb[3]))),
+    };
+  }
+
+  const hex = normalizedValue.replace(/^#/, '');
+  if (!/^[\da-f]{6}$/i.test(hex)) return null;
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16),
+  };
+};
+
+const mixStageProgressColor = (
+  from: { r: number; g: number; b: number },
+  to: { r: number; g: number; b: number },
+  weight: number
+) => {
+  const t = Math.max(0, Math.min(1, weight));
+  const r = Math.round(from.r + (to.r - from.r) * t);
+  const g = Math.round(from.g + (to.g - from.g) * t);
+  const b = Math.round(from.b + (to.b - from.b) * t);
+  return `rgb(${r}, ${g}, ${b})`;
+};
+
 const StageProgressRing = React.memo(({ percent }: StageProgressRingProps) => {
   const mountedRef = useRef(false);
   useEffect(() => { mountedRef.current = true; }, []);
@@ -175,8 +209,11 @@ const StageProgressPieRing = React.memo(({ percent }: StageProgressRingProps) =>
   const [displayPercent, setDisplayPercent] = useState(safePercent);
   const [overHalf, setOverHalf] = useState(safePercent > 50);
   const [durationMs, setDurationMs] = useState(420);
+  const [displayColor, setDisplayColor] = useState(color);
   const displayPercentRef = useRef(safePercent);
-  const phaseTimerRef = useRef(0);
+  const pendingPhaseRef = useRef<{ target: number; durationMs: number; overHalf: boolean } | null>(null);
+  const displayColorRef = useRef(color);
+  const colorAnimationRef = useRef(0);
 
   useEffect(() => {
     const raf = requestAnimationFrame(() => setReady(true));
@@ -184,10 +221,51 @@ const StageProgressPieRing = React.memo(({ percent }: StageProgressRingProps) =>
   }, []);
 
   useEffect(() => {
-    if (phaseTimerRef.current) {
-      window.clearTimeout(phaseTimerRef.current);
-      phaseTimerRef.current = 0;
+    if (displayColorRef.current === color) {
+      return;
     }
+
+    if (colorAnimationRef.current) {
+      cancelAnimationFrame(colorAnimationRef.current);
+      colorAnimationRef.current = 0;
+    }
+
+    const from = parseStageProgressColor(displayColorRef.current);
+    const to = parseStageProgressColor(color);
+    if (!from || !to) {
+      displayColorRef.current = color;
+      setDisplayColor(color);
+      return;
+    }
+
+    const start = performance.now();
+    const animateColor = (now: number) => {
+      const progress = Math.min(1, (now - start) / STAGE_PROGRESS_COLOR_DURATION);
+      const nextColor = mixStageProgressColor(from, to, progress);
+      displayColorRef.current = nextColor;
+      setDisplayColor(nextColor);
+
+      if (progress < 1) {
+        colorAnimationRef.current = requestAnimationFrame(animateColor);
+      } else {
+        displayColorRef.current = color;
+        setDisplayColor(color);
+        colorAnimationRef.current = 0;
+      }
+    };
+
+    colorAnimationRef.current = requestAnimationFrame(animateColor);
+
+    return () => {
+      if (colorAnimationRef.current) {
+        cancelAnimationFrame(colorAnimationRef.current);
+        colorAnimationRef.current = 0;
+      }
+    };
+  }, [color]);
+
+  useEffect(() => {
+    pendingPhaseRef.current = null;
 
     const from = displayPercentRef.current;
     const to = safePercent;
@@ -197,53 +275,69 @@ const StageProgressPieRing = React.memo(({ percent }: StageProgressRingProps) =>
       return;
     }
 
+    if (!ready) {
+      setOverHalf(to > 50);
+      setDurationMs(420);
+      setDisplayPercent(to);
+      displayPercentRef.current = to;
+      return;
+    }
+
     const totalDelta = Math.max(1, Math.abs(to - from));
     const getDuration = (start: number, end: number) =>
       Math.max(80, Math.round(420 * Math.abs(end - start) / totalDelta));
 
-    if (from <= 50 && to > 50) {
+    if (from < 50 && to > 50) {
       const firstDuration = getDuration(from, 50);
       const secondDuration = getDuration(50, to);
+      pendingPhaseRef.current = { target: to, durationMs: secondDuration, overHalf: true };
       setOverHalf(false);
       setDurationMs(firstDuration);
       setDisplayPercent(50);
       displayPercentRef.current = 50;
-      phaseTimerRef.current = window.setTimeout(() => {
-        setOverHalf(true);
-        setDurationMs(secondDuration);
-        setDisplayPercent(to);
-        displayPercentRef.current = to;
-        phaseTimerRef.current = 0;
-      }, firstDuration);
-      return () => {
-        if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
-      };
+      return;
     }
 
     if (from > 50 && to <= 50) {
       const firstDuration = getDuration(from, 50);
       const secondDuration = getDuration(50, to);
+      pendingPhaseRef.current = { target: to, durationMs: secondDuration, overHalf: false };
       setOverHalf(true);
       setDurationMs(firstDuration);
       setDisplayPercent(50);
       displayPercentRef.current = 50;
-      phaseTimerRef.current = window.setTimeout(() => {
-        setOverHalf(false);
-        setDurationMs(secondDuration);
-        setDisplayPercent(to);
-        displayPercentRef.current = to;
-        phaseTimerRef.current = 0;
-      }, firstDuration);
-      return () => {
-        if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
-      };
+      return;
     }
 
     setOverHalf(to > 50);
     setDurationMs(420);
     setDisplayPercent(to);
     displayPercentRef.current = to;
-  }, [safePercent]);
+  }, [ready, safePercent]);
+
+  const handleProgressTransitionEnd = useCallback((event: React.TransitionEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget || !event.propertyName.includes('transform')) {
+      return;
+    }
+
+    const pending = pendingPhaseRef.current;
+    if (!pending) {
+      return;
+    }
+
+    pendingPhaseRef.current = null;
+    setOverHalf(pending.overHalf);
+    displayPercentRef.current = pending.target;
+
+    if (pending.target === 50) {
+      setDurationMs(420);
+      setDisplayPercent(50);
+      return;
+    }
+
+    setDurationMs(pending.durationMs);
+    setDisplayPercent(pending.target);
+  }, []);
 
   const rotation = displayPercent * 3.6;
 
@@ -251,20 +345,44 @@ const StageProgressPieRing = React.memo(({ percent }: StageProgressRingProps) =>
     <div
       className={`stage-progress-pie-ring${overHalf ? ' stage-progress-pie-ring-over-half' : ''}${ready ? ' stage-progress-pie-ring-ready' : ''}`}
       style={{
-        '--stage-progress-color': color,
+        '--stage-progress-color': displayColor,
         '--stage-progress-duration': `${durationMs}ms`,
       } as React.CSSProperties}
     >
       <div className="stage-progress-pie-ring-slice">
         <div
           className="stage-progress-pie-ring-bar"
+          onTransitionEnd={handleProgressTransitionEnd}
           style={{ transform: `rotate(${rotation}deg) translateZ(0)` }}
         />
         <div className="stage-progress-pie-ring-fill" />
       </div>
       <div className="stage-progress-pie-ring-hole" />
       <div className="stage-progress-pie-ring-value">
-        <span style={{ color }}>{safePercent}%</span>
+        <span style={{ color: displayColor }}>{safePercent}%</span>
+      </div>
+    </div>
+  );
+});
+
+const StageProgressLinearBar = React.memo(({ percent }: StageProgressRingProps) => {
+  const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
+  const color = safePercent >= 80 ? '#52c41a' : safePercent >= 40 ? '#1890ff' : '#faad14';
+
+  return (
+    <div className="stage-progress-linear">
+      <div className="stage-progress-linear-header">
+        <Text type="secondary" style={{ fontSize: 12 }}>完成进度</Text>
+        <Text style={{ fontSize: 18, fontWeight: 700, color }}>{safePercent}%</Text>
+      </div>
+      <div className="stage-progress-linear-track" aria-hidden="true">
+        <div
+          className="stage-progress-linear-fill"
+          style={{
+            backgroundColor: color,
+            transform: `scaleX(${safePercent / 100}) translateZ(0)`,
+          }}
+        />
       </div>
     </div>
   );
@@ -1267,8 +1385,10 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
           </div>
 
           <Title level={5} style={{ fontSize: 14, marginBottom: 12 }}>{'\u9636\u6bb5\u5b8c\u6210\u5ea6'}</Title>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
-            <StageProgressPieRing percent={completedStagePercent} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+            {/* 圆形进度条暂时停用：跨 50% 的双半圆接续会产生卡顿。 */}
+            {/* <StageProgressPieRing percent={completedStagePercent} /> */}
+            <StageProgressLinearBar percent={completedStagePercent} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#52c41a', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>{'\u5df2\u5b8c\u6210'}</Text></Space>
@@ -2082,10 +2202,6 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
           </div>
           <div style={{ minWidth: 0, flex: 1 }}>
             <Title level={5} title={currentProject.name} ellipsis style={{ margin: 0, fontSize: 15, maxWidth: 260 }}>{currentProject.name}</Title>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
-              <Tag color={statusInfo.color} style={{ margin: 0, fontSize: 11 }}>{statusInfo.label}</Tag>
-              <Text type="secondary" style={{ fontSize: 12 }}>{completedStagePercent}% 阶段完成度</Text>
-            </div>
           </div>
         </div>
         <Button

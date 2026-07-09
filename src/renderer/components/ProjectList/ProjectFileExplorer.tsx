@@ -15,6 +15,7 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 import { getAllStages } from '../../utils/timelineStages';
+import WorkbenchContextBar from '../Workbench/WorkbenchContextBar';
 
 const { Text } = Typography;
 
@@ -1260,6 +1261,9 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
               <Button type="primary" icon={<PlusOutlined />} size="middle" style={{ borderRadius: 8 }}>新建</Button>
             </Dropdown>
           </div>
+        </div>
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #eef2f7' }}>
+          <WorkbenchContextBar globalPage="project-files" embedded hideProjectTitle />
         </div>
       </div>
       {/* 多选状态栏 */}

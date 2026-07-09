@@ -17,7 +17,7 @@ import { buildProjectStageSegments, getAllStages, TimelineStageSegment } from '.
 const { Text } = Typography;
 
 const StatsSkeleton = () => (
-  <div style={{ display: 'flex', gap: 12 }}>
+  <div style={{ display: 'flex', gap: 12, maxWidth: '100%', boxSizing: 'border-box' }}>
     {[1, 2, 3, 4].map(i => (
       <div key={i} className="skeleton-loading" style={{ flex: 1, height: 80, borderRadius: 12 }} />
     ))}
@@ -25,11 +25,11 @@ const StatsSkeleton = () => (
 );
 
 const GanttSkeleton = () => (
-  <div className="skeleton-loading" style={{ height: 200, borderRadius: 12 }} />
+  <div className="skeleton-loading" style={{ height: 200, borderRadius: 12, maxWidth: '100%', boxSizing: 'border-box' }} />
 );
 
 const TableSkeleton = () => (
-  <div className="skeleton-loading" style={{ height: 300, borderRadius: 12 }} />
+  <div className="skeleton-loading" style={{ height: 300, borderRadius: 12, maxWidth: '100%', boxSizing: 'border-box' }} />
 );
 
 interface Props {
@@ -48,29 +48,31 @@ const Overview: React.FC<Props> = ({ visible, onEnterProject, panelInitialTab, o
   const customStages = useSettingsStore(s => s.customStages);
   const allStages = useMemo(() => getAllStages(customStages), [customStages]);
 
-  // 侧边窗开合状态：与 currentProject 联动，但独立控制动画
+  // 侧边窗开合状态：分阶段动画
   const [panelOpen, setPanelOpen] = useState(false);
-  const [panelVisible, setPanelVisible] = useState(false); // DOM 是否可见（含退出动画）
+  const [panelVisible, setPanelVisible] = useState(false);
+  const [shrinkFirst, setShrinkFirst] = useState(false);
   const closeTimerRef = useRef<number>(0);
   const prevProjectIdRef = useRef<string | null>(null);
-  const isSwitchingRef = useRef(false); // 切换项目 vs 首次打开
+  const isSwitchingRef = useRef(false);
 
   useEffect(() => {
     if (currentProject) {
-      // 打开或切换项目
+      // 打开：缩进和侧边窗同时启动
       isSwitchingRef.current = panelOpen && prevProjectIdRef.current !== currentProject.id;
       prevProjectIdRef.current = currentProject.id;
       if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = 0; }
       setPanelVisible(true);
-      // 用 rAF 确保 DOM 已渲染后再触发动画
-      requestAnimationFrame(() => setPanelOpen(true));
+      setShrinkFirst(true);
+      setPanelOpen(true);
     } else {
-      // 关闭：先播放退出动画，再隐藏 DOM
+      // 关闭：弹出和扩展同时启动
       setPanelOpen(false);
+      setShrinkFirst(false);
       closeTimerRef.current = window.setTimeout(() => {
         setPanelVisible(false);
         closeTimerRef.current = 0;
-      }, 350); // 与 CSS transition 时长匹配
+      }, 350);
     }
     return () => { if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = 0; } };
   }, [currentProject?.id]);
@@ -103,8 +105,7 @@ const Overview: React.FC<Props> = ({ visible, onEnterProject, panelInitialTab, o
           overflowY: 'auto',
           flex: '1 1 auto',
           minWidth: 0,
-          paddingRight: panelOpen ? 430 : 0,
-          transition: 'padding-right 280ms cubic-bezier(0.22, 1, 0.36, 1)',
+          paddingRight: shrinkFirst ? 430 : 0,
         }}
       >
         <div className="overview-header overview-header-polished animate-slide-up" style={{ marginBottom: 18 }}>

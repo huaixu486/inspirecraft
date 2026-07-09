@@ -741,7 +741,7 @@ const App: React.FC = () => {
         }}
       >
         {/* 统一上下文栏：项目内页面显示 */}
-        {globalPage !== 'overview' && globalPage !== 'settings' && (
+        {globalPage !== 'overview' && globalPage !== 'settings' && globalPage !== 'project-files' && (
           <WorkbenchContextBar globalPage={globalPage} />
         )}
         <ErrorBoundary>
