@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Card,
@@ -35,8 +35,10 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
 import { useTemplateStore } from '../../stores/templateStore';
-import { ProjectDocument, SectionAnalysis, TaskItem, WritingTemplate } from '../../../shared/types';
+import { useKnowledgeStore } from '../../stores/knowledgeStore';
+import { ProjectDocument, ReferenceMaterial, SectionAnalysis, StageMemoryEntry, TaskItem, WritingTemplate } from '../../../shared/types';
 import { buildProjectStageSegments, detectTimelineStage, getAllStages, getProjectProgress } from '../../utils/timelineStages';
+import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
 
 const { Text, Paragraph, Title } = Typography;
 
@@ -63,6 +65,59 @@ const sourceLabels: Record<NonNullable<TaskItem['source']>, string> = {
   review: '审查',
   stage: '阶段',
   report: '报告',
+};
+
+const normalizeKnowledgeStageNameForPrompt = (value?: string) => String(value || '').trim().replace(/\s+/g, ' ') || 'unknown';
+
+const formatPromptKnowledgeItems = (items: Array<StageMemoryEntry | ReferenceMaterial>, type: 'memory' | 'reference') =>
+  items
+    .slice(0, type === 'memory' ? 4 : 5)
+    .map((item, index) => {
+      const body = type === 'memory'
+        ? (item as StageMemoryEntry).summary
+        : ((item as ReferenceMaterial).summary || (item as ReferenceMaterial).contentPreview || '');
+      const name = type === 'memory' ? (item as StageMemoryEntry).docName : (item as ReferenceMaterial).name;
+      return String(index + 1) + '. ' + (name || 'item') + '\n' + String(body || '').slice(0, type === 'memory' ? 1200 : 1600);
+    })
+    .filter(Boolean)
+    .join('\n\n');
+const taskTimeMs = (value?: string) => {
+  if (!value) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+};
+
+const normalizeTaskDedupeText = (value?: string) => String(value || '')
+  .replace(/^\u6765\u81ea AI \u5199\u4f5c\u6846\u67b6\u5de5\u4f5c\u6d41\uff1a.*$/gm, '')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .toLowerCase();
+
+const getTaskDedupeKey = (task: TaskItem) => [
+  task.projectId,
+  task.relatedDocId || '',
+  task.source || 'manual',
+  task.type,
+  normalizeTaskDedupeText(task.title),
+  normalizeTaskDedupeText(task.description),
+].join('|');
+
+const dedupeSemanticTasks = (items: TaskItem[]) => {
+  const byKey = new Map<string, TaskItem>();
+  items.forEach((task) => {
+    const key = getTaskDedupeKey(task);
+    const existing = byKey.get(key);
+    if (!existing || taskTimeMs(task.createdAt) >= taskTimeMs(existing.createdAt)) {
+      byKey.set(key, task);
+    }
+  });
+  return Array.from(byKey.values()).sort((a, b) => {
+    if (a.workflowId || b.workflowId) {
+      const orderDiff = (a.workflowOrder ?? Number.MAX_SAFE_INTEGER) - (b.workflowOrder ?? Number.MAX_SAFE_INTEGER);
+      if (orderDiff !== 0) return orderDiff;
+    }
+    return taskTimeMs(b.createdAt) - taskTimeMs(a.createdAt);
+  });
 };
 
 const getDocCreatedAt = (doc: ProjectDocument) => doc.sourceFileCreatedAt || doc.createdAt;
@@ -362,6 +417,16 @@ interface AiSectionAdvice {
   suggestions?: string[];
 }
 
+interface AiReportVariant {
+  id: string;
+  modelId?: string;
+  modelName: string;
+  ok: boolean;
+  rawText: string;
+  error?: string;
+  report?: AiStageReport;
+}
+
 interface AiStageReport {
   reportTitle?: string;
   reportSummary?: string;
@@ -380,6 +445,8 @@ interface AiStageReport {
   workflowPlan?: AiWorkflowPlanItem[];
   sectionAdvice?: AiSectionAdvice[];
   rawText?: string;
+  parallelVersions?: AiReportVariant[];
+  synthesisModelName?: string;
 }
 
 interface WorkflowDraftItem {
@@ -497,7 +564,7 @@ const extractJsonObject = (value: string): any | null => {
   try {
     let fixable = match[0]
       .replace(/,\s*([}\]])/g, '$1')        // 移除末尾多余逗号
-      .replace(/[ -]+/g, '')      // 移除控制字符
+      .replace(/[\x00-\x1f]+/g, '')      // Remove control characters
       .replace(/\\"/g, '"')                   // 修复转义引号
       .replace(/\\n/g, '\\n');                // 保留换行符
     return JSON.parse(fixable);
@@ -763,7 +830,7 @@ const parseAiStageReport = (value: string): AiStageReport => {
   };
 };
 
-const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
+const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shared/types').WorkbenchFocus }> = ({ onBack, focus }) => {
   const {
     currentProject,
     currentStageName,
@@ -778,6 +845,7 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { customStages } = useSettingsStore();
   const { tasks, loadTasks, addTask, deleteTask, executeAITask, updateTask } = useTaskStore();
   const { templates, reviews, loadTemplates, loadReviews } = useTemplateStore();
+  const { stageMemories, referenceMaterials, loadKnowledge } = useKnowledgeStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [executingTaskId, setExecutingTaskId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | TaskItem['status']>('all');
@@ -789,6 +857,7 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [isGeneratingAiReport, setIsGeneratingAiReport] = useState(false);
   const [refreshingAnalysisKey, setRefreshingAnalysisKey] = useState('');
   const [aiStageReport, setAiStageReport] = useState<AiStageReport | null>(null);
+  const [selectedAiReportVersionId, setSelectedAiReportVersionId] = useState<string>('synthesis');
   const [isRefreshingDocStatus, setIsRefreshingDocStatus] = useState(false);
   const [workflowDraftItems, setWorkflowDraftItems] = useState<WorkflowDraftItem[]>([]);
   const [nextActionDraftItems, setNextActionDraftItems] = useState<NextActionDraftItem[]>([]);
@@ -799,6 +868,7 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     loadProjectDocs();
     loadTemplates();
     loadReviews();
+    loadKnowledge();
   }, []);
 
   const allStages = getAllStages(customStages);
@@ -816,12 +886,14 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       .filter((r) => r.projectId === currentProject.id)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     : [];
-  const stageSegments = currentProject
-    ? buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages)
-    : [];
-  const projectProgress = currentProject
-    ? getProjectProgress(currentProject, projectDocsList, templates, projectVersions, allStages)
-    : 0;
+  const stageSegments = useMemo(
+    () => currentProject ? buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages) : [],
+    [currentProject, projectDocsList, templates, projectVersions, allStages]
+  );
+  const projectProgress = useMemo(
+    () => currentProject ? getProjectProgress(currentProject, projectDocsList, templates, projectVersions, allStages) : 0,
+    [currentProject, projectDocsList, templates, projectVersions, allStages]
+  );
 
   const stageOptions = useMemo(() => {
     const names = new Set<string>();
@@ -855,6 +927,16 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     stageOptions[0]?.value ||
     '';
 
+  const reportStageMemoryCandidates = useMemo(
+    () => stageMemories
+      .filter(item => normalizeKnowledgeStageNameForPrompt(item.stageName) === normalizeKnowledgeStageNameForPrompt(selectedStage))
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime()),
+    [stageMemories, selectedStage],
+  );
+  const reportReferenceMaterials = useMemo(
+    () => currentProject ? referenceMaterials.filter(item => item.projectId === currentProject.id) : [],
+    [currentProject?.id, referenceMaterials],
+  );
   const stageDocs = useMemo(() => {
     if (!selectedStage) return [];
     const sourceIds = new Set(
@@ -941,11 +1023,11 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       return;
     }
 
-    const firstDocId = stageDocs[0]?.id || '';
-    if (firstDocId && !stageDocs.some(doc => doc.id === selectedReportDocId)) {
-      setSelectedReportDocId(firstDocId);
+    const latestDocId = stageDocs[stageDocs.length - 1]?.id || '';
+    if (latestDocId && !stageDocs.some(doc => doc.id === selectedReportDocId)) {
+      setSelectedReportDocId(latestDocId);
     }
-    if (!firstDocId && selectedReportDocId) {
+    if (!latestDocId && selectedReportDocId) {
       setSelectedReportDocId('');
     }
   }, [focusedReportDocId, pendingReportDocId, selectedReportDocId, stageDocs]);
@@ -1131,6 +1213,7 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           ? { ...saved, ...parseAiStageReport(saved.rawText), rawText: saved.rawText }
           : saved;
         setAiStageReport(restored);
+        setSelectedAiReportVersionId('synthesis');
         setWorkflowDraftItems(createWorkflowDraftItemsFromReport(restored));
       } catch {
         setAiStageReport(null);
@@ -1138,6 +1221,7 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       }
     } else {
       setAiStageReport(null);
+      setSelectedAiReportVersionId('synthesis');
       setWorkflowDraftItems([]);
     }
     setNextActionDraftItems([]);
@@ -1196,9 +1280,28 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     })
     .filter(section => (section.problems?.length || 0) > 0 || (section.suggestions?.length || 0) > 0);
 
+  const displayAiStageReport = useMemo<AiStageReport | null>(() => {
+    if (!aiStageReport) return null;
+    if (selectedAiReportVersionId === 'synthesis') return aiStageReport;
+    const variant = aiStageReport.parallelVersions?.find(item => item.id === selectedAiReportVersionId);
+    if (!variant) return aiStageReport;
+    if (!variant.ok) {
+      return {
+        reportTitle: `${variant.modelName} 输出失败`,
+        reportSummary: variant.error || '该模型未返回可用内容',
+        rawText: variant.error || variant.rawText,
+      };
+    }
+    return {
+      ...(variant.report || parseAiStageReport(variant.rawText)),
+      reportTitle: (variant.report?.reportTitle || `${variant.modelName} ??`),
+      rawText: variant.rawText,
+    };
+  }, [aiStageReport, selectedAiReportVersionId]);
+
   const sectionAdviceItems = useMemo<AiSectionAdvice[]>(() => {
     const currentDocumentTitles = selectedSections.map(section => section.title).filter(Boolean);
-    const explicit = aiStageReport?.sectionAdvice || [];
+    const explicit = displayAiStageReport?.sectionAdvice || [];
     if (explicit.length > 0) {
       const cleanedExplicit = cleanSectionAdviceItems(explicit);
       if (!currentDocumentTitles.length) return cleanedExplicit;
@@ -1227,11 +1330,11 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
     const titles: string[] = currentDocumentTitles;
     const generalSuggestions: string[] = [
-      ...(aiStageReport?.writingFramework || []),
-      ...(aiStageReport?.writingDirection || []),
-      ...(aiStageReport?.materialPlan || []),
-      ...(aiStageReport?.draftPlan || []),
-      ...(aiStageReport?.optimizationFocus || []),
+      ...(displayAiStageReport?.writingFramework || []),
+      ...(displayAiStageReport?.writingDirection || []),
+      ...(displayAiStageReport?.materialPlan || []),
+      ...(displayAiStageReport?.draftPlan || []),
+      ...(displayAiStageReport?.optimizationFocus || []),
     ];
 
     const usedSuggestions = new Set<string>(); // 跨章节去重
@@ -1275,7 +1378,7 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       })
       .filter(item => item.problems.length > 0 || item.suggestions.length > 0)
       .slice(0, 12);
-  }, [aiStageReport, selectedSections]);
+  }, [displayAiStageReport, selectedSections]);
 
   const taskStats = useMemo(() => {
     const open = scopedProjectTasks.filter((t) => t.status !== 'completed').length;
@@ -1372,11 +1475,11 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     stageDocs.length,
   ]);
 
-  const filteredTasks = scopedProjectTasks.filter((task) => {
+  const filteredTasks = dedupeSemanticTasks(scopedProjectTasks.filter((task) => {
     if (statusFilter !== 'all' && task.status !== statusFilter) return false;
     if (sourceFilter !== 'all' && (task.source || 'manual') !== sourceFilter) return false;
     return true;
-  });
+  }));
   const workflowTasks = filteredTasks.filter(task => Boolean(task.workflowId));
   const aiTasks = filteredTasks.filter(task => task.type === 'ai' && !task.workflowId);
   const manualTasks = filteredTasks.filter(task => task.type === 'manual' && !task.workflowId);
@@ -1571,6 +1674,8 @@ const TaskPlanner: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         `- ${section.title}：${section.status}，字数 ${section.wordCount}${section.aiComment ? `，评语：${section.aiComment}` : ''}`
       )).join('\n');
       const documentContent = reportDocument.content || sectionStatus || selectedReportDoc.name;
+      const stageMemoryContext = formatPromptKnowledgeItems(reportStageMemoryCandidates, 'memory');
+      const referenceContext = formatPromptKnowledgeItems(reportReferenceMaterials, 'reference');
 
       const prompt = `你是阶段文档写作框架与方向规划助手。审查、评分、问题判定应交给审查Tab；你在这里只负责根据模板、范文/参考内容和当前正文，给出写作框架、章节展开方向、材料组织方式和下一步写作任务。
 
@@ -1649,14 +1754,65 @@ ${reviewIssues}
 当前文档内容摘录：
 ${documentContent.slice(0, 9000)}`;
 
-      const response = await window.electronAPI.callAI({ prompt });
-      const parsed = parseAiStageReport(response);
+      const aiConfig = await window.electronAPI.loadAIConfig();
+      const useParallelVersions = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1;
+      let response = '';
+      let parallelVersions: AiReportVariant[] = [];
+      let synthesisModelName: string | undefined;
+      if (useParallelVersions && window.electronAPI.callAIParallelDetails) {
+        const details = await useAIJobStore.getState().runAIJob<{ synthesis: string; synthesisModelName?: string; variants: Array<{ modelId: string; modelName: string; ok: boolean; output: string; error?: string }> }>(
+          {
+            scene: 'report',
+            title: '生成 AI 阶段报告',
+            projectId: currentProject.id,
+            docId: selectedReportDoc.id,
+            resultPreview: (value) => value.synthesis,
+          },
+          async ({ setProgress, throwIfCancelled }) => {
+            setProgress(35);
+            const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
+            throwIfCancelled();
+            setProgress(85);
+            return value;
+          },
+        );
+        response = details.synthesis;
+        synthesisModelName = details.synthesisModelName;
+        parallelVersions = details.variants.map((variant, index) => ({
+          id: `model-${index}-${variant.modelId}`,
+          modelId: variant.modelId,
+          modelName: variant.modelName,
+          ok: variant.ok,
+          rawText: variant.output || variant.error || '',
+          error: variant.error,
+          report: variant.ok ? parseAiStageReport(variant.output) : undefined,
+        }));
+      } else {
+        response = await useAIJobStore.getState().runAIJob<string>(
+          {
+            scene: 'report',
+            title: '生成 AI 阶段报告',
+            projectId: currentProject.id,
+            docId: selectedReportDoc.id,
+            resultPreview: (value) => value,
+          },
+          async ({ setProgress, throwIfCancelled }) => {
+            setProgress(35);
+            const value = await window.electronAPI.callAI({ prompt });
+            throwIfCancelled();
+            setProgress(85);
+            return String(value || '');
+          },
+        );
+      }
+      const parsed = { ...parseAiStageReport(response), parallelVersions, synthesisModelName };
       setAiStageReport(parsed);
+      setSelectedAiReportVersionId('synthesis');
       setWorkflowDraftItems(createWorkflowDraftItemsFromReport(parsed));
       // 持久化 AI 报告到 ProjectDocument（从 store 取最新对象，避免闭包引用旧值）
       const latestDoc = useProjectDocStore.getState().projectDocs.find(d => d.id === selectedReportDoc?.id);
       if (latestDoc) {
-        await updateProjectDoc(latestDoc.id, { aiReport: JSON.stringify(parsed) });
+        await updateProjectDoc(latestDoc.id, { aiReport: JSON.stringify(parsed), analyzedAt: new Date().toISOString() });
       }
       message.success(`AI 阶段报告已生成，正文提取 ${reportDocument.content.length} 字，已整理为可编辑工作流草稿`);
     } catch (error: any) {
@@ -1720,6 +1876,13 @@ ${documentContent.slice(0, 9000)}`;
     const createdAt = new Date().toISOString();
     const workflowId = `workflow-${Date.now()}`;
     const workflowName = `${selectedStage || '阶段'} V${selectedStageVersionIndex + 1}：${selectedReportDoc.name}`;
+    const existingWorkflowTasks = useTaskStore.getState().tasks.filter(task =>
+      task.projectId === currentProject.id &&
+      task.source === 'report' &&
+      task.relatedDocId === selectedReportDoc.id &&
+      Boolean(task.workflowId)
+    );
+    await Promise.all(existingWorkflowTasks.map(task => deleteTask(task.id)));
     let previousTaskId: string | undefined;
 
     for (let i = 0; i < draftItems.length; i++) {
@@ -2012,7 +2175,7 @@ ${documentContent.slice(0, 9000)}`;
               </Col>
               <Col span={16}>
                 <Text strong style={{ display: 'block', marginBottom: 6 }}>阶段版本</Text>
-                <Text type="secondary">一个阶段有多少个相关文档，就形成多少个版本；版本按文档创建时间排序。</Text>
+                <Text type="secondary">一个阶段有多少个相关文档，就形成多少个版本；版本按文档创建时间排序，默认打开最新版本。</Text>
               </Col>
             </Row>
 
@@ -2077,6 +2240,7 @@ ${documentContent.slice(0, 9000)}`;
                             <Space size={6}>
                               <Text strong>V{index + 1}</Text>
                               {selected && <Tag color="blue" style={{ margin: 0 }}>已选</Tag>}
+                              {index === stageDocs.length - 1 && <Tag color="green" style={{ margin: 0 }}>最新</Tag>}
                             </Space>
                             <Text type="secondary" style={{ fontSize: 12 }}>{dayjs(getDocCreatedAt(doc)).format('MM-DD HH:mm')}</Text>
                           </div>
@@ -2309,9 +2473,23 @@ ${documentContent.slice(0, 9000)}`;
                         <Title level={5} style={{ margin: 0 }}>{aiStageReport?.reportTitle || 'AI写作框架'}</Title>
                         <Text type="secondary">基于模板要求、范文结构、参考内容和当前正文规划</Text>
                       </div>
-                      <Button icon={<RobotOutlined />} loading={isGeneratingAiReport} onClick={handleGenerateAiStageReport}>
-                        重新生成
-                      </Button>
+                      <Space wrap>
+                        {aiStageReport?.parallelVersions?.length ? (
+                          <Select
+                            size="small"
+                            value={selectedAiReportVersionId}
+                            style={{ minWidth: 220 }}
+                            onChange={setSelectedAiReportVersionId}
+                            options={[
+                              { value: 'synthesis', label: `综合版本${aiStageReport.synthesisModelName ? `（${aiStageReport.synthesisModelName}）` : ''}` },
+                              ...aiStageReport.parallelVersions.map(item => ({ value: item.id, label: `${item.modelName}${item.ok ? '' : '（失败）'}` })),
+                            ]}
+                          />
+                        ) : null}
+                        <Button icon={<RobotOutlined />} loading={isGeneratingAiReport} onClick={handleGenerateAiStageReport}>
+                          重新生成
+                        </Button>
+                      </Space>
                     </div>
 
                     {aiStageReport && (
@@ -2325,12 +2503,12 @@ ${documentContent.slice(0, 9000)}`;
                         </div>
 
                         {/* 质量评估 */}
-                        {aiStageReport.qualityAssessment && aiStageReport.qualityAssessment.length > 0 && (
+                        {displayAiStageReport?.qualityAssessment && displayAiStageReport.qualityAssessment.length > 0 && (
                           <div style={{ padding: '12px 14px', background: '#fff', borderRadius: 8, border: '1px solid #e5e7eb' }}>
                             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>质量评估</Text>
                             <List
                               size="small"
-                              dataSource={aiStageReport.qualityAssessment}
+                              dataSource={displayAiStageReport.qualityAssessment}
                               renderItem={(item) => <List.Item style={{ paddingLeft: 0 }}><Text>{item}</Text></List.Item>}
                             />
                           </div>
@@ -2390,11 +2568,11 @@ ${documentContent.slice(0, 9000)}`;
                             <div style={{ border: '1px solid #e5e7eb', background: '#fff', borderRadius: 8, padding: 12, height: '100%' }}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 8 }}>
                                 <Title level={5} style={{ margin: 0 }}>人工改稿/确认</Title>
-                                <Text type="secondary">确认后可进入下方工作流草稿</Text>
+                                <Text type="secondary">分类建议，不会自动生成任务</Text>
                               </div>
                               <List
                                 size="small"
-                                dataSource={aiStageReport.humanTasks || []}
+                                dataSource={displayAiStageReport?.humanTasks || []}
                                 locale={{ emptyText: '暂无人工任务建议' }}
                                 renderItem={(item, index) => <List.Item><Space align="start"><Tag color="orange">{index + 1}</Tag><Text>{item}</Text></Space></List.Item>}
                               />
@@ -2404,11 +2582,11 @@ ${documentContent.slice(0, 9000)}`;
                             <div style={{ border: '1px solid #e5e7eb', background: '#fff', borderRadius: 8, padding: 12, height: '100%' }}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 8 }}>
                                 <Title level={5} style={{ margin: 0 }}>AI框架/写作</Title>
-                                <Text type="secondary">确认后可进入下方工作流草稿</Text>
+                                <Text type="secondary">分类建议，不会自动生成任务</Text>
                               </div>
                               <List
                                 size="small"
-                                dataSource={aiStageReport.aiTasks || []}
+                                dataSource={displayAiStageReport?.aiTasks || []}
                                 locale={{ emptyText: '暂无AI任务建议' }}
                                 renderItem={(item, index) => <List.Item><Space align="start"><Tag color="blue">{index + 1}</Tag><Text>{item}</Text></Space></List.Item>}
                               />
@@ -2417,27 +2595,27 @@ ${documentContent.slice(0, 9000)}`;
                         </Row>
 
                         {/* 内容缺口与优化重点 */}
-                        {(aiStageReport.contentGaps?.length || aiStageReport.optimizationFocus?.length) ? (
+                        {(displayAiStageReport?.contentGaps?.length || displayAiStageReport?.optimizationFocus?.length) ? (
                           <Row gutter={12}>
-                            {aiStageReport.contentGaps && aiStageReport.contentGaps.length > 0 && (
+                            {displayAiStageReport?.contentGaps && displayAiStageReport.contentGaps.length > 0 && (
                               <Col span={12}>
                                 <div style={{ border: '1px solid #e5e7eb', background: '#fff', borderRadius: 8, padding: 12, height: '100%' }}>
                                   <Title level={5} style={{ marginTop: 0 }}>内容缺口</Title>
                                   <List
                                     size="small"
-                                    dataSource={aiStageReport.contentGaps}
+                                    dataSource={displayAiStageReport.contentGaps}
                                     renderItem={(item) => <List.Item><Text>{item}</Text></List.Item>}
                                   />
                                 </div>
                               </Col>
                             )}
-                            {aiStageReport.optimizationFocus && aiStageReport.optimizationFocus.length > 0 && (
-                              <Col span={aiStageReport.contentGaps?.length ? 12 : 24}>
+                            {displayAiStageReport?.optimizationFocus && displayAiStageReport.optimizationFocus.length > 0 && (
+                              <Col span={displayAiStageReport?.contentGaps?.length ? 12 : 24}>
                                 <div style={{ border: '1px solid #e5e7eb', background: '#fff', borderRadius: 8, padding: 12, height: '100%' }}>
                                   <Title level={5} style={{ marginTop: 0 }}>优化重点</Title>
                                   <List
                                     size="small"
-                                    dataSource={aiStageReport.optimizationFocus}
+                                    dataSource={displayAiStageReport.optimizationFocus}
                                     renderItem={(item) => <List.Item><Text>{item}</Text></List.Item>}
                                   />
                                 </div>
@@ -2521,7 +2699,7 @@ ${documentContent.slice(0, 9000)}`;
                         </div>
 
                         {/* 原始响应（可折叠，用于调试） */}
-                        {aiStageReport.rawText && (
+                        {displayAiStageReport?.rawText && (
                           <details style={{ marginTop: 8 }}>
                             <summary style={{ cursor: 'pointer', color: '#94a3b8', fontSize: 12 }}>
                               查看 AI 原始响应
@@ -2539,7 +2717,7 @@ ${documentContent.slice(0, 9000)}`;
                               wordBreak: 'break-all',
                               color: '#475569',
                             }}>
-                              {aiStageReport.rawText}
+                              {displayAiStageReport.rawText}
                             </pre>
                           </details>
                         )}
@@ -2584,7 +2762,12 @@ ${documentContent.slice(0, 9000)}`;
             </Space>
           }
         >
-          {(hasStandaloneTasks || showWorkflowTasks) ? (
+          {hasWorkflowDraft ? (
+            <Empty
+              description="当前仅生成了可编辑的工作流草稿；点击“确认并生成工作流”后，才会在这里生成正式任务"
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+            />
+          ) : (hasStandaloneTasks || showWorkflowTasks) ? (
             <div
               style={{
                 display: 'grid',
@@ -2603,23 +2786,9 @@ ${documentContent.slice(0, 9000)}`;
             </div>
           ) : (
             <Empty
-              description={hasWorkflowDraft ? '工作流草稿确认生成后，会在这里显示工作流任务' : '暂无任务'}
+              description="暂无任务"
               image={Empty.PRESENTED_IMAGE_SIMPLE}
             />
-          )}
-          {!hasStandaloneTasks && !showWorkflowTasks && !hasWorkflowDraft && (
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-                gap: 12,
-                marginTop: 12,
-                alignItems: 'start',
-              }}
-            >
-              {renderTaskGroup('人工任务', '资料、口径、改稿、成稿确认', manualTasks, '#52c41a')}
-              {renderTaskGroup('AI任务', '框架、提纲、初稿、扩写、润色', aiTasks, '#1677ff')}
-            </div>
           )}
         </Card>
       </Space>

@@ -31,7 +31,8 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
-import { TaskItem } from '../../../shared/types';
+import { useKnowledgeStore } from '../../stores/knowledgeStore';
+import { ProjectDocument, TaskItem } from '../../../shared/types';
 import {
   buildProjectStageSegments,
   getAllStages,
@@ -66,6 +67,7 @@ const PlanManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const { templates } = useTemplateStore();
   const { customStages } = useSettingsStore();
   const { tasks, loadTasks, updateTask } = useTaskStore();
+  const { learnStageFinal, deleteStageMemoriesForDoc } = useKnowledgeStore();
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
 
   useEffect(() => {
@@ -173,18 +175,42 @@ const PlanManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     }).sort((a, b) => new Date(b.tasks[0]?.createdAt || 0).getTime() - new Date(a.tasks[0]?.createdAt || 0).getTime());
   }, [currentStageName, selectedPlan]);
 
+  const learnPlanDocument = async (doc: ProjectDocument, segment: TimelineStageSegment) => {
+    if (!selectedPlan?.project) return;
+    const version = doc.versionId ? versions.find(item => item.id === doc.versionId) : undefined;
+    await learnStageFinal({
+      projectId: selectedPlan.project.id,
+      projectName: selectedPlan.project.name,
+      stageName: segment.stage,
+      docId: doc.id,
+      docName: doc.name,
+      sourceFilePath: doc.sourceFilePath || version?.filePath,
+      content: version?.content,
+    });
+  };
+
   const handleStageComplete = async (segment: TimelineStageSegment) => {
     const completedAt = new Date().toISOString();
-    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt })));
+    // Only mark the newest source document to preserve old-version completion history.
+    const lastDocId = segment.sourceDocIds[segment.sourceDocIds.length - 1];
+    const doc = lastDocId ? projectDocs.find(item => item.id === lastDocId) : undefined;
+    if (doc) {
+      await updateProjectDoc(doc.id, { completedAt });
+      await learnPlanDocument({ ...doc, completedAt }, segment);
+    }
   };
 
   const handleStageReopen = async (segment: TimelineStageSegment) => {
-    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt: undefined })));
+    // Only reopen the newest source document to match completion behavior above.
+    const lastDocId = segment.sourceDocIds[segment.sourceDocIds.length - 1];
+    if (lastDocId) {
+      await updateProjectDoc(lastDocId, { completedAt: undefined });
+      await deleteStageMemoriesForDoc(lastDocId);
+    }
   };
 
   const handleStageDeadline = async (segment: TimelineStageSegment, deadline?: string) => {
-    const normalized = deadline ? (() => { const d = new Date(deadline); d.setHours(0, 0, 0, 0); return d.toISOString(); })() : undefined;
-    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline: normalized })));
+    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline })));
   };
 
   const isTaskBlocked = (task: TaskItem) => {
@@ -311,8 +337,13 @@ const PlanManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
       {projectPlans.length > 0 && selectedPlan ? (
         <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
-          <Card size="small" title="项目列表" style={{ borderRadius: 10 }} bodyStyle={{ padding: 8 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <Card
+            size="small"
+            title="项目列表"
+            style={{ borderRadius: 10, maxHeight: 'max(260px, calc(100vh - 280px))', overflow: 'hidden' }}
+            bodyStyle={{ padding: 8, maxHeight: 'max(210px, calc(100vh - 335px))', overflowY: 'auto', overscrollBehavior: 'contain' }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingRight: 4 }}>
               {projectPlans.map(plan => {
                 const selected = plan.project.id === selectedPlan.project.id;
                 const progress = plan.segments.length ? Math.round((plan.completed / plan.segments.length) * 100) : 0;

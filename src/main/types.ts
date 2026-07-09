@@ -1,9 +1,15 @@
-// 项目类型定义
+﻿// 项目类型定义
 export interface Project {
   id: string;
   name: string;
-  description: string;
+  description: string; // 项目描述
+  descriptionSource?: 'manual' | 'auto';
+  autoDescriptionUpdatedAt?: string;
+  autoDescriptionPendingSince?: string;
+  autoDescriptionNextUpdateAt?: string;
+  autoDescriptionPendingFileNames?: string[];
   folderPath: string;
+  folderModifiedAt?: string; // 项目文件夹内最近文件/目录修改时间
   status: 'active' | 'completed' | 'paused';
   progress: number; // 0-100
   templateId?: string; // 关联的模板ID
@@ -40,7 +46,7 @@ export interface TaskItem {
   id: string;
   projectId: string;
   title: string;
-  description: string;
+  description: string; // 任务描述
   type: 'ai' | 'manual'; // AI处理或人工处理
   status: 'pending' | 'in_progress' | 'completed';
   priority: 'high' | 'medium' | 'low';
@@ -255,6 +261,7 @@ export interface ProjectDocument {
   deadline?: string;        // 截止日期 ISO string
   completedAt?: string;     // 完成日期 ISO string
   analyzedAt?: string;      // 最近分析时间
+  aiReport?: string;        // AI writing framework report JSON
   sourceFilePath?: string;  // 自动阶段识别关联的真实文件路径
   sourceFileCreatedAt?: string;  // 真实文件创建时间
   sourceFileModifiedAt?: string; // 真实文件最近修改时间
@@ -263,15 +270,118 @@ export interface ProjectDocument {
 }
 
 // 用户资料
+export interface StageMemoryEntry {
+  id: string;
+  projectId: string;
+  projectName: string;
+  stageName: string;
+  docId?: string;
+  docName: string;
+  sourceFilePath?: string;
+  summary: string;
+  model?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReferenceMaterial {
+  id: string;
+  projectId: string;
+  name: string;
+  filePath?: string;
+  source: 'project-file' | 'external';
+  contentPreview?: string;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface UserProfile {
   nickname: string;
   email: string;
   avatar?: string; // base64 或文件路径
 }
 
+// 自定义阶段配置
+export interface StageConfig {
+  id: string;
+  name: string;
+  keywords: string[];
+  color: string;
+  isSystem?: boolean;
+  deleted?: boolean;
+}
+
 // 应用设置
+export type HolidayDataSource = 'auto' | 'local' | 'online';
+
 export interface AppSettings {
   workspacePath: string; // 项目工作区路径
   workspaceCapacity: number; // 工作区容量上限（GB）
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
+  enableSystemNotifications?: boolean; // Enable Windows system notifications
+  holidayDataSource?: HolidayDataSource; // Calendar holiday source
+  holidayApiUrl?: string; // Calendar holiday API URL, supports {year}
+  customStages?: StageConfig[]; // 自定义阶段配置
+}
+
+// ─── 提示词模板系统 ─────────────────────────────────────
+
+export type PromptScene =
+  | 'report'
+  | 'review'
+  | 'rewrite'
+  | 'diff'
+  | 'summary'
+  | 'memory'
+  | 'description'
+  | 'taskExecute'
+  | 'sectionAnalysis'
+  | 'templateExtract';
+
+export interface PromptRule {
+  id: string;
+  text: string;
+  enabled: boolean;
+  type: 'must' | 'must_not' | 'prefer';
+}
+
+export interface OutputField {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface StructuredPrompt {
+  scene: PromptScene;
+  mode: 'structured' | 'raw';
+  role: string;
+  goals: string[];
+  rules: PromptRule[];
+  outputFields: OutputField[];
+  rawPrompt?: string;
+}
+
+export interface PromptTemplate {
+  id: string;
+  scene: PromptScene;
+  name: string;
+  content: string;
+  isBuiltin: boolean;
+  createdAt: string;
+  updatedAt: string;
+  structured?: StructuredPrompt;
+}
+
+export interface SkillPackage {
+  id: string;
+  name: string;
+  version: string;
+  type: PromptScene[];
+  scope: 'global' | 'project';
+  weight: number;
+  enabled: boolean;
+  prompts: Partial<Record<PromptScene, string>>;
+  rules: string[];
+  importedAt: string;
 }

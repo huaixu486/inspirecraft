@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { isAIJobCancelledError, useAIJobStore } from './aiJobStore';
 import { WritingTemplate, ReviewResult, ReviewConfig } from '../../shared/types';
 
 interface TemplateState {
@@ -80,11 +81,25 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
 
   executeReview: async (versionId, templateId, config) => {
     try {
-      const result = await window.electronAPI.executeReview({
-        versionId,
-        templateId,
-        config,
-      });
+      const result = await useAIJobStore.getState().runAIJob<any>(
+        {
+          scene: 'review',
+          title: '执行文档审核',
+          inputHash: `${versionId}:${templateId}`,
+          resultPreview: (value) => value?.summary || (value?.issues ? `发现 ${value.issues.length} 个问题` : undefined),
+        },
+        async ({ setProgress, throwIfCancelled }) => {
+          setProgress(35);
+          const value = await window.electronAPI.executeReview({
+            versionId,
+            templateId,
+            config,
+          });
+          throwIfCancelled();
+          setProgress(85);
+          return value;
+        },
+      );
       if (result.success && result.result) {
         set({ reviews: [...get().reviews, result.result] });
       }

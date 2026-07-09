@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Select, Collapse, message, Popconfirm, DatePicker, Input, Checkbox } from 'antd';
 
 const { TextArea } = Input;
@@ -9,12 +9,14 @@ import {
   RightOutlined, DownOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useProjectStore } from '../../stores/projectStore';
+import { useProjectStore, WorkflowWorkbenchTarget } from '../../stores/projectStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
-import { ProjectDocument, WritingTemplate, TaskItem } from '../../../shared/types';
+import { useKnowledgeStore } from '../../stores/knowledgeStore';
+import { Project, ProjectDocument, ReferenceMaterial, StageMemoryEntry, WritingTemplate, TaskItem } from '../../../shared/types';
 import {
   buildProjectStageSegments,
+  checkDeadlineStatus,
   getStageMeta,
   getAllStages,
   TimelineStageSegment,
@@ -22,8 +24,30 @@ import {
 } from '../../utils/timelineStages';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
+import { useNavigationStore } from '../../stores/navigationStore';
+import { isManualProjectDescription, maybeGenerateAutoProjectDescription } from '../../utils/autoProjectDescription';
+import { composePrompt } from '../../utils/promptComposer';
+import { useAIJobStore } from '../../stores/aiJobStore';
+import { deriveProjectNextActions, ProjectNextAction } from '../../utils/projectNextActions';
+import { buildLifecyclePatch, getProjectDocumentLifecycleColor, getProjectDocumentLifecycleLabel, reopenLifecycleStatus } from '../../utils/documentLifecycle';
 
 const { Title, Text, Paragraph } = Typography;
+
+const normalizeSidePanelKnowledgeStage = (value?: string) => String(value || '').trim().replace(/\s+/g, ' ') || 'unknown';
+
+const formatSidePanelKnowledgeItems = (items: Array<StageMemoryEntry | ReferenceMaterial>, type: 'memory' | 'reference') =>
+  items
+    .slice(0, type === 'memory' ? 4 : 5)
+    .map((item, index) => {
+      const body = type === 'memory'
+        ? (item as StageMemoryEntry).summary
+        : ((item as ReferenceMaterial).summary || (item as ReferenceMaterial).contentPreview || '');
+      const name = type === 'memory' ? (item as StageMemoryEntry).docName : (item as ReferenceMaterial).name;
+      return String(index + 1) + '. ' + (name || 'item') + '\n' + String(body || '').slice(0, type === 'memory' ? 1200 : 1600);
+    })
+    .filter(Boolean)
+    .join('\n\n');
+
 
 // 折叠展开动画组件
 const AnimatedExpand: React.FC<{
@@ -65,20 +89,316 @@ const AnimatedExpand: React.FC<{
 
 export type ProjectDetailPage = 'files' | 'plan' | 'team' | 'templates' | 'report' | 'review' | 'writing';
 
-const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: ProjectDetailPage) => void }> = ({ initialTab = 'overview', onOpenDetail }) => {
-  const {
-    currentProject,
-    setCurrentProject,
-    versions,
-    setCurrentStageName,
-    setPendingReportDocId,
-    setPendingReportDocOnly,
-    setPendingWorkflowFocus,
-  } = useProjectStore();
-  const { templates } = useTemplateStore();
-  const { projectDocs, addProjectDoc, updateProjectDoc, deleteProjectDoc } = useProjectDocStore();
-  const { tasks, updateTask, addTask, deleteTask } = useTaskStore();
-  const { customStages } = useSettingsStore();
+interface DetailPanelProps {
+  project: Project | null;
+  isOpen: boolean;
+  isSwitching: boolean;
+  initialTab?: string;
+  onOpenDetail?: (page: ProjectDetailPage) => void;
+  onClose: () => void;
+}
+
+// ---- 阶段完成度圆环：双半圆 div + transform:rotate，纯合成层动画 ----
+interface StageProgressRingProps {
+  percent: number;
+}
+
+const StageProgressRing = React.memo(({ percent }: StageProgressRingProps) => {
+  const mountedRef = useRef(false);
+  useEffect(() => { mountedRef.current = true; }, []);
+
+  const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
+  const color = safePercent >= 80 ? '#52c41a' : safePercent >= 40 ? '#1890ff' : '#faad14';
+  // 从 270°(顶部隐藏) 开始顺时针旋转，每 1% = 3.6°
+  const leftDeg = 270 + Math.min(safePercent, 50) * 3.6;
+  const rightDeg = 270 + Math.max(0, safePercent - 50) * 3.6;
+
+  return (
+    <div className={`stage-progress-ring-v2${mountedRef.current ? ' stage-progress-ring-v2-ready' : ''}`}>
+      <div className="stage-progress-ring-v2-graphic">
+        <div className="stage-progress-ring-v2-track" />
+        <div className="stage-progress-ring-v2-mask stage-progress-ring-v2-left">
+          <div
+            className="stage-progress-ring-v2-fill stage-progress-ring-v2-fill-left"
+            style={{ borderColor: color, transform: `rotate(${leftDeg}deg) translateZ(0)` }}
+          />
+        </div>
+        <div className="stage-progress-ring-v2-mask stage-progress-ring-v2-right">
+          <div
+            className="stage-progress-ring-v2-fill stage-progress-ring-v2-fill-right"
+            style={{ borderColor: color, transform: `rotate(${rightDeg}deg) translateZ(0)` }}
+          />
+        </div>
+        <div className="stage-progress-ring-v2-hole" />
+      </div>
+      <div className="stage-progress-ring-v2-value">
+        <span style={{ color }}>{safePercent}%</span>
+      </div>
+    </div>
+  );
+});
+
+const StageProgressSvgRing = React.memo(({ percent }: StageProgressRingProps) => {
+  const [ready, setReady] = useState(false);
+  const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
+  const color = safePercent >= 80 ? '#52c41a' : safePercent >= 40 ? '#1890ff' : '#faad14';
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setReady(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <div className={`stage-progress-svg-ring${ready ? ' stage-progress-svg-ring-ready' : ''}`}>
+      <svg className="stage-progress-svg-ring-graphic" width={80} height={80} viewBox="0 0 80 80" aria-hidden="true">
+        <circle className="stage-progress-svg-ring-track" cx={40} cy={40} r={34} pathLength={100} />
+        <circle
+          className="stage-progress-svg-ring-bar"
+          cx={40}
+          cy={40}
+          r={34}
+          pathLength={100}
+          style={{ stroke: color, strokeDashoffset: 100 - safePercent }}
+        />
+      </svg>
+      <div className="stage-progress-svg-ring-value">
+        <span style={{ color }}>{safePercent}%</span>
+      </div>
+    </div>
+  );
+});
+
+const StageProgressPieRing = React.memo(({ percent }: StageProgressRingProps) => {
+  const [ready, setReady] = useState(false);
+  const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
+  const color = safePercent >= 80 ? '#52c41a' : safePercent >= 40 ? '#1890ff' : '#faad14';
+  const [displayPercent, setDisplayPercent] = useState(safePercent);
+  const [overHalf, setOverHalf] = useState(safePercent > 50);
+  const [durationMs, setDurationMs] = useState(420);
+  const displayPercentRef = useRef(safePercent);
+  const phaseTimerRef = useRef(0);
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setReady(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  useEffect(() => {
+    if (phaseTimerRef.current) {
+      window.clearTimeout(phaseTimerRef.current);
+      phaseTimerRef.current = 0;
+    }
+
+    const from = displayPercentRef.current;
+    const to = safePercent;
+    if (from === to) {
+      setOverHalf(to > 50);
+      setDisplayPercent(to);
+      return;
+    }
+
+    const totalDelta = Math.max(1, Math.abs(to - from));
+    const getDuration = (start: number, end: number) =>
+      Math.max(80, Math.round(420 * Math.abs(end - start) / totalDelta));
+
+    if (from <= 50 && to > 50) {
+      const firstDuration = getDuration(from, 50);
+      const secondDuration = getDuration(50, to);
+      setOverHalf(false);
+      setDurationMs(firstDuration);
+      setDisplayPercent(50);
+      displayPercentRef.current = 50;
+      phaseTimerRef.current = window.setTimeout(() => {
+        setOverHalf(true);
+        setDurationMs(secondDuration);
+        setDisplayPercent(to);
+        displayPercentRef.current = to;
+        phaseTimerRef.current = 0;
+      }, firstDuration);
+      return () => {
+        if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
+      };
+    }
+
+    if (from > 50 && to <= 50) {
+      const firstDuration = getDuration(from, 50);
+      const secondDuration = getDuration(50, to);
+      setOverHalf(true);
+      setDurationMs(firstDuration);
+      setDisplayPercent(50);
+      displayPercentRef.current = 50;
+      phaseTimerRef.current = window.setTimeout(() => {
+        setOverHalf(false);
+        setDurationMs(secondDuration);
+        setDisplayPercent(to);
+        displayPercentRef.current = to;
+        phaseTimerRef.current = 0;
+      }, firstDuration);
+      return () => {
+        if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
+      };
+    }
+
+    setOverHalf(to > 50);
+    setDurationMs(420);
+    setDisplayPercent(to);
+    displayPercentRef.current = to;
+  }, [safePercent]);
+
+  const rotation = displayPercent * 3.6;
+
+  return (
+    <div
+      className={`stage-progress-pie-ring${overHalf ? ' stage-progress-pie-ring-over-half' : ''}${ready ? ' stage-progress-pie-ring-ready' : ''}`}
+      style={{
+        '--stage-progress-color': color,
+        '--stage-progress-duration': `${durationMs}ms`,
+      } as React.CSSProperties}
+    >
+      <div className="stage-progress-pie-ring-slice">
+        <div
+          className="stage-progress-pie-ring-bar"
+          style={{ transform: `rotate(${rotation}deg) translateZ(0)` }}
+        />
+        <div className="stage-progress-pie-ring-fill" />
+      </div>
+      <div className="stage-progress-pie-ring-hole" />
+      <div className="stage-progress-pie-ring-value">
+        <span style={{ color }}>{safePercent}%</span>
+      </div>
+    </div>
+  );
+});
+
+const StageProgressCanvasRing = React.memo(({ percent }: StageProgressRingProps) => {
+  const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
+  const color = safePercent >= 80 ? '#52c41a' : safePercent >= 40 ? '#1890ff' : '#faad14';
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const displayPercentRef = useRef(safePercent);
+  const animationRef = useRef(0);
+  const mountedRef = useRef(false);
+
+  const drawRing = useCallback((value: number, ringColor: string) => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+
+    const size = 80;
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== size * dpr || canvas.height !== size * dpr) {
+      canvas.width = size * dpr;
+      canvas.height = size * dpr;
+      canvas.style.width = `${size}px`;
+      canvas.style.height = `${size}px`;
+    }
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size, size);
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+
+    ctx.beginPath();
+    ctx.strokeStyle = '#f0f0f0';
+    ctx.arc(40, 40, 34, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const clamped = Math.max(0, Math.min(100, value));
+    if (clamped <= 0) return;
+
+    const start = -Math.PI / 2;
+    const end = start + Math.PI * 2 * clamped / 100;
+    ctx.beginPath();
+    ctx.strokeStyle = ringColor;
+    ctx.arc(40, 40, 34, start, end, false);
+    ctx.stroke();
+  }, []);
+
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      displayPercentRef.current = safePercent;
+      drawRing(safePercent, color);
+      return;
+    }
+
+    const from = displayPercentRef.current;
+    const to = safePercent;
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+
+    if (from === to) {
+      drawRing(to, color);
+      return;
+    }
+
+    const startedAt = performance.now();
+    const duration = 420;
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const current = from + (to - from) * progress;
+      displayPercentRef.current = current;
+      drawRing(current, color);
+      if (progress < 1) animationRef.current = requestAnimationFrame(tick);
+    };
+    animationRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    };
+  }, [safePercent, color, drawRing]);
+
+  return (
+    <div className="stage-progress-canvas-ring">
+      <canvas ref={canvasRef} className="stage-progress-canvas-ring-canvas" width={80} height={80} />
+      <div className="stage-progress-canvas-ring-value">
+        <span style={{ color }}>{safePercent}%</span>
+      </div>
+    </div>
+  );
+});
+
+// 侧边窗骨架屏（无项目时显示）
+const DetailPanelSkeleton = () => (
+  <div className="detail-panel detail-panel-polished" style={{ padding: '16px 18px', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="skeleton-loading" style={{ width: 40, height: 40, borderRadius: 10 }} />
+        <div>
+          <div className="skeleton-loading" style={{ width: 140, height: 18, borderRadius: 4, marginBottom: 6 }} />
+          <div className="skeleton-loading" style={{ width: 100, height: 14, borderRadius: 4 }} />
+        </div>
+      </div>
+    </div>
+    <div className="skeleton-loading" style={{ height: 32, borderRadius: 6, marginBottom: 12 }} />
+    <div className="skeleton-loading" style={{ flex: 1, borderRadius: 8 }} />
+  </div>
+);
+
+const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching, initialTab = 'overview', onOpenDetail, onClose }) => {
+  const projects = useProjectStore(s => s.projects);
+  const currentProject = project; // 内部使用 currentProject 保持兼容
+  const versions = useProjectStore(s => s.versions);
+  const setCurrentStageName = useProjectStore(s => s.setCurrentStageName);
+  const setPendingReportDocId = useProjectStore(s => s.setPendingReportDocId);
+  const setPendingReportDocOnly = useProjectStore(s => s.setPendingReportDocOnly);
+  const setPendingWorkflowFocus = useProjectStore(s => s.setPendingWorkflowFocus);
+  const updateProject = useProjectStore(s => s.updateProject);
+  const templates = useTemplateStore(s => s.templates);
+  const reviews = useTemplateStore(s => s.reviews);
+  const projectDocs = useProjectDocStore(s => s.projectDocs);
+  const addProjectDoc = useProjectDocStore(s => s.addProjectDoc);
+  const updateProjectDoc = useProjectDocStore(s => s.updateProjectDoc);
+  const deleteProjectDoc = useProjectDocStore(s => s.deleteProjectDoc);
+  const stageMemories = useKnowledgeStore(s => s.stageMemories);
+  const referenceMaterials = useKnowledgeStore(s => s.referenceMaterials);
+  const loadKnowledge = useKnowledgeStore(s => s.loadKnowledge);
+  const learnStageFinal = useKnowledgeStore(s => s.learnStageFinal);
+  const deleteStageMemoriesForDoc = useKnowledgeStore(s => s.deleteStageMemoriesForDoc);
+  const tasks = useTaskStore(s => s.tasks);
+  const updateTask = useTaskStore(s => s.updateTask);
+  const addTask = useTaskStore(s => s.addTask);
+  const deleteTask = useTaskStore(s => s.deleteTask);
+  const navigateWorkbench = useNavigationStore(state => state.navigate);
+  const customStages = useSettingsStore(s => s.customStages);
   const allStages = getAllStages(customStages);
   const stageMeta = getStageMeta(allStages);
 
@@ -102,36 +422,48 @@ const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: Project
   const [writingContent, setWritingContent] = useState('');
 
   useEffect(() => {
-    if (currentProject) setActiveTab(initialTab || 'overview');
-  }, [currentProject?.id, initialTab]);
+    if (currentProject) {
+      setActiveTab(initialTab || 'overview');
+      void loadKnowledge();
+    }
+  }, [currentProject?.id, initialTab, loadKnowledge]);
 
-  const isOverdue = (deadline?: string, completedAt?: string) => {
-    if (!deadline || completedAt) return false;
-    const d = new Date(deadline);
-    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
-    if (hasTime) return d.getTime() < Date.now();
-    const now = new Date();
-    return (d.getFullYear() < now.getFullYear())
-      || (d.getFullYear() === now.getFullYear() && d.getMonth() < now.getMonth())
-      || (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() < now.getDate());
-  };
+  const getDlStatus = (deadline?: string, completedAt?: string) =>
+    (!deadline || completedAt) ? 'normal' as const : checkDeadlineStatus(deadline, Date.now());
 
-  const isAboutToExpire = (deadline?: string, completedAt?: string) => {
-    if (!deadline || completedAt || isOverdue(deadline, completedAt)) return false;
-    const d = new Date(deadline);
-    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
-    if (hasTime) return Date.now() >= d.getTime() - 24 * 60 * 60 * 1000;
-    const now = new Date();
-    return now.getFullYear() === d.getFullYear() && now.getMonth() === d.getMonth() && now.getDate() === d.getDate();
-  };
+  const [contentReady, setContentReady] = useState(false);
+  useEffect(() => {
+    if (!currentProject) { setContentReady(false); return; }
+    // 延迟 2 帧，让侧边窗滑入动画先启动，减少首帧压力
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setContentReady(true));
+    });
+    return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); };
+  }, [currentProject?.id]);
 
-  if (!currentProject) return null;
+  // 所有 hooks 必须在 early return 之前调用，否则 contentReady 变化时会违反 hooks 规则
+  const projectVersions = useMemo(
+    () => currentProject ? versions.filter(v => v.projectId === currentProject.id) : [],
+    [currentProject?.id, versions]
+  );
+  const projectDocsList = useMemo(
+    () => currentProject ? projectDocs.filter(d => d.projectId === currentProject.id) : [],
+    [currentProject?.id, projectDocs]
+  );
 
-  const projectVersions = versions.filter(v => v.projectId === currentProject.id);
-  const projectDocsList = projectDocs.filter(d => d.projectId === currentProject.id);
+  // 自动项目描述延后到打开动画结束后，避免干扰首帧
+  useEffect(() => {
+    if (!currentProject) return;
+    const timer = window.setTimeout(() => {
+      void maybeGenerateAutoProjectDescription(currentProject, projectDocs, allStages, updateProject);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [currentProject?.id, currentProject?.autoDescriptionNextUpdateAt, currentProject?.autoDescriptionPendingSince, projectDocs, allStages, updateProject]);
 
-  // 报告Tab：已分析的文档按阶段分组
-  const analyzedDocsByStage = (() => {
+  // 报告Tab：已分析的文档按阶段分组（非首屏，延后到 contentReady）
+  const analyzedDocsByStage = useMemo(() => {
+    if (!currentProject || !contentReady) return [];
     const analyzed = projectDocsList.filter(doc => doc.analyzedAt && doc.sections?.length > 0);
     const stageMap = new Map<string, ProjectDocument[]>();
     for (const doc of analyzed) {
@@ -145,19 +477,45 @@ const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: Project
       docs: docs.sort((a, b) => new Date(b.analyzedAt!).getTime() - new Date(a.analyzedAt!).getTime()),
       hasUnread: docs.some(doc => !readReportIds.has(doc.id)),
     }));
-  })();
+  }, [currentProject?.id, contentReady, projectDocsList, allStages, readReportIds]);
+
+  const planSegments = useMemo(
+    () => currentProject ? buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages) : [],
+    [currentProject?.id, projectDocsList, templates, projectVersions, allStages]
+  );
+
+  // 圆环进度：CSS transition 驱动，React 只更新目标值，浏览器自行插值
+  // 复用 planSegments（useMemo 已算好），不重复构建 segments
+
+  // 下一步动作（非首屏，延后到 contentReady）
+  const nextActions = useMemo(() => {
+    if (!currentProject || !contentReady) return [];
+    return deriveProjectNextActions({
+      project: currentProject,
+      tasks,
+      projectDocs,
+      versions,
+      templates,
+      reviews,
+      stageMemories,
+      allStages,
+      limit: 5,
+    });
+  }, [currentProject?.id, contentReady, tasks, projectDocs, versions, templates, reviews, stageMemories, allStages]);
+
+  if (!currentProject) return <DetailPanelSkeleton />;
   const totalAnalyzed = projectDocsList.filter(doc => doc.analyzedAt).length;
   const totalUnread = totalAnalyzed - analyzedDocsByStage.reduce((sum, g) => sum + g.docs.filter(d => readReportIds.has(d.id)).length, 0);
 
   const selectedDoc = projectDocsList.find(d => d.id === selectedDocId) || null;
-  const planSegments = buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages);
 
-  // 当前项目阶段完成度：已完成阶段 / 当前项目已创建阶段
+  // 侧边窗阶段完成度统一按系统启用的全部阶段作为分母，避免圆环和右侧百分比口径不一致。
   const systemStageCount = allStages.length || 1;
   const detectedStageCount = planSegments.length;
   const completedStageCount = planSegments.filter(s => Boolean(s.completedAt)).length;
   const activeStageCount = Math.max(0, detectedStageCount - completedStageCount);
-  const avgProgress = Math.round((detectedStageCount / systemStageCount) * 100);
+  const completedStagePercent = Math.round((completedStageCount / systemStageCount) * 100);
+  const activeStagePercent = Math.round((activeStageCount / systemStageCount) * 100);
 
   const isReportRelatedTask = (task: TaskItem) =>
     task.source === 'report' || task.source === 'review' || Boolean(task.workflowId || task.workflowName);
@@ -172,6 +530,22 @@ const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: Project
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     })
     .slice(0, 5);
+  const projectReviews = [...reviews]
+    .filter(review => review.projectId === currentProject.id)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const latestReview = projectReviews[0];
+  const latestReviewIssues = Array.isArray(latestReview?.issues) ? latestReview.issues : [];
+  const reviewErrorCount = latestReviewIssues.filter(issue => issue.severity === 'error').length;
+  const reviewWarningCount = latestReviewIssues.filter(issue => issue.severity === 'warning').length;
+  const reviewTasks = tasks
+    .filter(task => task.projectId === currentProject.id && (task.source === 'review' || Boolean(task.relatedReviewId || task.relatedIssueId)))
+    .sort((a, b) => {
+      const statusScore = (item: TaskItem) => item.status === 'completed' ? 1 : 0;
+      if (statusScore(a) !== statusScore(b)) return statusScore(a) - statusScore(b);
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+  const pendingReviewTaskCount = reviewTasks.filter(task => task.status !== 'completed').length;
+  const reviewTaskPreview = reviewTasks.slice(0, 4);
   const handleToggleTaskComplete = async (task: TaskItem, checked: boolean) => {
     await updateTask(task.id, {
       status: checked ? 'completed' : 'pending',
@@ -220,7 +594,7 @@ const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: Project
       stageName: task.stageName,
       source: task.source,
       prompt: buildWorkflowPrompt(task),
-      target,
+      target: target as WorkflowWorkbenchTarget,
     });
     if (target === 'report') {
       setPendingReportDocId(task.relatedDocId || null);
@@ -289,6 +663,14 @@ const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: Project
     return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
+  const getReviewScoreColor = (score?: number) => {
+    if (typeof score !== 'number') return '#d9d9d9';
+    if (score >= 85) return '#52c41a';
+    if (score >= 70) return '#1890ff';
+    if (score >= 60) return '#faad14';
+    return '#ff4d4f';
+  };
+
   const getVersionForDoc = (doc: ProjectDocument) =>
     versions.find(v => v.id === doc.versionId);
 
@@ -305,6 +687,89 @@ const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: Project
 
   const sortDocsByLatestActivity = (docs: ProjectDocument[]) =>
     [...docs].sort((a, b) => getDocActivityMs(b) - getDocActivityMs(a));
+
+  const normalizeFileVersionKey = (value?: string) => String(value || '').trim().toLowerCase().replace(/\\/g, '/');
+  const getFileTypeLabel = (fileName = '', filePath = '') => {
+    const ext = (fileName || filePath).split('.').pop()?.toUpperCase();
+    return ext && ext.length <= 5 ? ext : 'DOC';
+  };
+
+  const fileVersionEntries = (() => {
+    const usedVersionIds = new Set<string>();
+    const byKey = new Map<string, {
+      id: string;
+      fileName: string;
+      filePath: string;
+      fileType: string;
+      source: 'doc' | 'version';
+      sourceLabel: string;
+      stage: string;
+      updatedAt: string;
+      createdAt: string;
+      progress?: number;
+    }>();
+
+    const upsert = (entry: {
+      id: string;
+      fileName: string;
+      filePath: string;
+      fileType: string;
+      source: 'doc' | 'version';
+      sourceLabel: string;
+      stage: string;
+      updatedAt: string;
+      createdAt: string;
+      progress?: number;
+    }) => {
+      const key = normalizeFileVersionKey(entry.filePath) || normalizeFileVersionKey(entry.fileName) || entry.id;
+      const existing = byKey.get(key);
+      const existingTime = existing ? new Date(existing.updatedAt || existing.createdAt).getTime() : 0;
+      const entryTime = new Date(entry.updatedAt || entry.createdAt).getTime();
+      if (!existing || (Number.isFinite(entryTime) ? entryTime : 0) >= (Number.isFinite(existingTime) ? existingTime : 0)) {
+        byKey.set(key, entry);
+      }
+    };
+
+    projectDocsList.forEach(doc => {
+      const version = getVersionForDoc(doc);
+      if (version?.id) usedVersionIds.add(version.id);
+      const fileName = version?.fileName || doc.name || '未命名文档';
+      const filePath = doc.sourceFilePath || version?.filePath || '';
+      upsert({
+        id: `doc:${doc.id}`,
+        fileName,
+        filePath,
+        fileType: version?.fileType?.toUpperCase() || getFileTypeLabel(fileName, filePath),
+        source: 'doc',
+        sourceLabel: version ? '关联版本' : '项目文件',
+        stage: detectTimelineStage(allStages, doc.name, doc.sourceFilePath || version?.filePath),
+        updatedAt: getDocActivityAt(doc),
+        createdAt: doc.sourceFileCreatedAt || version?.createdAt || doc.createdAt,
+        progress: doc.overallProgress,
+      });
+    });
+
+    projectVersions.forEach(version => {
+      if (usedVersionIds.has(version.id)) return;
+      upsert({
+        id: `version:${version.id}`,
+        fileName: version.fileName || '未命名版本',
+        filePath: version.filePath || '',
+        fileType: version.fileType?.toUpperCase() || getFileTypeLabel(version.fileName, version.filePath),
+        source: 'version',
+        sourceLabel: '版本库记录',
+        stage: detectTimelineStage(allStages, version.fileName, version.filePath),
+        updatedAt: version.createdAt,
+        createdAt: version.createdAt,
+      });
+    });
+
+    return Array.from(byKey.values()).sort((a, b) => {
+      const aTime = new Date(a.updatedAt || a.createdAt).getTime();
+      const bTime = new Date(b.updatedAt || b.createdAt).getTime();
+      return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+    });
+  })();
 
   const getProgressColor = (progress: number) =>
     progress >= 80 ? '#52c41a' : progress >= 40 ? '#1890ff' : progress > 0 ? '#faad14' : '#8c8c8c';
@@ -421,54 +886,53 @@ const DetailPanel: React.FC<{ initialTab?: string; onOpenDetail?: (page: Project
     ).join('\n');
     const isExampleTemplate = template.templateType === 'example';
     const templateNodes = flattenTemplateNodesForSidePanelPrompt((template as any).nodes || []).join('\n');
+    const normalizedStage = normalizeSidePanelKnowledgeStage(stage);
+    const stageMemoryContext = formatSidePanelKnowledgeItems(
+      stageMemories.filter(item =>
+        item.projectId === currentProject.id &&
+        normalizeSidePanelKnowledgeStage(item.stageName) === normalizedStage
+      ),
+      'memory',
+    );
+    const referenceContext = formatSidePanelKnowledgeItems(
+      referenceMaterials.filter(item => item.projectId === currentProject.id),
+      'reference',
+    );
     const fallbackTitle = `${stage}阶段写作报告：${getDocDisplayName(doc)}`;
-    const prompt = `你是项目阶段文档的写作框架助手。请基于当前文档、关联模板、模板章节要求和范文写法，生成“报告详情页”可展示的 AI 写作框架报告。
+    const prompt = composePrompt('report', {
+      projectName: currentProject.name,
+      stage,
+      docName: doc.name,
+      fileName: version?.fileName || getDocDisplayName(doc),
+      createdAt: dayjs(getDocActivityAt(doc)).format('YYYY-MM-DD HH:mm'),
+      progress: String(overallProgress),
+      templateName: template.name,
+      templateCategory: template.category || '无',
+      templateDescription: template.description || '无',
+      templateNodesLabel: isExampleTemplate ? '范文参考方向与结构路径（标题非固定）：' : '模板章节和写作要求：',
+      templateNodes: templateNodes || '无',
+      stageMemory: stageMemoryContext || 'None',
+      reference: referenceContext || 'None',
+      sectionStatus: sectionStatus || '暂无章节分析',
+      content: content.slice(0, 9000),
+    });
 
-注意：
-1. 这不是审查结论，不要打分，不要泛泛说风险。
-2. 如果模板里有范文，只提取范文的结构、写法、段落组织和表达特征，不要把范文事实当作当前项目要求；范文模板的标题只代表写作方向，不作为固定标题。
-3. 模板格式要求是硬性规则；即使是范文模板，也必须把标题/正文/图表格式作为严格约束。
-4. 输出必须是 JSON 对象，不要 Markdown，不要代码块。
-4. 任务建议要贴合“AI先写初稿/人工补资料/AI再优化/人工确认/再审查”的工作流。
-5. 七章节结构属于全局模板约束，不要在每个章节建议里反复输出；只有章节缺失、顺序错误或结构错乱时，才在对应章节提一次。
-
-JSON 字段：
-{
-  "reportTitle": "标题",
-  "reportSummary": "300字以内概述当前文档写作状态和下一步方向",
-  "templateFit": ["模板要求转化成的写作约束"],
-  "writingStyleNotes": ["从范文或模板中提取的写法特征"],
-  "writingFramework": ["建议采用的章节框架或段落组织"],
-  "writingDirection": ["下一版写作方向，尽量对应章节"],
-  "materialPlan": ["需要人工补充或确认的资料、数据、附件、口径"],
-  "draftPlan": ["AI可以执行的初稿、扩写、润色、整理任务"],
-  "humanTasks": ["人工下一步任务"],
-  "aiTasks": ["AI下一步任务"],
-  "sectionAdvice": [{"title":"模板一级标题","problems":["该章节当前存在的问题"],"suggestions":["该章节下一步怎么写、补什么、AI如何改"]}],
-  "workflowPlan": [{"type":"ai|manual","title":"任务标题","description":"执行说明","priority":"high|medium|low","reason":"排序理由"}]
-}
-
-项目：${currentProject.name}
-阶段：${stage}
-文档：${doc.name}
-文件名：${version?.fileName || getDocDisplayName(doc)}
-创建时间：${dayjs(getDocActivityAt(doc)).format('YYYY-MM-DD HH:mm')}
-完成度：${overallProgress}%
-
-模板：${template.name}
-模板分类：${template.category || '无'}
-模板说明：${template.description || '无'}
-
-${isExampleTemplate ? '范文参考方向与结构路径（标题非固定）：' : '模板章节和写作要求：'}
-${templateNodes || '无'}
-
-当前章节分析：
-${sectionStatus || '暂无章节分析'}
-
-当前文档正文摘录：
-${content.slice(0, 9000)}`;
-
-    const response = await window.electronAPI.callAI({ prompt });
+    const response = await useAIJobStore.getState().runAIJob<string>(
+      {
+        scene: 'report',
+        title: `生成阶段报告：${getDocDisplayName(doc)}`,
+        projectId: currentProject.id,
+        docId: doc.id,
+        resultPreview: (value) => value,
+      },
+      async ({ setProgress, throwIfCancelled }) => {
+        setProgress(35);
+        const value = await window.electronAPI.callAI({ prompt });
+        throwIfCancelled();
+        setProgress(85);
+        return String(value || '');
+      },
+    );
     const aiReport = parseSidePanelAiReport(response, fallbackTitle);
     await updateProjectDoc(doc.id, {
       aiReport: JSON.stringify(aiReport),
@@ -498,7 +962,7 @@ ${content.slice(0, 9000)}`;
   // 关联文件：创建 ProjectDocument
   const handleAddDoc = async () => {
     if (!selectedTemplateId || !selectedVersionId) {
-      message.warning('请选择模板和文件版本');
+      message.warning('请选择模板和可对比文件');
       return;
     }
     const template = templates.find(t => t.id === selectedTemplateId);
@@ -528,7 +992,7 @@ ${content.slice(0, 9000)}`;
     setAddModalOpen(false);
     setSelectedTemplateId('');
     setSelectedVersionId('');
-    message.success('已关联文件，正在分析...');
+    message.success('已关联项目文档，正在分析...');
 
     // 自动执行基础分析
     await runAnalysis(newDoc.id, version.content, template, false);
@@ -574,7 +1038,7 @@ ${content.slice(0, 9000)}`;
     }
 
     if (!content) {
-      message.warning('该文档暂无文本内容，请先导入文件版本');
+      message.warning('该项目文档暂无文本内容，请先导入或同步可对比文件');
       return;
     }
     if (!template) {
@@ -658,27 +1122,85 @@ ${content.slice(0, 9000)}`;
   const handleImportAllDocs = async () => {
     const allDocIds = projectDocsList.map(d => d.id);
     if (allDocIds.length === 0) {
-      message.warning('项目暂无关联文档');
+      message.warning('项目暂无项目文档');
       return;
     }
     await handleBatchImportDocs(allDocIds);
   };
 
+  const getProjectDocumentStage = (doc: ProjectDocument) =>
+    planSegments.find(segment => segment.sourceDocIds.includes(doc.id))?.stage
+    || detectTimelineStage(allStages, doc.name, doc.sourceFilePath);
+
+  const learnCompletedProjectDocument = async (doc: ProjectDocument, stageName = getProjectDocumentStage(doc), showToast = true) => {
+    const version = doc.versionId ? versions.find(item => item.id === doc.versionId) : undefined;
+    try {
+      const entry = await learnStageFinal({
+        projectId: currentProject.id,
+        projectName: currentProject.name,
+        stageName,
+        docId: doc.id,
+        docName: doc.name,
+        sourceFilePath: doc.sourceFilePath || version?.filePath,
+        content: version?.content,
+      });
+      if (entry) {
+        await updateProjectDoc(doc.id, { learnedAt: entry.updatedAt || new Date().toISOString(), ...buildLifecyclePatch('learned') });
+        if (showToast) message.success('\u6587\u6863\u5df2\u5b66\u4e60\u5230\u9636\u6bb5\u8bb0\u5fc6\u5e93');
+      }
+    } catch (error: any) {
+      if (showToast) message.warning('\u6587\u6863\u5df2\u6807\u8bb0\u5b8c\u6210\uff0c\u4f46\u9636\u6bb5\u8bb0\u5fc6\u5b66\u4e60\u5931\u8d25: ' + (error.message || error));
+    }
+  };
+
+  const rollbackProjectDocumentMemory = async (docId: string) => {
+    await deleteStageMemoriesForDoc(docId);
+  };
   const handleStageDeadline = async (segment: TimelineStageSegment, deadline?: string) => {
-    const normalized = deadline ? (() => { const d = new Date(deadline); d.setHours(0, 0, 0, 0); return d.toISOString(); })() : undefined;
-    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline: normalized })));
+    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline })));
     message.success(deadline ? '已更新计划截止时间' : '已清除计划截止时间');
+  };
+
+  const handleDocComplete = async (doc: ProjectDocument) => {
+    const completedAt = new Date().toISOString();
+    await updateProjectDoc(doc.id, { completedAt, ...buildLifecyclePatch('completed', completedAt) });
+    await learnCompletedProjectDocument({ ...doc, completedAt });
+    message.success('\u5df2\u6807\u8bb0\u6587\u6863\u5b8c\u6210');
+  };
+
+  const handleDocReopen = async (doc: ProjectDocument) => {
+    await updateProjectDoc(doc.id, {
+      completedAt: undefined,
+      learnedAt: undefined,
+      reopenedAt: new Date().toISOString(),
+      ...buildLifecyclePatch(reopenLifecycleStatus({ ...doc, completedAt: undefined, learnedAt: undefined })),
+    });
+    await rollbackProjectDocumentMemory(doc.id);
+    message.success('\u5df2\u53d6\u6d88\u6587\u6863\u5b8c\u6210\uff0c\u5e76\u56de\u6863\u9636\u6bb5\u8bb0\u5fc6');
   };
 
   const handleStageComplete = async (segment: TimelineStageSegment) => {
     const completedAt = new Date().toISOString();
-    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt })));
-    message.success('已标记阶段完成');
+    const docs = segment.sourceDocIds
+      .map(id => projectDocsList.find(doc => doc.id === id))
+      .filter((doc): doc is ProjectDocument => Boolean(doc));
+    await Promise.all(docs.map(doc => updateProjectDoc(doc.id, { completedAt, ...buildLifecyclePatch('completed', completedAt) })));
+    await Promise.all(docs.map(doc => learnCompletedProjectDocument({ ...doc, completedAt }, segment.stage, false)));
+    message.success('\u5df2\u6807\u8bb0\u9636\u6bb5\u5b8c\u6210\uff0c\u5e76\u66f4\u65b0\u9636\u6bb5\u8bb0\u5fc6');
   };
 
   const handleStageReopen = async (segment: TimelineStageSegment) => {
-    await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt: undefined })));
-    message.success('已取消完成状态');
+    await Promise.all(segment.sourceDocIds.map(id => {
+      const doc = projectDocsList.find(item => item.id === id);
+      return updateProjectDoc(id, {
+        completedAt: undefined,
+        learnedAt: undefined,
+        reopenedAt: new Date().toISOString(),
+        ...buildLifecyclePatch(doc ? reopenLifecycleStatus({ ...doc, completedAt: undefined, learnedAt: undefined }) : 'identified'),
+      });
+    }));
+    await Promise.all(segment.sourceDocIds.map(id => rollbackProjectDocumentMemory(id)));
+    message.success('\u5df2\u53d6\u6d88\u5b8c\u6210\u72b6\u6001\uff0c\u5e76\u56de\u6863\u9636\u6bb5\u8bb0\u5fc6');
   };
 
 
@@ -694,9 +1216,7 @@ ${content.slice(0, 9000)}`;
     boxShadow: '0 8px 18px rgba(15, 23, 42, 0.035)',
   };
 
-  const recentVersions = [...projectVersions]
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(0, 5);
+  const recentFileVersions = fileVersionEntries.slice(0, 5);
 
   // 状态图标
   const statusIcon = (status: string) => {
@@ -711,9 +1231,14 @@ ${content.slice(0, 9000)}`;
       label: '概览',
       children: (
         <div>
-          <Title level={5} style={{ fontSize: 14, marginBottom: 8 }}>{'\u9879\u76ee\u63cf\u8ff0'}</Title>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <Title level={5} style={{ fontSize: 14, margin: 0 }}>{'\u9879\u76ee\u63cf\u8ff0'}</Title>
+            {currentProject.descriptionSource === 'auto' && currentProject.description && (
+              <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>AI简述</Tag>
+            )}
+          </div>
           <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 20 }}>
-            {currentProject.description || '\u6682\u65e0\u63cf\u8ff0'}
+            {currentProject.description || (currentProject.autoDescriptionPendingSince && !isManualProjectDescription(currentProject) ? '已记录新增文件，将在更新周期到期后自动生成简述' : '\u6682\u65e0\u63cf\u8ff0')}
           </Paragraph>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
@@ -727,7 +1252,7 @@ ${content.slice(0, 9000)}`;
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <Text type="secondary" style={{ fontSize: 12 }}>{'\u6587\u4ef6\u7248\u672c'}</Text>
-              <Text style={{ fontSize: 12 }}>{projectVersions.length} {'\u4e2a'}</Text>
+              <Text style={{ fontSize: 12 }}>{fileVersionEntries.length} {'\u4e2a'}</Text>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <Text type="secondary" style={{ fontSize: 12 }}>{'\u5173\u8054\u6587\u6863'}</Text>
@@ -743,20 +1268,15 @@ ${content.slice(0, 9000)}`;
 
           <Title level={5} style={{ fontSize: 14, marginBottom: 12 }}>{'\u9636\u6bb5\u5b8c\u6210\u5ea6'}</Title>
           <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
-            <Progress
-              type="circle"
-              percent={avgProgress}
-              size={80}
-              strokeColor={avgProgress >= 80 ? '#52c41a' : avgProgress >= 40 ? '#1890ff' : '#faad14'}
-            />
+            <StageProgressPieRing percent={completedStagePercent} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#52c41a', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>{'\u5df2\u5b8c\u6210'}</Text></Space>
-                <Text style={{ fontSize: 12 }}>{Math.round(completedStageCount / systemStageCount * 100)}%</Text>
+                <Text style={{ fontSize: 12 }}>{completedStagePercent}%</Text>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#1890ff', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>{'\u8fdb\u884c\u4e2d'}</Text></Space>
-                <Text style={{ fontSize: 12 }}>{Math.round(activeStageCount / systemStageCount * 100)}%</Text>
+                <Text style={{ fontSize: 12 }}>{activeStagePercent}%</Text>
               </div>
             </div>
           </div>
@@ -830,21 +1350,28 @@ ${content.slice(0, 9000)}`;
       label: '文件',
       children: (
         <div style={{ height: '100%' }}>
-          {/* 文件版本概览 */}
+          {/* 可对比文件概览 */}
           <div style={{ ...summaryCardStyle, marginBottom: 12 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-              <div><Text type="secondary" style={{ fontSize: 11 }}>文件版本</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{projectVersions.length}</div></div>
-              <div><Text type="secondary" style={{ fontSize: 11 }}>关联文档</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{projectDocsList.length}</div></div>
-              <div><Text type="secondary" style={{ fontSize: 11 }}>可用模板</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{templates.length}</div></div>
+              <div><Text type="secondary" style={{ fontSize: 11 }}>可对比文件</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{fileVersionEntries.length}</div></div>
+              <div><Text type="secondary" style={{ fontSize: 11 }}>项目文档</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{projectDocsList.length}</div></div>
+              <div><Text type="secondary" style={{ fontSize: 11 }}>版本库记录</Text><div style={{ fontSize: 20, fontWeight: 700 }}>{projectVersions.length}</div></div>
             </div>
-            {recentVersions.length > 0 && (
+            {recentFileVersions.length > 0 && (
               <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #f0f0f0' }}>
-                <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 6 }}>最近导入</Text>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  {recentVersions.slice(0, 3).map(version => (
-                    <div key={version.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                      <Text style={{ fontSize: 11, minWidth: 0, flex: 1 }} ellipsis={{ tooltip: version.fileName }}>{version.fileName}</Text>
-                      <Tag style={{ margin: 0, fontSize: 9 }}>{version.fileType.toUpperCase()}</Tag>
+                <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 6 }}>最近更新的可对比文件</Text>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {recentFileVersions.slice(0, 4).map(version => (
+                    <div key={version.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'center' }}>
+                      <div style={{ minWidth: 0 }}>
+                        <Text style={{ fontSize: 11, minWidth: 0, display: 'block' }} ellipsis={{ tooltip: version.filePath || version.fileName }}>{version.fileName}</Text>
+                        <Text type="secondary" style={{ fontSize: 10 }}>{version.stage} · {formatDateTime(version.updatedAt)}</Text>
+                      </div>
+                      <Space size={4} style={{ flexShrink: 0 }}>
+                        <Tag color={version.source === 'doc' ? 'blue' : 'purple'} style={{ margin: 0, fontSize: 9 }}>{version.sourceLabel}</Tag>
+                        <Tag style={{ margin: 0, fontSize: 9 }}>{version.fileType}</Tag>
+                        {typeof version.progress === 'number' && <Tag color={version.progress >= 80 ? 'green' : version.progress > 0 ? 'orange' : 'default'} style={{ margin: 0, fontSize: 9 }}>{version.progress}%</Tag>}
+                      </Space>
                     </div>
                   ))}
                 </div>
@@ -853,7 +1380,7 @@ ${content.slice(0, 9000)}`;
           </div>
 
           <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-            <Text strong style={{ fontSize: 13 }}>关联文档 ({projectDocsList.length})</Text>
+            <Text strong style={{ fontSize: 13 }}>项目文档 ({projectDocsList.length})</Text>
             <Space size={6}>
               <Button size="small" onClick={() => openDetail('files')}>详情</Button>
               <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setAddModalOpen(true)}>
@@ -944,11 +1471,18 @@ ${content.slice(0, 9000)}`;
                               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
                                 <Text style={{ display: 'block', flex: 1, minWidth: 0, fontSize: 11, lineHeight: '20px' }} ellipsis={{ tooltip: getDocDisplayName(doc) }}>
                                   {getDocDisplayName(doc)}
-                                </Text>
-                                <Space size={2} style={{ flexShrink: 0 }}>
-                                  <Button type="text" size="small" icon={<ReloadOutlined />} loading={analyzingDocId === doc.id} onClick={() => handleAnalyze(doc, false)} style={{ padding: '0 3px' }} />
-                                  <Button type="text" size="small" icon={<ExperimentOutlined />} loading={analyzingDocId === doc.id} onClick={() => handleAnalyze(doc, true)} style={{ padding: '0 3px' }} />
-                                  <Popconfirm title="确定删除？" onConfirm={() => deleteProjectDoc(doc.id)}>
+                                </Text>                                <Space size={2} style={{ flexShrink: 0 }}>
+                                  <Button type="text" size="small" title={'\u91cd\u65b0\u5206\u6790'} icon={<ReloadOutlined />} loading={analyzingDocId === doc.id} onClick={() => handleAnalyze(doc, false)} style={{ padding: '0 3px' }} />
+                                  <Button type="text" size="small" title={'AI\u5206\u6790'} icon={<ExperimentOutlined />} loading={analyzingDocId === doc.id} onClick={() => handleAnalyze(doc, true)} style={{ padding: '0 3px' }} />
+                                  <Tag color={getProjectDocumentLifecycleColor(doc)} style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }}>{getProjectDocumentLifecycleLabel(doc)}</Tag>
+                                  {doc.completedAt ? (
+                                    <Popconfirm title={'\u786e\u5b9a\u53d6\u6d88\u5b8c\u6210\u5e76\u56de\u6863\u9636\u6bb5\u8bb0\u5fc6\uff1f'} onConfirm={() => handleDocReopen(doc)} okText={'\u786e\u5b9a'} cancelText={'\u53d6\u6d88'}>
+                                      <Button type="text" size="small" title={'\u53d6\u6d88\u5b8c\u6210'} icon={<CloseOutlined />} style={{ padding: '0 3px', color: '#fa8c16' }} />
+                                    </Popconfirm>
+                                  ) : (
+                                    <Button type="text" size="small" title={'\u6807\u8bb0\u5b8c\u6210\u5e76\u5b66\u4e60'} icon={<CheckCircleOutlined />} onClick={() => handleDocComplete(doc)} style={{ padding: '0 3px', color: '#52c41a' }} />
+                                  )}
+                                  <Popconfirm title={'\u786e\u5b9a\u5220\u9664\u8fd9\u6761\u6587\u6863\u8bb0\u5f55\uff1f'} onConfirm={() => deleteProjectDoc(doc.id)}>
                                     <Button type="text" size="small" danger icon={<DeleteOutlined />} style={{ padding: '0 3px' }} />
                                   </Popconfirm>
                                 </Space>
@@ -972,12 +1506,12 @@ ${content.slice(0, 9000)}`;
               })}
             </div>
           ) : (
-            <Empty description="暂未关联文档" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            <Empty description="暂无项目文档" image={Empty.PRESENTED_IMAGE_SIMPLE} />
           )}
 
-          {/* 关联文件弹窗 */}
+          {/* 关联项目文档弹窗 */}
           <Modal
-            title="关联文件"
+            title="关联项目文档"
             open={addModalOpen}
             onOk={handleAddDoc}
             onCancel={() => setAddModalOpen(false)}
@@ -996,9 +1530,9 @@ ${content.slice(0, 9000)}`;
               />
             </div>
             <div>
-              <Text strong style={{ display: 'block', marginBottom: 8 }}>选择文件版本</Text>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>选择可对比文件</Text>
               <Select
-                placeholder="选择已导入的文件"
+                placeholder="选择已导入或同步的文件"
                 style={{ width: '100%' }}
                 value={selectedVersionId || undefined}
                 onChange={setSelectedVersionId}
@@ -1032,18 +1566,17 @@ ${content.slice(0, 9000)}`;
               {planSegments.map(segment => {
                 const color = stageMeta[segment.stage].color;
                 const isCompleted = Boolean(segment.completedAt);
-                const segOverdue = isOverdue(segment.deadline, segment.completedAt);
-                const segAboutToExpire = isAboutToExpire(segment.deadline, segment.completedAt);
-                const statusColor = segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : color;
+                const segDlStatus = getDlStatus(segment.deadline, segment.completedAt);
+                const statusColor = segDlStatus === 'overdue' ? '#ff4d4f' : segDlStatus === 'aboutToExpire' ? '#faad14' : color;
 
                 return (
                   <div
                     key={`${segment.stage}-${segment.sourceDocIds.join('-')}`}
                     style={{
                       padding: '10px 12px',
-                      border: `1px solid ${segOverdue ? '#ffccc7' : segAboutToExpire ? '#ffe58f' : '#f0f0f0'}`,
+                      border: `1px solid ${segDlStatus === 'overdue' ? '#ffccc7' : segDlStatus === 'aboutToExpire' ? '#ffe58f' : '#f0f0f0'}`,
                       borderRadius: 8,
-                      background: segOverdue ? '#fff7f6' : segAboutToExpire ? '#fffbe6' : '#fff',
+                      background: segDlStatus === 'overdue' ? '#fff7f6' : segDlStatus === 'aboutToExpire' ? '#fffbe6' : '#fff',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
@@ -1052,9 +1585,9 @@ ${content.slice(0, 9000)}`;
                         <Text strong style={{ fontSize: 13 }}>{segment.label}</Text>
                         {isCompleted ? (
                           <Tag color="green" style={{ margin: 0, fontSize: 11 }}>已完成</Tag>
-                        ) : segOverdue ? (
+                        ) : segDlStatus === 'overdue' ? (
                           <Tag color="red" style={{ margin: 0, fontSize: 11 }}>逾期</Tag>
-                        ) : segAboutToExpire ? (
+                        ) : segDlStatus === 'aboutToExpire' ? (
                           <Tag color="orange" style={{ margin: 0, fontSize: 11 }}>即将逾期</Tag>
                         ) : (
                           <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>进行中</Tag>
@@ -1412,16 +1945,125 @@ ${content.slice(0, 9000)}`;
     },
     {
       key: 'review',
-      label: '审查',
+      label: '\u5ba1\u67e5',
       children: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Text strong style={{ fontSize: 13 }}>审查</Text>
-            <Button size="small" type="primary" onClick={() => openDetail('review')}>详情</Button>
+            <Text strong style={{ fontSize: 13 }}>{'\u5ba1\u67e5'}</Text>
+            <Button size="small" type="primary" onClick={() => openDetail('review')}>{'\u8be6\u60c5'}</Button>
           </div>
-          <div style={summaryCardStyle}>
-            <Text type="secondary" style={{ fontSize: 12 }}>进入审查工作台后查看最新审查结果、AI建议和生成任务。</Text>
-          </div>
+
+          {!latestReview ? (
+            <div style={summaryCardStyle}>
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={'\u6682\u65e0\u5ba1\u67e5\u8bb0\u5f55'} />
+              <Text type="secondary" style={{ display: 'block', fontSize: 12, textAlign: 'center', marginTop: -4 }}>
+                {'\u8fdb\u5165\u5ba1\u67e5\u5de5\u4f5c\u53f0\u540e\uff0c\u53ef\u6309\u9636\u6bb5\u9009\u62e9\u6a21\u677f\u548c\u6587\u4ef6\u751f\u6210\u5ba1\u67e5\u7ed3\u679c\u3002'}
+              </Text>
+            </div>
+          ) : (
+            <>
+              <div style={summaryCardStyle}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <Progress
+                    type="circle"
+                    percent={latestReview.score}
+                    size={58}
+                    strokeColor={getReviewScoreColor(latestReview.score)}
+                    format={(percent) => `${percent || 0}`}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                      <Text strong style={{ fontSize: 13 }}>{'\u6700\u65b0\u5ba1\u67e5\u7ed3\u679c'}</Text>
+                      <Tag color={latestReview.score >= 80 ? 'green' : latestReview.score >= 60 ? 'orange' : 'red'} style={{ margin: 0, fontSize: 10 }}>
+                        {latestReview.score} {'\u5206'}
+                      </Tag>
+                    </div>
+                    <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                      {formatDateTime(latestReview.createdAt)} {'\u00b7'} {'\u95ee\u9898'} {latestReviewIssues.length} {'\u4e2a'}
+                    </Text>
+                    <Space size={4} wrap style={{ marginTop: 6 }}>
+                      <Tag color="red" style={{ margin: 0, fontSize: 10 }}>{'\u4e25\u91cd'} {reviewErrorCount}</Tag>
+                      <Tag color="orange" style={{ margin: 0, fontSize: 10 }}>{'\u63d0\u9192'} {reviewWarningCount}</Tag>
+                      <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>{'\u8bb0\u5f55'} {projectReviews.length}</Tag>
+                    </Space>
+                  </div>
+                </div>
+                {latestReview.summary && (
+                  <Paragraph type="secondary" ellipsis={{ rows: 2, tooltip: latestReview.summary }} style={{ fontSize: 12, margin: '10px 0 0' }}>
+                    {latestReview.summary}
+                  </Paragraph>
+                )}
+              </div>
+
+              <div style={summaryCardStyle}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <Text strong style={{ fontSize: 13 }}>{'\u5ba1\u67e5\u5f85\u529e'}</Text>
+                  <Tag color={pendingReviewTaskCount > 0 ? 'red' : 'green'} style={{ margin: 0, fontSize: 10 }}>
+                    {pendingReviewTaskCount}/{reviewTasks.length}
+                  </Tag>
+                </div>
+                {reviewTaskPreview.length === 0 ? (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={'\u6682\u65e0\u5ba1\u67e5\u5f85\u529e'} />
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {reviewTaskPreview.map(task => {
+                      const checked = task.status === 'completed';
+                      const color = task.priority === 'high' ? '#ff4d4f' : task.priority === 'medium' ? '#faad14' : '#52c41a';
+                      return (
+                        <div
+                          key={task.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => openWorkflowTask(task)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              openWorkflowTask(task);
+                            }
+                          }}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            gap: 8,
+                            padding: '7px 8px',
+                            borderRadius: 6,
+                            border: '1px solid #eef2f7',
+                            background: checked ? '#f6ffed' : '#fafafa',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          <Checkbox
+                            checked={checked}
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={event => { void handleToggleTaskComplete(task, event.target.checked); }}
+                            style={{ marginTop: 2 }}
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ width: 6, height: 6, borderRadius: 2, background: color, flexShrink: 0 }} />
+                              <Text strong={!checked} delete={checked} style={{ fontSize: 12, minWidth: 0 }} ellipsis={{ tooltip: task.title }}>{task.title}</Text>
+                            </div>
+                            {(task.sectionTitle || task.description) && (
+                              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }} ellipsis={{ tooltip: task.description || task.sectionTitle }}>
+                                {task.sectionTitle || task.description}
+                              </Text>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {reviewTasks.length > reviewTaskPreview.length && (
+                      <Button size="small" type="link" onClick={() => openDetail('review')} style={{ padding: 0, height: 20 }}>
+                        {'\u67e5\u770b\u5168\u90e8'} {reviewTasks.length} {'\u4e2a\u5ba1\u67e5\u5f85\u529e'}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          <Button size="small" block onClick={() => openDetail('review')}>{'\u8fdb\u5165\u5ba1\u67e5\u5de5\u4f5c\u53f0'}</Button>
         </div>
       ),
     },
@@ -1442,14 +2084,14 @@ ${content.slice(0, 9000)}`;
             <Title level={5} title={currentProject.name} ellipsis style={{ margin: 0, fontSize: 15, maxWidth: 260 }}>{currentProject.name}</Title>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <Tag color={statusInfo.color} style={{ margin: 0, fontSize: 11 }}>{statusInfo.label}</Tag>
-              <Text type="secondary" style={{ fontSize: 12 }}>{avgProgress}% 阶段完成度</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{completedStagePercent}% 阶段完成度</Text>
             </div>
           </div>
         </div>
         <Button
           type="text"
           icon={<CloseOutlined />}
-          onClick={() => setCurrentProject(null)}
+          onClick={onClose}
           size="small"
           style={{ transition: 'transform 0.15s ease, background 0.15s ease' }}
           onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = 'rotate(90deg)'; }}
@@ -1457,7 +2099,18 @@ ${content.slice(0, 9000)}`;
         />
       </div>
 
-      <Tabs className="detail-panel-tabs detail-panel-tabs-polished" activeKey={activeTab} onChange={setActiveTab} items={tabItems} size="small" style={{ flex: 1, overflow: 'hidden' }} animated={false} />
+      {contentReady ? (
+        <Tabs className="detail-panel-tabs detail-panel-tabs-polished" activeKey={activeTab} onChange={setActiveTab} items={tabItems} size="small" style={{ flex: 1, overflow: 'hidden' }} animated={false} />
+      ) : (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 4 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['概览', '文件', '计划'].map(t => (
+              <div key={t} className="skeleton-loading" style={{ width: 48, height: 28, borderRadius: 6 }} />
+            ))}
+          </div>
+          <div className="skeleton-loading" style={{ flex: 1, borderRadius: 8 }} />
+        </div>
+      )}
     </div>
   );
 };

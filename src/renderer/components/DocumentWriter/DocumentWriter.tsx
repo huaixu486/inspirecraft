@@ -1,4 +1,4 @@
-﻿import React, { useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import {
   Button, Card, Select, Typography, Space, Tag, Collapse, Input,
   Progress, message, Divider, Tooltip, Empty, Spin,
@@ -10,14 +10,58 @@ import {
 import { useProjectStore } from '../../stores/projectStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
-import { WritingTemplate, TemplateNode, ProjectDocument } from '../../../shared/types';
+import { useKnowledgeStore } from '../../stores/knowledgeStore';
+import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
+import { ReferenceMaterial, StageMemoryEntry, WritingTemplate, TemplateNode, ProjectDocument } from '../../../shared/types';
+import { composePrompt } from '../../utils/promptComposer';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
+const knowledgeText = {
+  referenceMaterials: '\u53c2\u8003\u8d44\u6599',
+  importReference: '\u5bfc\u5165\u53c2\u8003\u8d44\u6599',
+  lowWeightHint: '\u4ec5\u4f5c\u4f4e\u6743\u91cd\u53c2\u8003\uff0c\u4e0d\u8986\u76d6\u6a21\u677f\u683c\u5f0f\u3001\u6a21\u677f\u8981\u6c42\u548c\u5f53\u524d\u9879\u76ee\u4e8b\u5b9e',
+  learnFinal: '\u5b66\u4e60\u8be5\u9636\u6bb5\u7ec8\u7a3f',
+  learning: '\u5b66\u4e60\u4e2d',
+  memory: '\u9636\u6bb5\u8bb0\u5fc6',
+  selectDocFirst: '\u8bf7\u5148\u9009\u62e9\u8981\u5b66\u4e60\u7684\u6587\u7a3f',
+  selectTemplateFirst: '\u8bf7\u5148\u9009\u62e9\u6a21\u677f\u6216\u9636\u6bb5',
+  learned: '\u5df2\u5b66\u4e60\u4e3a\u9636\u6bb5\u8bb0\u5fc6\uff0c\u540e\u7eed AI \u4f1a\u4f4e\u6743\u91cd\u53c2\u8003',
+  learnFailed: '\u9636\u6bb5\u5b66\u4e60\u5931\u8d25',
+  imported: '\u5df2\u52a0\u5165\u53c2\u8003\u8d44\u6599',
+  importFailed: '\u53c2\u8003\u8d44\u6599\u5bfc\u5165\u5931\u8d25',
+  noProjectReferences: '\u6682\u65e0\u9879\u76ee\u53c2\u8003\u8d44\u6599',
+};
+
+const normalizeStageNameForKnowledge = (value?: string) => String(value || '').trim().replace(/\s+/g, ' ') || 'unknown';
+
+const formatKnowledgeItems = (items: Array<StageMemoryEntry | ReferenceMaterial>, type: 'memory' | 'reference') =>
+  items
+    .slice(0, 4)
+    .map((item, index) => {
+      const body = type === 'memory'
+        ? (item as StageMemoryEntry).summary
+        : ((item as ReferenceMaterial).summary || (item as ReferenceMaterial).contentPreview || '');
+      const name = type === 'memory' ? (item as StageMemoryEntry).docName : (item as ReferenceMaterial).name;
+      return String(index + 1) + '. ' + (name || 'item') + '\n' + String(body || '').slice(0, type === 'memory' ? 1200 : 1600);
+    })
+    .filter(Boolean)
+    .join('\n\n');
+
+
 interface Props {
   onBack?: () => void;
+  focus?: import('../../../shared/types').WorkbenchFocus;
 }
+
+type RewriteVariant = {
+  id: string;
+  modelName: string;
+  ok: boolean;
+  output: string;
+  error?: string;
+};
 
 // 扁平化模板节点
 
@@ -52,16 +96,25 @@ const FormatBadge: React.FC<{ label: string; value?: string }> = ({ label, value
   );
 };
 
-const DocumentWriter: React.FC<Props> = ({ onBack }) => {
+const DocumentWriter: React.FC<Props> = ({ onBack, focus }) => {
   const { currentProject, versions } = useProjectStore();
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc } = useProjectDocStore();
+  const { stageMemories, referenceMaterials, loadKnowledge, learnStageFinal, importReferenceFiles } = useKnowledgeStore();
 
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [selectedDocId, setSelectedDocId] = useState<string>('');
   const [sectionContents, setSectionContents] = useState<Record<string, string>>({});
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
+  const [rewritingNodeId, setRewritingNodeId] = useState<string | null>(null);
+  const [rewriteVariants, setRewriteVariants] = useState<Record<string, RewriteVariant[]>>({});
+  const [selectedReferenceIds, setSelectedReferenceIds] = useState<string[]>([]);
+  const [learningStage, setLearningStage] = useState(false);
+
+  useEffect(() => {
+    if (currentProject) void loadKnowledge();
+  }, [currentProject?.id, loadKnowledge]);
 
   const selectedTemplate = useMemo(
     () => templates.find(t => t.id === selectedTemplateId),
@@ -69,6 +122,27 @@ const DocumentWriter: React.FC<Props> = ({ onBack }) => {
   );
 
   const isExampleTemplate = selectedTemplate?.templateType === 'example';
+  const currentStageName = useMemo(
+    () => normalizeStageNameForKnowledge(selectedTemplate?.category || selectedTemplate?.name),
+    [selectedTemplate?.category, selectedTemplate?.name],
+  );
+
+  const stageMemoryCandidates = useMemo(
+    () => stageMemories
+      .filter(item => normalizeStageNameForKnowledge(item.stageName) === currentStageName)
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime()),
+    [stageMemories, currentStageName],
+  );
+
+  const projectReferenceMaterials = useMemo(
+    () => currentProject ? referenceMaterials.filter(item => item.projectId === currentProject.id) : [],
+    [currentProject?.id, referenceMaterials],
+  );
+
+  const selectedReferenceMaterials = useMemo(
+    () => projectReferenceMaterials.filter(item => selectedReferenceIds.includes(item.id)),
+    [projectReferenceMaterials, selectedReferenceIds],
+  );
 
   const flatNodes = useMemo(() => {
     const nodes = flattenNodes(selectedTemplate?.nodes)
@@ -146,11 +220,124 @@ const DocumentWriter: React.FC<Props> = ({ onBack }) => {
   };
 
   // 更新章节内容
+  const handleImportReferenceFiles = async () => {
+    if (!currentProject) return;
+    try {
+      const filePaths = await window.electronAPI.openFiles?.([{ name: 'Reference files', extensions: ['doc', 'docx', 'pdf', 'txt', 'md', 'pptx', 'xlsx', 'rtf'] }]);
+      if (!filePaths?.length) return;
+      const materials = await importReferenceFiles(currentProject.id, filePaths, 'external');
+      if (materials.length) {
+        setSelectedReferenceIds(prev => Array.from(new Set([...prev, ...materials.map(item => item.id)])));
+        message.success(knowledgeText.imported + ' ' + materials.length);
+      }
+    } catch (error: any) {
+      message.error(knowledgeText.importFailed + ': ' + (error.message || error));
+    }
+  };
+
+  const handleLearnCurrentDocAsMemory = async () => {
+    if (!currentProject) return;
+    if (!selectedTemplate) { message.warning(knowledgeText.selectTemplateFirst); return; }
+    const doc = projectDocsList.find(d => d.id === selectedDocId);
+    if (!doc) { message.warning(knowledgeText.selectDocFirst); return; }
+    setLearningStage(true);
+    try {
+      const version = doc.versionId ? versions.find(v => v.id === doc.versionId) : undefined;
+      const entry = await learnStageFinal({
+        projectId: currentProject.id,
+        projectName: currentProject.name,
+        stageName: currentStageName,
+        docId: doc.id,
+        docName: doc.name,
+        sourceFilePath: doc.sourceFilePath,
+        content: version?.content,
+      });
+      if (entry) message.success(knowledgeText.learned);
+      else message.error(knowledgeText.learnFailed);
+    } catch (error: any) {
+      message.error(knowledgeText.learnFailed + ': ' + (error.message || error));
+    } finally {
+      setLearningStage(false);
+    }
+  };
   const handleContentChange = (nodeId: string, value: string) => {
     setSectionContents(prev => ({ ...prev, [nodeId]: value }));
   };
 
   // 切换展开/折叠
+
+  const handleGenerateRewrite = async (node: TemplateNode & { depth: number }) => {
+    const currentContent = sectionContents[node.id] || '';
+    setRewritingNodeId(node.id);
+    try {
+      const aiConfig = await window.electronAPI.loadAIConfig();
+      const prompt = composePrompt('rewrite', {
+        sectionTitle: node.title,
+        requirement: node.requirementText || node.description || 'None',
+        example: node.exampleText || 'None',
+        stageMemory: formatKnowledgeItems(stageMemoryCandidates, 'memory') || 'None',
+        reference: formatKnowledgeItems(selectedReferenceMaterials, 'reference') || 'None',
+        currentContent: currentContent || 'This section is empty. Please draft a body based on the section requirements.',
+      });
+      const useParallel = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1 && window.electronAPI.callAIParallelDetails;
+      if (useParallel) {
+        const details = await useAIJobStore.getState().runAIJob<{ variants: Array<{ modelId: string; modelName: string; ok: boolean; output: string; error?: string }> }>(
+          {
+            scene: 'rewrite',
+            title: `改写章节：${node.title}`,
+            projectId: currentProject?.id,
+            resultPreview: () => '已生成多个改写版本',
+          },
+          async ({ setProgress, throwIfCancelled }) => {
+            setProgress(35);
+            const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
+            throwIfCancelled();
+            setProgress(85);
+            return value;
+          },
+        );
+        setRewriteVariants(prev => ({
+          ...prev,
+          [node.id]: details.variants.map((variant, index) => ({
+            id: `${variant.modelId}-${index}`,
+            modelName: variant.modelName,
+            ok: variant.ok,
+            output: variant.output,
+            error: variant.error,
+          })),
+        }));
+      } else {
+        const output = await useAIJobStore.getState().runAIJob<string>(
+          {
+            scene: 'rewrite',
+            title: `改写章节：${node.title}`,
+            projectId: currentProject?.id,
+            resultPreview: (value) => value,
+          },
+          async ({ setProgress, throwIfCancelled }) => {
+            setProgress(35);
+            const value = await window.electronAPI.callAI({ prompt });
+            throwIfCancelled();
+            setProgress(85);
+            return String(value || '');
+          },
+        );
+        setRewriteVariants(prev => ({ ...prev, [node.id]: [{ id: 'single', modelName: 'AI\u7248\u672c', ok: true, output }] }));
+      }
+      message.success('\u5df2\u751f\u6210\u6539\u5199\u7248\u672c\uff0c\u8bf7\u9009\u62e9\u91c7\u7528');
+    } catch (error: any) {
+      message.error(`AI\u6539\u5199\u5931\u8d25\uff1a${error.message}`);
+    } finally {
+      setRewritingNodeId(null);
+    }
+  };
+
+  const handleApplyRewriteVariant = (nodeId: string, variant: RewriteVariant) => {
+    if (!variant.ok || !variant.output.trim()) return;
+    setSectionContents(prev => ({ ...prev, [nodeId]: variant.output.trim() }));
+    message.success('\u5df2\u91c7\u7528\u8be5\u7248\u672c\uff0c\u5bfc\u51fa\u65f6\u4f1a\u7ee7\u7eed\u4f7f\u7528\u6a21\u677f\u683c\u5f0f\u89c4\u5219');
+  };
+
   const toggleNode = (nodeId: string) => {
     setExpandedNodes(prev => {
       const next = new Set(prev);
@@ -244,9 +431,28 @@ const DocumentWriter: React.FC<Props> = ({ onBack }) => {
               }))}
             />
           </div>
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+          <div style={{ minWidth: 280, flex: 1 }}>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>{knowledgeText.referenceMaterials}</Text>
+            <Select
+              mode="multiple"
+              placeholder={knowledgeText.noProjectReferences}
+              style={{ width: '100%' }}
+              value={selectedReferenceIds}
+              onChange={setSelectedReferenceIds}
+              maxTagCount="responsive"
+              options={projectReferenceMaterials.map(item => ({ value: item.id, label: item.name }))}
+            />
+            <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>{knowledgeText.lowWeightHint}</Text>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+            <Button icon={<ImportOutlined />} onClick={handleImportReferenceFiles}>
+              {knowledgeText.importReference}
+            </Button>
+            <Button icon={<BookOutlined />} onClick={handleLearnCurrentDocAsMemory} loading={learningStage} disabled={!selectedTemplate || !selectedDocId}>
+              {learningStage ? knowledgeText.learning : knowledgeText.learnFinal}
+            </Button>
             <Button icon={<DownloadOutlined />} onClick={handleExport} loading={exporting} disabled={!selectedTemplate}>
-              导出 Word
+              ?? Word
             </Button>
           </div>
         </Space>
@@ -368,7 +574,13 @@ const DocumentWriter: React.FC<Props> = ({ onBack }) => {
                 <Text type="secondary" style={{ fontSize: 12 }}>输出格式</Text>
                 <div><Tag color="blue">{(selectedTemplate.outputFileType || 'docx').toUpperCase()}</Tag></div>
               </div>
-              <Divider style={{ margin: '8px 0' }} />
+              <div style={{ marginBottom: 8 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>{knowledgeText.memory}</Text>
+                <div>
+                  <Tag color="purple">{stageMemoryCandidates.length}</Tag>
+                  <Tag color="geekblue">{selectedReferenceMaterials.length}</Tag>
+                </div>
+              </div>              <Divider style={{ margin: '8px 0' }} />
               <div style={{ marginBottom: 8 }}>
                 <Text type="secondary" style={{ fontSize: 12 }}>完成度</Text>
                 <Progress percent={progressPercent} size="small" style={{ marginTop: 4 }} />

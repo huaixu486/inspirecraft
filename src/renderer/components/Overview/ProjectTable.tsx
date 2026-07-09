@@ -1,35 +1,184 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Card, Table, Tag, Progress, Typography, Space, Button, Dropdown, Modal, Form, Input, message } from 'antd';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Card, Table, Tag, Progress, Typography, Space, Button, Dropdown, Modal, Form, Input, message, Tooltip } from 'antd';
 import {
   FolderOutlined, CalendarOutlined, WarningOutlined, ExclamationCircleOutlined,
-  PlusOutlined, FolderOpenOutlined, FileZipOutlined, SearchOutlined,
+  PlusOutlined, FolderOpenOutlined, FileZipOutlined, SearchOutlined, ClockCircleOutlined,
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
+import { useTaskStore } from '../../stores/taskStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
+import { useKnowledgeStore } from '../../stores/knowledgeStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
-import { getAllStages, getStageMeta, detectTimelineStage, getGlobalStageProgress } from '../../utils/timelineStages';
-import type { ProjectDocument } from '../../../shared/types';
+import { markAutoDescriptionFileActivity } from '../../utils/autoProjectDescription';
+import { buildProjectStageSegments, getAllStages, getStageMeta, detectTimelineStage, getGlobalStageProgress, checkDeadlineStatus } from '../../utils/timelineStages';
+import { deriveProjectNextActions, ProjectNextAction } from '../../utils/projectNextActions';
+import type { ProjectDocument, TaskItem } from '../../../shared/types';
 import type { StageConfig } from '../../utils/timelineStages';
 import { Project } from '../../../shared/types';
 
 const { Text } = Typography;
+const PROJECT_TABLE_SCROLL_X = 920;
+const PROJECT_TABLE_SCROLL_Y = 'max(280px, calc(100vh - 520px))';
+const PROJECT_TABLE_ROW_HEIGHT = 58;
 
 interface Props {
   onEnterProject: (project: Project, initialTab?: string) => void;
 }
 
 const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
-  const { projects, versions, addProject } = useProjectStore();
-  const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
-  const { templates } = useTemplateStore();
-  const { workspacePath, customStages } = useSettingsStore();
+  const projects = useProjectStore(s => s.projects);
+  const versions = useProjectStore(s => s.versions);
+  const addProject = useProjectStore(s => s.addProject);
+  const updateProject = useProjectStore(s => s.updateProject);
+  const setCurrentProject = useProjectStore(s => s.setCurrentProject);
+  const setCurrentStageName = useProjectStore(s => s.setCurrentStageName);
+  // 响应式订阅 currentProject.id，确保单击时行高亮立即跟随
+  const currentProjectId = useProjectStore(s => s.currentProject?.id);
+  const projectDocs = useProjectDocStore(s => s.projectDocs);
+  const addProjectDoc = useProjectDocStore(s => s.addProjectDoc);
+  const updateProjectDoc = useProjectDocStore(s => s.updateProjectDoc);
+  const templates = useTemplateStore(s => s.templates);
+  const reviews = useTemplateStore(s => s.reviews);
+  const tasks = useTaskStore(s => s.tasks);
+  const stageMemories = useKnowledgeStore(s => s.stageMemories);
+  const loadKnowledge = useKnowledgeStore(s => s.loadKnowledge);
+  const navigateWorkbench = useNavigationStore(state => state.navigate);
+  const workspacePath = useSettingsStore(s => s.workspacePath);
+  const customStages = useSettingsStore(s => s.customStages);
   const allStages = useMemo(() => getAllStages(customStages), [customStages]);
   const stageMeta = useMemo(() => getStageMeta(allStages), [allStages]);
 
   const [searchKeyword, setSearchKeyword] = useState('');
+  const rowClickTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const tableWrapRef = useRef<HTMLDivElement | null>(null);
+  const [tableBodyElement, setTableBodyElement] = useState<HTMLElement | null>(null);
+  const [rowHighlight, setRowHighlight] = useState({
+    top: 0,
+    height: 0,
+    visible: false,
+    variant: 'selected' as 'preview' | 'selected',
+  });
+  const [highlightedProjectId, setHighlightedProjectId] = useState<string | null>(null);
+  const activeHighlightId = highlightedProjectId || currentProjectId || null;
+  const activeHighlightVariant: 'preview' | 'selected' = highlightedProjectId ? 'preview' : 'selected';
+
+  useEffect(() => () => {
+    if (rowClickTimerRef.current) clearTimeout(rowClickTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (highlightedProjectId && highlightedProjectId === currentProjectId) {
+      setHighlightedProjectId(null);
+    }
+  }, [currentProjectId, highlightedProjectId]);
+
+  const openProjectFromRow = (project: Project, initialTab?: string) => {
+    if (rowClickTimerRef.current) {
+      clearTimeout(rowClickTimerRef.current);
+      rowClickTimerRef.current = null;
+    }
+    if (initialTab === 'files') {
+      onEnterProject(project, 'files');
+      return;
+    }
+    setHighlightedProjectId(project.id);
+    // 80ms 后再通过 store 打开侧边窗（用于区分单击/双击）
+    rowClickTimerRef.current = setTimeout(() => {
+      rowClickTimerRef.current = null;
+      onEnterProject(project);
+    }, 80);
+  };
+
+  // --- 索引：按 projectId 分组，避免每行 filter ---
+  const docsByProjectId = useMemo(() => {
+    const map = new Map<string, ProjectDocument[]>();
+    for (const doc of projectDocs) {
+      const arr = map.get(doc.projectId);
+      if (arr) arr.push(doc); else map.set(doc.projectId, [doc]);
+    }
+    return map;
+  }, [projectDocs]);
+
+  const versionsByProjectId = useMemo(() => {
+    const map = new Map<string, typeof versions>();
+    for (const v of versions) {
+      const arr = map.get(v.projectId);
+      if (arr) arr.push(v); else map.set(v.projectId, [v]);
+    }
+    return map;
+  }, [versions]);
+
+  const tasksByProjectId = useMemo(() => {
+    const map = new Map<string, TaskItem[]>();
+    for (const t of tasks) {
+      const arr = map.get(t.projectId);
+      if (arr) arr.push(t); else map.set(t.projectId, [t]);
+    }
+    return map;
+  }, [tasks]);
+
+  // --- 预计算每个项目的摘要（阶段、进度、截止日期、下一步计划）一次算完 ---
+  interface ProjectSummary {
+    stage: string;
+    stageColor: string;
+    stageLabel: string;
+    progress: number;
+    deadline?: { date: string; status: 'overdue' | 'aboutToExpire' | 'normal'; hasCompleted: boolean };
+    nextAction: ProjectNextAction | null;
+  }
+
+  const projectSummaryMap = useMemo(() => {
+    const map = new Map<string, ProjectSummary>();
+    for (const project of projects) {
+      const pid = project.id;
+      const docs = docsByProjectId.get(pid) || [];
+      const pVersions = versionsByProjectId.get(pid) || [];
+      const pTasks = tasksByProjectId.get(pid) || [];
+
+      // 阶段
+      const stage = detectTimelineStage(allStages, ...docs.map(d => d.name));
+      const meta = stageMeta[stage];
+
+      // 进度
+      const progress = getGlobalStageProgress(project, docs, templates, pVersions, allStages);
+
+      // 截止日期
+      const dlDocs = docs.filter(d => d.deadline);
+      let deadline: ProjectSummary['deadline'];
+      if (dlDocs.length > 0) {
+        const latest = dlDocs.reduce((max, d) => {
+          const dl = new Date(d.deadline!);
+          return dl > max ? dl : max;
+        }, new Date(0));
+        const hasCompleted = dlDocs.some(d => d.completedAt);
+        const dlStatus = hasCompleted ? 'normal' as const : checkDeadlineStatus(latest.toISOString(), Date.now());
+        deadline = { date: latest.toLocaleDateString('zh-CN'), status: dlStatus, hasCompleted };
+      }
+
+      // 下一步计划
+      const nextAction = deriveProjectNextActions({
+        project, tasks: pTasks, projectDocs: docs, versions: pVersions,
+        templates, reviews, stageMemories, allStages, limit: 1,
+      })[0] || null;
+
+      map.set(pid, {
+        stage, stageColor: meta?.color || '#8c8c8c', stageLabel: meta?.label || stage,
+        progress, deadline, nextAction,
+      });
+    }
+    return map;
+  }, [projects, docsByProjectId, versionsByProjectId, tasksByProjectId, templates, reviews, stageMemories, allStages, stageMeta]);
+
+  const getSummary = (project: Project): ProjectSummary =>
+    projectSummaryMap.get(project.id) || { stage: '其他', stageColor: '#8c8c8c', stageLabel: '其他', progress: 0, nextAction: null };
+
+  // 自动扫描：逐个间隔执行，不一次性扫全部，避免占用资源
   const autoScanProjectIdsRef = useRef<Set<string>>(new Set());
+  const autoScanCancelledRef = useRef(false);
 
   useEffect(() => {
     if (!projects.length || !allStages.length) return;
@@ -37,47 +186,164 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
       cancelIdleCallback?: (handle: number) => void;
     };
-    let cancelled = false;
-    let idleHandle: number | undefined;
+    let idleHandles: number[] = [];
+    autoScanCancelledRef.current = false;
 
-    const scan = async () => {
-      for (const project of projects) {
-        if (cancelled || !project.folderPath || autoScanProjectIdsRef.current.has(project.id)) continue;
-        autoScanProjectIdsRef.current.add(project.id);
-        try {
-          const latestDocs = useProjectDocStore.getState().projectDocs;
-          const result = await syncProjectStageFiles(project, {
-            allStages,
-            projectDocs: latestDocs,
-            templates,
-            addProjectDoc,
-            updateProjectDoc,
-          });
-          if (result.created || result.updated) {
-            await useProjectStore.getState().loadProjects({ silent: true });
-          }
-        } catch (error) {
-          console.warn('Auto stage scan failed:', error);
+    const scanOne = async (project: Project): Promise<boolean> => {
+      if (!project.folderPath || autoScanCancelledRef.current) return false;
+      try {
+        const latestDocs = useProjectDocStore.getState().projectDocs;
+        const result = await syncProjectStageFiles(project, {
+          allStages,
+          projectDocs: latestDocs,
+          templates,
+          addProjectDoc,
+          updateProjectDoc,
+        });
+        if (result.created > 0) {
+          await markAutoDescriptionFileActivity(project, updateProject, result.createdFileNames);
         }
+        return result.created > 0 || result.updated > 0;
+      } catch (error) {
+        console.warn('Auto stage scan failed:', error);
+        return false;
       }
     };
 
-    if (typeof idleApi.requestIdleCallback === 'function') {
-      idleHandle = idleApi.requestIdleCallback(() => { void scan(); }, { timeout: 2500 });
-    } else {
-      const timer = window.setTimeout(() => { void scan(); }, 800);
-      idleHandle = timer;
-    }
+    // 逐个项目扫描，每个间隔执行，不阻塞主线程
+    let anyChanged = false;
+    const scanSequentially = async () => {
+      for (const project of projects) {
+        if (autoScanCancelledRef.current) break;
+        if (autoScanProjectIdsRef.current.has(project.id)) continue;
+        autoScanProjectIdsRef.current.add(project.id);
+        const changed = await scanOne(project);
+        if (changed) anyChanged = true;
+        // 每扫完一个项目，等浏览器空闲再扫下一个
+        await new Promise<void>(resolve => {
+          if (typeof idleApi.requestIdleCallback === 'function') {
+            const h = idleApi.requestIdleCallback(() => resolve(), { timeout: 3000 });
+            idleHandles.push(h);
+          } else {
+            const t = window.setTimeout(resolve, 500);
+            idleHandles.push(t);
+          }
+        });
+      }
+      // 全部扫完后只在有变更时才刷新
+      if (!autoScanCancelledRef.current && anyChanged) {
+        void useProjectStore.getState().loadProjects({ silent: true });
+      }
+    };
+
+    // 延迟启动扫描，让首页先完成渲染
+    const startTimer = window.setTimeout(() => {
+      if (!autoScanCancelledRef.current) void scanSequentially();
+    }, 3000);
+    idleHandles.push(startTimer);
 
     return () => {
-      cancelled = true;
-      if (idleHandle !== undefined) {
-        if (typeof idleApi.cancelIdleCallback === 'function') idleApi.cancelIdleCallback(idleHandle);
-        else window.clearTimeout(idleHandle);
-      }
+      autoScanCancelledRef.current = true;
+      idleHandles.forEach(h => {
+        if (typeof idleApi.cancelIdleCallback === 'function') idleApi.cancelIdleCallback(h);
+        else window.clearTimeout(h);
+      });
     };
-  }, [projects, allStages, templates, addProjectDoc, updateProjectDoc]);
+  }, [projects, allStages, templates, addProjectDoc, updateProjectDoc, updateProject]);
 
+  const isPlanRelatedTask = (task: TaskItem) =>
+    task.source === 'report' ||
+    task.source === 'review' ||
+    task.source === 'stage' ||
+    Boolean(task.workflowId || task.workflowName || task.relatedDocId || task.stageName);
+
+  const getTaskRank = (task: TaskItem) => {
+    const statusRank = task.status === 'in_progress' ? 0 : task.status === 'pending' ? 1 : 2;
+    const priorityRank = task.priority === 'high' ? 0 : task.priority === 'medium' ? 1 : 2;
+    return { statusRank, priorityRank };
+  };
+
+  const getNextPlanInfo = (project: Project) => {
+    const projectTasks = tasks
+      .filter(task => task.projectId === project.id && task.status !== 'completed' && isPlanRelatedTask(task))
+      .sort((a, b) => {
+        const aRank = getTaskRank(a);
+        const bRank = getTaskRank(b);
+        if (aRank.statusRank !== bRank.statusRank) return aRank.statusRank - bRank.statusRank;
+        const aOrder = a.workflowOrder ?? Number.MAX_SAFE_INTEGER;
+        const bOrder = b.workflowOrder ?? Number.MAX_SAFE_INTEGER;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+        if (aRank.priorityRank !== bRank.priorityRank) return aRank.priorityRank - bRank.priorityRank;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+
+    const nextTask = projectTasks[0];
+    if (nextTask) {
+      return {
+        type: 'task' as const,
+        title: nextTask.title,
+        detail: nextTask.workflowName || nextTask.stageName || nextTask.description || '计划任务',
+        count: projectTasks.length,
+        stageName: nextTask.stageName,
+      };
+    }
+
+    const docs = projectDocs.filter(doc => doc.projectId === project.id);
+    const projectVersions = versions.filter(version => version.projectId === project.id);
+    const nextStage = buildProjectStageSegments(project, docs, templates, projectVersions, allStages)
+      .filter(segment => !segment.completedAt)
+      .sort((a, b) => new Date(a.deadline || a.startAt || 0).getTime() - new Date(b.deadline || b.startAt || 0).getTime())[0];
+
+    if (nextStage) {
+      return {
+        type: 'stage' as const,
+        title: nextStage.label,
+        detail: nextStage.deadline ? `截止 ${new Date(nextStage.deadline).toLocaleDateString('zh-CN')}` : '阶段计划',
+        count: 0,
+        stageName: nextStage.stage,
+      };
+    }
+
+    return null;
+  };
+
+  const getNextAction = (project: Project) => deriveProjectNextActions({
+    project,
+    tasks,
+    projectDocs,
+    versions,
+    templates,
+    reviews,
+    stageMemories,
+    allStages,
+    limit: 1,
+  })[0] || null;
+
+  const openProjectAction = (project: Project, action: ProjectNextAction) => {
+    setCurrentProject(project);
+    if (action.stageName) setCurrentStageName(action.stageName);
+    navigateWorkbench({
+      projectId: project.id,
+      target: action.target,
+      stageName: action.stageName,
+      docId: action.docId,
+      taskId: action.taskId,
+      reviewId: action.reviewId,
+      source: 'overview',
+      prompt: action.detail,
+    });
+  };
+
+  const openProjectPlan = (project: Project, stageName?: string) => {
+    setCurrentProject(project);
+    if (stageName) setCurrentStageName(stageName);
+    navigateWorkbench({
+      projectId: project.id,
+      target: 'plan',
+      stageName,
+      source: 'overview',
+    });
+  };
   const formatProjectTime = (value?: string) => {
     if (!value) return '-';
     const date = new Date(value);
@@ -109,7 +375,40 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
         return (Number.isNaN(bTime) ? 0 : bTime) - (Number.isNaN(aTime) ? 0 : aTime);
       });
   }, [projects, searchKeyword]);
+  useLayoutEffect(() => {
+    setTableBodyElement(tableWrapRef.current?.querySelector<HTMLElement>('.ant-table-body') || null);
+  }, [visibleProjects.length]);
 
+  useLayoutEffect(() => {
+    const body = tableBodyElement;
+    if (!body || !activeHighlightId) {
+      setRowHighlight(prev => prev.visible ? { ...prev, visible: false } : prev);
+      return;
+    }
+
+    const frameId = requestAnimationFrame(() => {
+      const row = body.querySelector<HTMLTableRowElement>(
+        activeHighlightVariant === 'preview'
+          ? '.overview-project-row-preview'
+          : '.overview-project-row-selected',
+      );
+      if (!row) {
+        setRowHighlight(prev => prev.visible ? { ...prev, visible: false } : prev);
+        return;
+      }
+
+      const bodyRect = body.getBoundingClientRect();
+      const rowRect = row.getBoundingClientRect();
+      setRowHighlight({
+        top: rowRect.top - bodyRect.top + body.scrollTop,
+        height: PROJECT_TABLE_ROW_HEIGHT,
+        visible: true,
+        variant: activeHighlightVariant,
+      });
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [activeHighlightId, activeHighlightVariant, tableBodyElement, visibleProjects.length, searchKeyword]);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [form] = Form.useForm();
@@ -131,6 +430,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
         id: Date.now().toString(),
         name: values.name,
         description: values.description || '',
+        descriptionSource: values.description?.trim() ? 'manual' : 'auto',
         folderPath,
         status: 'active',
         progress: 0,
@@ -167,6 +467,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       id: Date.now().toString(),
       name: folderName,
       description: '',
+      descriptionSource: 'auto',
       folderPath,
       status: 'active',
       progress: 0,
@@ -174,7 +475,8 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       updatedAt: new Date().toISOString(),
     };
     await addProject(newProject);
-    await syncProjectStageFiles(newProject, { allStages, projectDocs, templates, addProjectDoc, updateProjectDoc });
+    const syncResult = await syncProjectStageFiles(newProject, { allStages, projectDocs, templates, addProjectDoc, updateProjectDoc });
+    if (syncResult.created > 0) await markAutoDescriptionFileActivity(newProject, updateProject, syncResult.createdFileNames);
     message.success(`已导入项目：${folderName}`);
   };
 
@@ -189,6 +491,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
         id: Date.now().toString(),
         name: folderName,
         description: '',
+        descriptionSource: 'auto',
         folderPath,
         status: 'active',
         progress: 0,
@@ -196,30 +499,33 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
         updatedAt: new Date().toISOString(),
       };
       await addProject(newProject);
-      await syncProjectStageFiles(newProject, { allStages, projectDocs, templates, addProjectDoc, updateProjectDoc });
+      const syncResult = await syncProjectStageFiles(newProject, { allStages, projectDocs, templates, addProjectDoc, updateProjectDoc });
+      if (syncResult.created > 0) await markAutoDescriptionFileActivity(newProject, updateProject, syncResult.createdFileNames);
       message.success(`已导入项目：${folderName}`);
     } else {
       message.error(result.error || '导入失败');
     }
   };
 
-  const columns = [
+  // columns 用 useMemo 固定，避免每次 render 重建列配置
+  const columns = useMemo(() => [
     {
       title: '项目名称',
       dataIndex: 'name',
       key: 'name',
+      width: 240,
       render: (name: string) => (
-        <Space size={8} style={{ width: '100%', minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', minWidth: 0, overflow: 'hidden' }}>
           <FolderOutlined style={{ color: '#1890ff', fontSize: 16, flexShrink: 0 }} />
           <Text
             strong
             title={name}
             ellipsis
-            style={{ display: 'block', maxWidth: 180, fontSize: 13 }}
+            style={{ display: 'block', flex: '1 1 auto', minWidth: 0, maxWidth: '100%', fontSize: 13 }}
           >
             {name}
           </Text>
-        </Space>
+        </div>
       ),
     },
     {
@@ -227,10 +533,16 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       key: 'stage',
       width: 110,
       render: (_: any, record: Project) => {
-        const docs = projectDocs.filter(d => d.projectId === record.id);
-        const stage = detectTimelineStage(allStages, ...docs.map(d => d.name));
-        const meta = stageMeta[stage];
-        return <Tag color={meta?.color || '#8c8c8c'}>{meta?.label || stage}</Tag>;
+        const s = getSummary(record);
+        return (
+          <Tag
+            color={s.stageColor}
+            style={{ maxWidth: 92, marginInlineEnd: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            title={s.stageLabel}
+          >
+            {s.stageLabel}
+          </Tag>
+        );
       },
     },
     {
@@ -238,14 +550,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       key: 'progress',
       width: 180,
       render: (_: any, record: Project) => {
-        const docs = projectDocs.filter(d => d.projectId === record.id);
-        const avg = getGlobalStageProgress(
-          record,
-          docs,
-          templates,
-          versions.filter(v => v.projectId === record.id),
-          allStages,
-        );
+        const avg = getSummary(record).progress;
         return (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Progress
@@ -265,41 +570,15 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       key: 'deadline',
       width: 150,
       render: (_: any, record: Project) => {
-        const docs = projectDocs.filter(d => d.projectId === record.id && d.deadline);
-        if (docs.length === 0) return <Text type="secondary" style={{ fontSize: 12 }}>未设置</Text>;
-
-        const now = new Date();
-        const latest = docs.reduce((max, d) => {
-          const dl = new Date(d.deadline!);
-          return dl > max ? dl : max;
-        }, new Date(0));
-
-        // 判断逾期/即将逾期（与 GanttChart 一致）
-        const hasTime = latest.getHours() !== 0 || latest.getMinutes() !== 0 || latest.getSeconds() !== 0;
-        let isOverdue = false;
-        let isAboutToExpire = false;
-        const hasCompleted = docs.some(d => d.completedAt);
-        if (!hasCompleted) {
-          if (hasTime) {
-            isOverdue = latest < now;
-            isAboutToExpire = !isOverdue && now >= new Date(latest.getTime() - 24 * 60 * 60 * 1000);
-          } else {
-            isOverdue = (latest.getFullYear() < now.getFullYear())
-              || (latest.getFullYear() === now.getFullYear() && latest.getMonth() < now.getMonth())
-              || (latest.getFullYear() === now.getFullYear() && latest.getMonth() === now.getMonth() && latest.getDate() < now.getDate());
-            isAboutToExpire = !isOverdue && latest.getFullYear() === now.getFullYear() && latest.getMonth() === now.getMonth() && latest.getDate() === now.getDate();
-          }
-        }
-
-        const statusColor = isOverdue ? '#ff4d4f' : isAboutToExpire ? '#faad14' : '#999';
+        const dl = getSummary(record).deadline;
+        if (!dl) return <Text type="secondary" style={{ fontSize: 12 }}>未设置</Text>;
+        const statusColor = dl.status === 'overdue' ? '#ff4d4f' : dl.status === 'aboutToExpire' ? '#faad14' : '#999';
         return (
           <Space size={4}>
-            {isOverdue && <WarningOutlined style={{ color: '#ff4d4f', fontSize: 12 }} />}
-            {isAboutToExpire && <ExclamationCircleOutlined style={{ color: '#faad14', fontSize: 12 }} />}
+            {dl.status === 'overdue' && <WarningOutlined style={{ color: '#ff4d4f', fontSize: 12 }} />}
+            {dl.status === 'aboutToExpire' && <ExclamationCircleOutlined style={{ color: '#faad14', fontSize: 12 }} />}
             <CalendarOutlined style={{ color: statusColor, fontSize: 12 }} />
-            <Text style={{ fontSize: 12, color: statusColor }}>
-              {latest.toLocaleDateString('zh-CN')}
-            </Text>
+            <Text style={{ fontSize: 12, color: statusColor }}>{dl.date}</Text>
           </Space>
         );
       },
@@ -317,13 +596,59 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
     {
       title: '下一步计划',
       key: 'nextPlan',
-      render: (_: any, record: Project) => (
-        <Text type="secondary" ellipsis style={{ maxWidth: 200, fontSize: 12 }}>
-          {record.description || '暂无计划'}
-        </Text>
-      ),
+      render: (_: any, record: Project) => {
+        const nextPlan = getSummary(record).nextAction;
+        if (!nextPlan) {
+          return (
+            <div className="overview-next-plan overview-next-plan-empty" style={{ height: PROJECT_TABLE_ROW_HEIGHT - 18 }}>
+              <Text type="secondary" className="overview-next-plan-title">
+                暂无计划
+              </Text>
+              <span className="overview-next-plan-detail" aria-hidden="true">&nbsp;</span>
+            </div>
+          );
+        }
+
+        return (
+          <Tooltip title="双击进入对应工作台">
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+              onDoubleClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                openProjectAction(record, nextPlan);
+              }}
+              style={{
+                width: '100%',
+                height: PROJECT_TABLE_ROW_HEIGHT - 18,
+                minWidth: 0,
+                border: 0,
+                background: 'transparent',
+                padding: 0,
+                textAlign: 'left',
+                cursor: 'default',
+              }}
+              className="overview-next-plan"
+            >
+              <div className="overview-next-plan-main">
+                <ClockCircleOutlined style={{ color: nextPlan.severity === 'high' ? '#ff4d4f' : nextPlan.severity === 'medium' ? '#faad14' : '#1677ff', fontSize: 12, flexShrink: 0 }} />
+                <Text ellipsis className="overview-next-plan-title">
+                  {nextPlan.title}
+                </Text>
+                {typeof nextPlan.count === 'number' && nextPlan.count > 1 && <Tag style={{ margin: 0, fontSize: 10 }}>{nextPlan.count}</Tag>}
+              </div>
+              <Text type="secondary" ellipsis className="overview-next-plan-detail">
+                {nextPlan.detail}
+              </Text>
+            </button>
+          </Tooltip>
+        );
+      },
     },
-  ];
+  ], [projectSummaryMap, openProjectAction]);
 
   return (
     <>
@@ -364,6 +689,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
           style={{ width: 280 }}
         />
       </div>
+      <div ref={tableWrapRef} className="overview-project-table-wrap">
       <Table
         className="overview-project-table"
         columns={columns}
@@ -372,7 +698,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
         pagination={false}
         size="middle"
         tableLayout="fixed"
-        scroll={{ x: '100%' }}
+        scroll={{ x: PROJECT_TABLE_SCROLL_X, y: PROJECT_TABLE_SCROLL_Y }}
         locale={{
           emptyText: (
             <div style={{ padding: '40px 0', color: '#94a3b8' }}>
@@ -383,14 +709,33 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
           ),
         }}
         onRow={(record) => ({
-          onClick: () => onEnterProject(record),
-          onDoubleClick: () => onEnterProject(record, 'files'),
+          onClick: (e) => {
+            if (e.detail > 1) return;
+            openProjectFromRow(record);
+          },
+          onDoubleClick: () => openProjectFromRow(record, 'files'),
           style: { cursor: 'pointer' },
         })}
         rowClassName={(record) =>
-          record.id === useProjectStore.getState().currentProject?.id ? 'ant-table-row-selected' : ''
+          record.id === highlightedProjectId
+            ? 'overview-project-row-preview'
+            : record.id === currentProjectId
+              ? 'overview-project-row-selected'
+              : ''
         }
       />
+      {tableBodyElement && createPortal(
+        <div
+          className={`overview-project-row-highlight overview-project-row-highlight-${rowHighlight.variant}`}
+          style={{
+            height: PROJECT_TABLE_ROW_HEIGHT,
+            opacity: rowHighlight.visible ? 1 : 0,
+            transform: `translate3d(0, ${rowHighlight.top}px, 0)`,
+          }}
+        />,
+        tableBodyElement,
+      )}
+      </div>
     </Card>
 
     <Modal

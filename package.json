@@ -7,9 +7,14 @@
     "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
     "dev:main": "tsc -p tsconfig.main.json && node start-dev.js",
     "dev:renderer": "vite",
-    "build": "npm run build:main && npm run build:renderer",
+    "typecheck:main": "tsc -p tsconfig.main.json --noEmit",
+    "typecheck:renderer": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "npm run typecheck:main && npm run typecheck:renderer",
+    "build": "npm run typecheck && npm run build:main && npm run build:renderer",
     "build:main": "tsc -p tsconfig.main.json",
-    "build:renderer": "vite build"
+    "build:renderer": "vite build",
+    "test:pathguard": "npx tsx src/main/shared/__tests__/pathGuard.test.ts",
+    "verify": "npm run typecheck && npm run build:renderer && echo ✅ All checks passed"
   },
   "dependencies": {
     "antd": "^5.22.0",
@@ -31,6 +36,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "electron": "^33.4.11",
+    "tsx": "^4.22.4",
     "typescript": "^5.6.3",
     "vite": "^6.0.0"
   }

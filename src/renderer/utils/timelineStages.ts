@@ -4,13 +4,13 @@ export type { StageConfig } from '../../shared/types';
 
 // 默认系统阶段
 export const DEFAULT_STAGES: StageConfig[] = [
-  { id: 'system-1', name: '\u63d0\u6848', keywords: ['\u63d0\u6848', '\u6295\u6807'], color: '#1677ff', isSystem: true },
-  { id: 'system-2', name: '\u6307\u5357\u7f16\u5199', keywords: ['\u6307\u5357'], color: '#722ed1', isSystem: true },
-  { id: 'system-3', name: '\u53ef\u7814', keywords: ['\u53ef\u7814', '\u53ef\u884c\u6027'], color: '#52c41a', isSystem: true },
-  { id: 'system-4', name: '\u5176\u4ed6', keywords: [], color: '#8c8c8c', isSystem: true },
+  { id: 'system-1', name: '\提\案', keywords: ['\提\案', '\投\标'], color: '#1677ff', isSystem: true },
+  { id: 'system-2', name: '\指\南\编\写', keywords: ['\指\南'], color: '#722ed1', isSystem: true },
+  { id: 'system-3', name: '\可\研', keywords: ['\可\研', '\可\行\性'], color: '#52c41a', isSystem: true },
+  { id: 'system-4', name: '\其\他', keywords: [], color: '#8c8c8c', isSystem: true },
 ];
 
-const isOtherStage = (stage: StageConfig) => stage.id === 'system-4' || stage.name.trim() === '\u5176\u4ed6';
+const isOtherStage = (stage: StageConfig) => stage.id === 'system-4' || stage.name.trim() === '\其\他';
 
 const placeOtherStageLast = (stages: StageConfig[]): StageConfig[] => {
   const regularStages = stages.filter(stage => !isOtherStage(stage));
@@ -96,12 +96,49 @@ const toMs = (value?: string) => {
 const validTimes = (values: Array<string | undefined>) =>
   values.map(toMs).filter(Number.isFinite);
 
+// ========== 截止时间状态判断（统一入口） ==========
+export type DeadlineStatus = 'overdue' | 'aboutToExpire' | 'normal';
+
+/**
+ * 判断截止时间状态。
+ * - deadline 含时刻（时分秒非零）：精确时间比较
+ * - deadline 为 midnight（无时刻）：按日期比较，当天算"即将到期"
+ */
+export function checkDeadlineStatus(deadline: string | undefined, nowMs: number): DeadlineStatus {
+  if (!deadline) return 'normal';
+  const dlMs = toMs(deadline);
+  if (!Number.isFinite(dlMs)) return 'normal';
+
+  const dlDate = new Date(dlMs);
+  const hasTime = dlDate.getHours() !== 0 || dlDate.getMinutes() !== 0 || dlDate.getSeconds() !== 0;
+
+  if (hasTime) {
+    if (dlMs < nowMs) return 'overdue';
+    if (nowMs >= dlMs - 24 * 60 * 60 * 1000) return 'aboutToExpire';
+    return 'normal';
+  }
+
+  // 按日期比较（无时刻）
+  const nowDate = new Date(nowMs);
+  const dlBeforeToday = dlDate.getFullYear() < nowDate.getFullYear()
+    || (dlDate.getFullYear() === nowDate.getFullYear() && dlDate.getMonth() < nowDate.getMonth())
+    || (dlDate.getFullYear() === nowDate.getFullYear() && dlDate.getMonth() === nowDate.getMonth() && dlDate.getDate() < nowDate.getDate());
+
+  if (dlBeforeToday) return 'overdue';
+
+  const sameDay = dlDate.getFullYear() === nowDate.getFullYear()
+    && dlDate.getMonth() === nowDate.getMonth()
+    && dlDate.getDate() === nowDate.getDate();
+
+  return sameDay ? 'aboutToExpire' : 'normal';
+}
+
 // 根据关键词检测文件所属阶段
 export const detectTimelineStage = (
   allStages: StageConfig[],
   ...parts: Array<string | undefined>
 ): string => {
-  const fallbackStage = allStages.find(stage => stage.keywords.length === 0)?.name || '\u5176\u4ed6';
+  const fallbackStage = allStages.find(stage => stage.keywords.length === 0)?.name || '\其\他';
   const primaryText = parts[0] || '';
   const secondaryText = parts.slice(1).filter(Boolean).join(' ');
   const candidates = allStages
@@ -194,7 +231,7 @@ export const buildProjectStageSegments = (
     const docStartTimes = docs.map(getDocStartMs).filter(Number.isFinite);
     const projectCreatedMs = toMs(project.createdAt);
     const hasImportedFiles = docs.some(isImportedDoc);
-    const startMs = stage === '\u63d0\u6848' && !hasImportedFiles
+    const startMs = stage === '\提\案' && !hasImportedFiles
       ? (Number.isFinite(projectCreatedMs) ? projectCreatedMs : Math.min(...docStartTimes))
       : Math.min(...docStartTimes);
 

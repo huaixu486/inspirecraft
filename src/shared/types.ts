@@ -2,7 +2,12 @@
 export interface Project {
   id: string;
   name: string;
-  description: string;
+  description: string; // 项目描述
+  descriptionSource?: 'manual' | 'auto';
+  autoDescriptionUpdatedAt?: string;
+  autoDescriptionPendingSince?: string;
+  autoDescriptionNextUpdateAt?: string;
+  autoDescriptionPendingFileNames?: string[];
   folderPath: string;
   status: 'active' | 'completed' | 'paused';
   progress: number; // 0-100
@@ -41,7 +46,7 @@ export interface TaskItem {
   id: string;
   projectId: string;
   title: string;
-  description: string;
+  description: string; // 任务描述
   type: 'ai' | 'manual'; // AI处理或人工处理
   status: 'pending' | 'in_progress' | 'completed';
   priority: 'high' | 'medium' | 'low';
@@ -190,7 +195,6 @@ export interface WritingTemplate {
   exampleAnalysis?: string; // 范文模板的AI分析摘要
   createdAt: string;
   updatedAt: string;
-  folderModifiedAt?: string; // 项目文件夹内最近文件/目录修改时间
 }
 
 // ==================== 审查相关类型 ====================
@@ -246,6 +250,17 @@ export interface SectionAnalysis {
 }
 
 // 项目文档（关联模板+文件）
+export type ProjectDocumentLifecycleStatus =
+  | 'imported'
+  | 'identified'
+  | 'writing'
+  | 'analyzed'
+  | 'reviewed'
+  | 'needs_revision'
+  | 'completed'
+  | 'learned'
+  | 'archived';
+
 export interface ProjectDocument {
   id: string;
   projectId: string;
@@ -254,6 +269,11 @@ export interface ProjectDocument {
   name: string;             // 显示名称，如 "XX项目-提案表"
   sections: SectionAnalysis[];  // 各章节分析结果
   overallProgress: number;  // 0-100 整体完成度
+  lifecycleStatus?: ProjectDocumentLifecycleStatus;
+  lifecycleUpdatedAt?: string;
+  reviewedAt?: string;
+  learnedAt?: string;
+  reopenedAt?: string;
   deadline?: string;        // 截止日期 ISO string
   completedAt?: string;     // 完成日期 ISO string
   analyzedAt?: string;      // 最近分析时间
@@ -266,6 +286,32 @@ export interface ProjectDocument {
 }
 
 // 用户资料
+export interface StageMemoryEntry {
+  id: string;
+  projectId: string;
+  projectName: string;
+  stageName: string;
+  docId?: string;
+  docName: string;
+  sourceFilePath?: string;
+  summary: string;
+  model?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReferenceMaterial {
+  id: string;
+  projectId: string;
+  name: string;
+  filePath?: string;
+  source: 'project-file' | 'external';
+  contentPreview?: string;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface UserProfile {
   nickname: string;
   email: string;
@@ -283,9 +329,150 @@ export interface StageConfig {
 }
 
 // 应用设置
+export type HolidayDataSource = 'auto' | 'local' | 'online';
+
+export interface CompositionWeightConfig {
+  CURRENT_DOCUMENT: number;
+  TEMPLATE_REQUIREMENT: number;
+  USER_EXPLICIT_INPUT: number;
+  USER_CUSTOM_PROMPT: number;
+  STAGE_MEMORY: number;
+  SKILL_GLOBAL: number;
+  SKILL_REPORT: number;
+  SKILL_REVIEW: number;
+  SKILL_WRITING: number;
+  SKILL_MAX_CAP: number;
+  REFERENCE_MATERIAL: number;
+  SYSTEM_DEFAULT: number;
+}
+
 export interface AppSettings {
   workspacePath: string; // 项目工作区路径
   workspaceCapacity: number; // 工作区容量上限（GB）
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
+  enableSystemNotifications?: boolean; // Enable Windows system notifications
+  holidayDataSource?: HolidayDataSource; // Calendar holiday source
+  holidayApiUrl?: string; // Calendar holiday API URL, supports {year}
+  compositionWeights?: CompositionWeightConfig; // Custom prompt composition weights
   customStages?: StageConfig[]; // 自定义阶段配置
+}
+
+// ─── 统一跳转上下文 ─────────────────────────────────────
+// 所有页面间跳转都通过 WorkbenchFocus 传递上下文，
+// 避免页面之间硬编码依赖。
+
+export type WorkbenchPage = 'files' | 'plan' | 'team' | 'templates' | 'report' | 'review' | 'writing' | 'calendar';
+
+export type WorkbenchSource = 'file' | 'template' | 'review' | 'task' | 'notification' | 'overview' | 'knowledge';
+
+export interface WorkbenchFocus {
+  /** 要跳转到的页面 */
+  target: WorkbenchPage;
+  /** 项目 ID */
+  projectId: string;
+  /** 关联文件路径 */
+  filePath?: string;
+  /** 关联文档 ID (ProjectDocument) */
+  docId?: string;
+  /** 关联模板 ID */
+  templateId?: string;
+  /** 关联任务 ID */
+  taskId?: string;
+  /** 关联审查结果 ID */
+  reviewId?: string;
+  /** 关联审查问题 ID */
+  issueId?: string;
+  /** 阶段名称 */
+  stageName?: string;
+  /** 来源页面 */
+  source?: WorkbenchSource;
+  /** 附带提示/上下文文本 */
+  prompt?: string;
+}
+
+// ─── 提示词模板系统 ─────────────────────────────────────
+
+/** 提示词场景 */
+export type PromptScene =
+  | 'report'         // 阶段报告生成
+  | 'review'         // 文档审查
+  | 'rewrite'        // 章节改稿
+  | 'diff'           // 版本对比
+  | 'summary'        // 文档摘要
+  | 'memory'         // 阶段记忆学习
+  | 'description'    // 项目描述生成
+  | 'taskExecute'    // 任务执行
+  | 'sectionAnalysis' // 章节完成度分析
+  | 'templateExtract'; // 模板结构提取
+
+export type AIJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export type AIJobScene = PromptScene | 'general';
+
+export interface AIJob {
+  id: string;
+  scene: AIJobScene;
+  title: string;
+  status: AIJobStatus;
+  progress: number;
+  projectId?: string;
+  docId?: string;
+  taskId?: string;
+  inputHash?: string;
+  resultPreview?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 提示词规则 */
+export interface PromptRule {
+  id: string;
+  text: string;
+  enabled: boolean;
+  type: 'must' | 'must_not' | 'prefer';
+}
+
+/** 输出字段 */
+export interface OutputField {
+  key: string;
+  label: string;
+  description: string;
+}
+
+/** 结构化提示词 */
+export interface StructuredPrompt {
+  scene: PromptScene;
+  mode: 'structured' | 'raw';
+  role: string;
+  goals: string[];
+  rules: PromptRule[];
+  outputFields: OutputField[];
+  rawPrompt?: string;
+}
+
+/** 提示词模板 */
+export interface PromptTemplate {
+  id: string;
+  scene: PromptScene;
+  name: string;
+  content: string;
+  isBuiltin: boolean;
+  createdAt: string;
+  updatedAt: string;
+  structured?: StructuredPrompt;
+}
+
+/** Skill 包（阶段二扩展） */
+export interface SkillPackage {
+  id: string;
+  name: string;
+  version: string;
+  type: PromptScene[];
+  scope: 'global' | 'project';
+  weight: number;
+  enabled: boolean;
+  prompts: Partial<Record<PromptScene, string>>;
+  rules: string[];
+  importedAt: string;
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { Card, Row, Col, Typography } from 'antd';
 import {
   FolderOutlined,
@@ -10,7 +10,8 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { buildProjectStageSegments, getAllStages } from '../../utils/timelineStages';
+import { checkDeadlineStatus } from '../../utils/timelineStages';
+import { useSegmentsByProject } from './SegmentsContext';
 
 /** 数字递增动画 Hook */
 function useCountUp(target: number, duration = 600): number {
@@ -40,57 +41,33 @@ function useCountUp(target: number, duration = 600): number {
 const { Text } = Typography;
 
 const StatsCards: React.FC = () => {
-  const { projects, versions } = useProjectStore();
-  const { projectDocs } = useProjectDocStore();
-  const { templates } = useTemplateStore();
-  const { customStages } = useSettingsStore();
-  const allStages = getAllStages(customStages);
+  const projects = useProjectStore(s => s.projects);
+  const segmentsByProject = useSegmentsByProject();
 
   const totalProjects = projects.length;
-  const activeProjects = projects.filter(p => p.status === 'active').length;
-  const completedProjects = projects.filter(p => p.status === 'completed').length;
+  const activeProjects = useMemo(() => projects.filter(p => p.status === 'active').length, [projects]);
+  const completedProjects = useMemo(() => projects.filter(p => p.status === 'completed').length, [projects]);
 
-  // 按阶段类型分组统计（一个阶段 = 一个 TimelineStageSegment，不是单个文件）
-  const allSegments = projects.flatMap(project =>
-    buildProjectStageSegments(
-      project,
-      projectDocs.filter(d => d.projectId === project.id),
-      templates,
-      versions.filter(v => v.projectId === project.id),
-      allStages,
-    ),
-  );
+  // 从共享 Context 获取 segments，不再重复计算
+  const allSegments = useMemo(() => {
+    const result: any[] = [];
+    for (const segments of segmentsByProject.values()) {
+      result.push(...segments);
+    }
+    return result;
+  }, [segmentsByProject]);
 
   const nowMs = Date.now();
 
   const totalStages = allSegments.length;
-  const completedStages = allSegments.filter(s => Boolean(s.completedAt)).length;
+  const completedStages = useMemo(() => allSegments.filter(s => Boolean(s.completedAt)).length, [allSegments]);
 
-  // 逾期和即将逾期判断（与 GanttChart 逻辑一致）
-  const isSegmentOverdue = (s: { deadline?: string; completedAt?: string }) => {
-    if (!s.deadline || s.completedAt) return false;
-    const dlMs = new Date(s.deadline).getTime();
-    const d = new Date(s.deadline);
-    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
-    if (hasTime) return dlMs < nowMs;
-    const nowD = new Date();
-    const dlD = new Date(s.deadline);
-    return (dlD.getFullYear() < nowD.getFullYear())
-      || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() < nowD.getMonth())
-      || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() === nowD.getMonth() && dlD.getDate() < nowD.getDate());
-  };
+  // 逾期和即将逾期判断（统一使用 checkDeadlineStatus）
+  const segmentDlStatus = (s: { deadline?: string; completedAt?: string }) =>
+    (!s.deadline || s.completedAt) ? 'normal' as const : checkDeadlineStatus(s.deadline, nowMs);
 
-  const isSegmentAboutToExpire = (s: { deadline?: string; completedAt?: string }) => {
-    if (!s.deadline || s.completedAt || isSegmentOverdue(s)) return false;
-    const d = new Date(s.deadline);
-    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
-    if (hasTime) return nowMs >= new Date(s.deadline).getTime() - 24 * 60 * 60 * 1000;
-    const nowD = new Date();
-    return nowD.getFullYear() === d.getFullYear() && nowD.getMonth() === d.getMonth() && nowD.getDate() === d.getDate();
-  };
-
-  const overdueStages = allSegments.filter(isSegmentOverdue).length;
-  const aboutToExpireStages = allSegments.filter(isSegmentAboutToExpire).length;
+  const overdueStages = useMemo(() => allSegments.filter(s => segmentDlStatus(s) === 'overdue').length, [allSegments]);
+  const aboutToExpireStages = useMemo(() => allSegments.filter(s => segmentDlStatus(s) === 'aboutToExpire').length, [allSegments]);
 
   const stats: StatCardData[] = [
     {

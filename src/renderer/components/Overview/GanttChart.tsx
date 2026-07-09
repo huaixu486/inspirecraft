@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Card, Tooltip, Typography } from 'antd';
 import { WarningOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
@@ -6,12 +6,13 @@ import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
-  buildProjectStageSegments,
+  checkDeadlineStatus,
   getAllStages,
   getStageMeta,
   TimelineStageSegment,
 } from '../../utils/timelineStages';
 import type { StageConfig } from '../../utils/timelineStages';
+import { useSegmentsByProject } from './SegmentsContext';
 
 const { Text } = Typography;
 
@@ -24,6 +25,9 @@ const MIN_SPAN = HOUR;
 const MAX_SPAN = 2 * YEAR;
 const PROJECT_COL = 100;
 const STAGE_COL = 100;
+
+// 模块级缓存：跨挂载保持缩放状态，避免条件渲染重新挂载时缩放阶跃
+const persistedViewRef: { current: { start: number; span: number } | null } = { current: null };
 
 // 彩条斜线按行列交替：第一行第一列左斜，第二行第一列/第一行第二列右斜。
 const getStripeAngle = (rowIndex: number, columnIndex: number): number =>
@@ -182,48 +186,94 @@ const safeAutoFitDate = (value: number, now: number) => {
   return value >= min && value <= max ? value : Number.NaN;
 };
 
-const GanttChart: React.FC = () => {
-  const { projects, versions } = useProjectStore();
-  const { projectDocs } = useProjectDocStore();
-  const { templates } = useTemplateStore();
-  const { workspacePath, customStages } = useSettingsStore();
+interface GanttChartProps {
+  isActive?: boolean;
+}
+
+const GanttChart: React.FC<GanttChartProps> = ({ isActive }) => {
+  const projects = useProjectStore(s => s.projects);
+  const workspacePath = useSettingsStore(s => s.workspacePath);
+  const customStages = useSettingsStore(s => s.customStages);
 
   const allStages: StageConfig[] = useMemo(() => getAllStages(customStages), [customStages]);
   const stageMeta = useMemo(() => getStageMeta(allStages), [allStages]);
+  // 从共享 Context 获取 segments，不再重复计算
+  const segmentsByProject = useSegmentsByProject();
   const timeAreaRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef({ start: Date.now() - MAX_SPAN / 2, span: MAX_SPAN, initialized: false });
+  // 优先从模块级缓存恢复缩放状态，避免每次挂载从 MAX_SPAN 开始再跳到 autoFit
+  const defaultView = persistedViewRef.current ?? { start: Date.now() - MAX_SPAN / 2, span: MAX_SPAN };
+  const [view, setView] = useState<{ start: number; span: number }>(defaultView);
+  // 用 ref 同步最新 view 状态，避免 useCallback 闭包捕获旧值
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const viewInitializedRef = useRef(!!persistedViewRef.current);
+  // rAF 节流：高频事件先写 pendingRef，下一帧 flush 到 state
+  const pendingViewRef = useRef<{ start: number; span: number } | null>(null);
+  const rafRef = useRef(0);
+  const flushPendingView = useCallback(() => {
+    if (pendingViewRef.current) {
+      setView(pendingViewRef.current);
+      pendingViewRef.current = null;
+    }
+    rafRef.current = 0;
+  }, []);
+  // 稳定引用：不依赖 view 闭包，通过 viewRef.current 读取最新值
+  const scheduleViewUpdate = useCallback((updater: (prev: { start: number; span: number }) => { start: number; span: number }) => {
+    const prev = pendingViewRef.current ?? viewRef.current;
+    pendingViewRef.current = updater(prev);
+    if (!rafRef.current) {
+      rafRef.current = requestAnimationFrame(flushPendingView);
+    }
+  }, [flushPendingView]);
   const panRef = useRef({ active: false, dragging: false, pointerId: -1, startX: 0, startY: 0, lastX: 0, lastY: 0 });
   const [now, setNow] = useState(Date.now());
   const [viewportWidth, setViewportWidth] = useState(900);
   const [isPanning, setIsPanning] = useState(false);
-  const [, bump] = useState(0);
+  // 彩条入场动画：每次回到主页时触发
+  const [barsEntering, setBarsEntering] = useState(true);
+  // 条件渲染下组件只在 isActive=true 时挂载，初始为 false 以触发首次入场动画
+  const prevActiveRef = useRef(false);
+  useLayoutEffect(() => {
+    if (isActive && !prevActiveRef.current) {
+      setBarsEntering(true);
+    }
+    prevActiveRef.current = !!isActive;
+  }, [isActive]);
+  useEffect(() => {
+    if (barsEntering) {
+      const timer = setTimeout(() => setBarsEntering(false), 600);
+      return () => clearTimeout(timer);
+    }
+  }, [barsEntering]);
 
   const sortedProjects = useMemo(
     () => [...projects].sort((a, b) => getProjectSortMs(b) - getProjectSortMs(a)),
     [projects],
   );
 
-  const segmentsByProject = useMemo(() => {
-    const map = new Map<string, TimelineStageSegment[]>();
-    for (const project of projects) {
-      map.set(
-        project.id,
-        buildProjectStageSegments(
-          project,
-          projectDocs.filter(doc => doc.projectId === project.id),
-          templates,
-          versions.filter(version => version.projectId === project.id),
-          allStages,
-        ),
-      );
-    }
-    return map;
-  }, [projectDocs, projects, templates, versions, allStages]);
+  const segmentAnimationKey = useMemo(() => (
+    sortedProjects
+      .map(project => (segmentsByProject.get(project.id) || [])
+        .map(segment => `${segment.stage}:${segment.startAt}:${segment.deadline}:${segment.completedAt || ''}:${segment.lastActivityAt || ''}`)
+        .join('|'))
+      .join('||')
+  ), [segmentsByProject, sortedProjects]);
+  const [barsAnimating, setBarsAnimating] = useState(false);
+
+  useEffect(() => {
+    if (!segmentAnimationKey || isActive === false) return;
+    setBarsAnimating(true);
+    const timer = window.setTimeout(() => setBarsAnimating(false), 360);
+    return () => window.clearTimeout(timer);
+  }, [segmentAnimationKey, isActive]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), MINUTE);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -259,13 +309,13 @@ const GanttChart: React.FC = () => {
       if (!inPlot) return;
       e.preventDefault();
       const mousePct = clamp((e.clientX - plotLeft) / plotWidth, 0, 1);
-      const current = viewRef.current;
-      const anchorTime = current.start + mousePct * current.span;
-      const zoomFactor = e.deltaY > 0 ? 1.1 : 0.91;
-      const newSpan = clamp(current.span * zoomFactor, MIN_SPAN, MAX_SPAN);
-      const newStart = anchorTime - mousePct * newSpan;
-      viewRef.current = { ...current, start: newStart, span: newSpan };
-      bump(n => n + 1);
+      scheduleViewUpdate(current => {
+        const anchorTime = current.start + mousePct * current.span;
+        const zoomFactor = e.deltaY > 0 ? 1.1 : 0.91;
+        const newSpan = clamp(current.span * zoomFactor, MIN_SPAN, MAX_SPAN);
+        const newStart = anchorTime - mousePct * newSpan;
+        return { start: newStart, span: newSpan };
+      });
     };
     el.addEventListener('wheel', handler, { capture: true, passive: false });
     return () => el.removeEventListener('wheel', handler, { capture: true });
@@ -324,20 +374,16 @@ const GanttChart: React.FC = () => {
       const dy = e.clientY - pan.lastY;
       if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
 
-      let changed = false;
       if (Math.abs(dx) >= 0.5) {
-        const current = viewRef.current;
-        viewRef.current = {
+        scheduleViewUpdate(current => ({
           ...current,
           start: current.start - (dx / plotWidth) * current.span,
-        };
-        changed = true;
+        }));
       }
       if (Math.abs(dy) >= 0.5) {
         el.scrollTop = Math.max(0, el.scrollTop - dy);
       }
       panRef.current = { ...panRef.current, lastX: e.clientX, lastY: e.clientY };
-      if (changed) bump(n => n + 1);
     };
 
     const onPointerUp = (e: PointerEvent) => stopPan(e);
@@ -377,11 +423,23 @@ const GanttChart: React.FC = () => {
     };
   }, [now, projects, segmentsByProject]);
 
-  if (!viewRef.current.initialized && projects.length > 0) {
-    viewRef.current = { ...autoFitView, initialized: true };
-  }
+  // 首次有数据时初始化视图（已从缓存恢复时跳过 autoFit）
+  const [viewReady, setViewReady] = useState(!!persistedViewRef.current);
+  useEffect(() => {
+    if (!viewInitializedRef.current && projects.length > 0) {
+      viewInitializedRef.current = true;
+      if (!persistedViewRef.current) {
+        setView(autoFitView);
+      }
+      setViewReady(true);
+    }
+  }, [projects.length > 0, autoFitView]);
 
-  const view = viewRef.current.initialized ? viewRef.current : { ...autoFitView, initialized: false };
+  // 持久化缩放状态到模块级 ref，跨挂载保持
+  useEffect(() => {
+    persistedViewRef.current = view;
+  }, [view]);
+
   const ticks = useMemo(() => buildTicks(view.start, view.span, viewportWidth), [view.start, view.span, viewportWidth]);
   const todayPct = timeToPct(now, view.start, view.span);
   const todayVisible = todayPct >= 0 && todayPct <= 100;
@@ -447,7 +505,7 @@ const GanttChart: React.FC = () => {
           </div>
         </div>
 
-        <div className="gantt-scroll-area" ref={scrollRef} style={{ position: 'relative', userSelect: isPanning ? 'none' : undefined, cursor: isPanning ? 'grabbing' : 'grab', touchAction: 'none', ...(needsScroll ? { maxHeight: visibleHeight, overflowY: 'auto' } : {}) }}>
+        <div className={`gantt-scroll-area${barsAnimating && !isPanning ? ' gantt-bars-entering' : ''}`} ref={scrollRef} style={{ position: 'relative', userSelect: isPanning ? 'none' : undefined, cursor: isPanning ? 'grabbing' : 'grab', touchAction: 'none', ...(needsScroll ? { maxHeight: visibleHeight, overflowY: 'auto' } : {}) }}>
           {/* 网格线随滚动内容一起滚动 */}
           <div
             style={{
@@ -502,7 +560,7 @@ const GanttChart: React.FC = () => {
             </div>
           )}
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, position: 'relative', zIndex: 1 }}>
+          <div className={barsEntering ? 'gantt-bars-entering' : undefined} style={{ display: 'flex', flexDirection: 'column', gap: 2, position: 'relative', zIndex: 1, opacity: viewReady ? 1 : 0, transition: 'opacity 0.15s' }}>
             {sortedProjects.map((project, projectIndex) => {
               const segments = segmentsByProject.get(project.id) || [];
 
@@ -556,27 +614,9 @@ const GanttChart: React.FC = () => {
                   <div className="gantt-stage-cell" style={{ width: STAGE_COL, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'sticky', left: PROJECT_COL, background: '#fff', zIndex: 2 }}>
                     {segments.map((segment, segmentIndex) => {
                       const segColor = stageMeta[segment.stage].color;
-                      const segPlanEnd = toMs(segment.deadline);
                       const segDone = Boolean(segment.completedAt);
-                      const segHasTime = Number.isFinite(segPlanEnd) && (() => { const d = new Date(segPlanEnd); return d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0; })();
-                      let segOverdue = false;
-                      let segAboutToExpire = false;
-                      if (!segDone && Number.isFinite(segPlanEnd)) {
-                        if (segHasTime) {
-                          segOverdue = segPlanEnd < now;
-                          segAboutToExpire = !segOverdue && now >= segPlanEnd - 24 * HOUR;
-                        } else {
-                          const nowD = new Date();
-                          const dlD = new Date(segPlanEnd);
-                          const sameDay = nowD.getFullYear() === dlD.getFullYear() && nowD.getMonth() === dlD.getMonth() && nowD.getDate() === dlD.getDate();
-                          const dlBeforeToday = (dlD.getFullYear() < nowD.getFullYear())
-                            || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() < nowD.getMonth())
-                            || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() === nowD.getMonth() && dlD.getDate() < nowD.getDate());
-                          segOverdue = dlBeforeToday;
-                          segAboutToExpire = !dlBeforeToday && sameDay;
-                        }
-                      }
-                      const dotColor = segOverdue ? '#ff4d4f' : segAboutToExpire ? '#faad14' : segColor;
+                      const dlStatus = segDone ? 'normal' : checkDeadlineStatus(segment.deadline, now);
+                      const dotColor = dlStatus === 'overdue' ? '#ff4d4f' : dlStatus === 'aboutToExpire' ? '#faad14' : segColor;
                       return (
                         <div
                           key={`${project.id}-${segment.stage}`}
@@ -603,25 +643,8 @@ const GanttChart: React.FC = () => {
                         : Number.isFinite(activityEnd) ? activityEnd : now;
                       const actualEnd = capActualEnd(start, rawActualEnd, now);
                       const hasPlan = Number.isFinite(planEnd);
-                      const hasTime = hasPlan && (() => { const d = new Date(planEnd); return d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0; })();
-                      let isOverdue = false;
-                      let isAboutToExpire = false;
-                      if (hasPlan && !isDone) {
-                        if (hasTime) {
-                          isOverdue = planEnd < now;
-                          isAboutToExpire = !isOverdue && now >= planEnd - 24 * HOUR;
-                        } else {
-                          const nowD = new Date();
-                          const dlD = new Date(planEnd);
-                          const sameDay = nowD.getFullYear() === dlD.getFullYear() && nowD.getMonth() === dlD.getMonth() && nowD.getDate() === dlD.getDate();
-                          const dlBeforeToday = (dlD.getFullYear() < nowD.getFullYear())
-                            || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() < nowD.getMonth())
-                            || (dlD.getFullYear() === nowD.getFullYear() && dlD.getMonth() === nowD.getMonth() && dlD.getDate() < nowD.getDate());
-                          isOverdue = dlBeforeToday;
-                          isAboutToExpire = !dlBeforeToday && sameDay;
-                        }
-                      }
-                      const color = isOverdue ? '#ff4d4f' : isAboutToExpire ? '#faad14' : baseColor;
+                      const dlStatus = (hasPlan && !isDone) ? checkDeadlineStatus(segment.deadline, now) : 'normal';
+                      const color = dlStatus === 'overdue' ? '#ff4d4f' : dlStatus === 'aboutToExpire' ? '#faad14' : baseColor;
                       const actualBarEnd = Math.max(start, actualEnd);
                       const actualVisible = visible(start, actualBarEnd, view.start, view.span);
                       const stripeAngle = getStripeAngle(projectIndex, segmentIndex);
@@ -636,7 +659,7 @@ const GanttChart: React.FC = () => {
                       {actualVisible && (
                         <Tooltip
                           overlayStyle={{ pointerEvents: 'none' }}
-                          title={`${segment.label}：${fmtDate(start)} → ${fmtDate(actualEnd)}${isDone ? '（已完成）' : isOverdue ? '（逾期）' : '（进行中）'}${hasPlan ? ` | 计划截止 ${fmtDate(planEnd)}` : ''}`}
+                          title={`${segment.label}：${fmtDate(start)} → ${fmtDate(actualEnd)}${isDone ? '（已完成）' : dlStatus === 'overdue' ? '（逾期）' : '（进行中）'}${hasPlan ? ` | 计划截止 ${fmtDate(planEnd)}` : ''}`}
                         >
                           <div
                             className="gantt-bar"
@@ -651,12 +674,12 @@ const GanttChart: React.FC = () => {
                               background: stripeBg(color, stripeAngle, '80'),
                               overflow: 'hidden',
                               zIndex: 3,
-                              animationDelay: `${Math.min(segmentIndex * 45, 180)}ms`,
+                              animationDelay: `${Math.min(projectIndex * 80 + segmentIndex * 40, 400)}ms`,
                             }}
                           >
 
 
-                            {hasPlan && isOverdue && planEnd <= actualBarEnd && actualBarEnd > start && (
+                            {hasPlan && dlStatus === 'overdue' && planEnd <= actualBarEnd && actualBarEnd > start && (
                               <WarningOutlined
                                 style={{
                                   position: 'absolute',
@@ -695,3 +718,4 @@ const GanttChart: React.FC = () => {
 };
 
 export default GanttChart;
+

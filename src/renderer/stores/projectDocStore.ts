@@ -27,17 +27,20 @@ export const useProjectDocStore = create<ProjectDocState>((set, get) => ({
   },
 
   addProjectDoc: async (doc) => {
-    const newDocs = [...get().projectDocs, doc];
+    const prev = get().projectDocs;
+    const newDocs = [...prev, doc];
     set({ projectDocs: newDocs });
     try {
       await window.electronAPI.saveProjectDoc(doc);
     } catch (error) {
       console.error('Failed to save project doc:', error);
+      set({ projectDocs: prev });
     }
   },
 
   updateProjectDoc: async (id, updates) => {
-    const docs = get().projectDocs.map(d =>
+    const prev = get().projectDocs;
+    const docs = prev.map(d =>
       d.id === id ? { ...d, ...updates } : d
     );
     set({ projectDocs: docs });
@@ -47,17 +50,20 @@ export const useProjectDocStore = create<ProjectDocState>((set, get) => ({
         await window.electronAPI.saveProjectDoc(updated);
       } catch (error) {
         console.error('Failed to update project doc:', error);
+        set({ projectDocs: prev });
       }
     }
   },
 
   deleteProjectDoc: async (id) => {
-    const newDocs = get().projectDocs.filter(d => d.id !== id);
+    const prev = get().projectDocs;
+    const newDocs = prev.filter(d => d.id !== id);
     set({ projectDocs: newDocs });
     try {
       await window.electronAPI.deleteProjectDoc(id);
     } catch (error) {
       console.error('Failed to delete project doc:', error);
+      set({ projectDocs: prev });
     }
   },
 }));

@@ -56,6 +56,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     try {
       const projects = await window.electronAPI.loadProjects();
       set(options?.silent ? { projects } : { projects, isLoading: false });
+      // 后台刷新目录修改时间（不阻塞加载，结果回来后静默更新 store）
+      const projectIds = projects.map(p => p.id);
+      void window.electronAPI.refreshProjectFolderModifiedAt(projectIds).then(updates => {
+        if (!updates.length) return;
+        const current = get().projects;
+        const merged = current.map(p => {
+          const u = updates.find(u => u.id === p.id);
+          return u ? { ...p, folderModifiedAt: u.folderModifiedAt } : p;
+        });
+        set({ projects: merged });
+      }).catch(() => {});
     } catch (error) {
       console.error('Failed to load projects:', error);
       if (!options?.silent) set({ isLoading: false });
@@ -63,12 +74,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   addProject: async (project) => {
-    const newProjects = [...get().projects, project];
+    const prev = get().projects;
+    const newProjects = [...prev, project];
     set({ projects: newProjects });
     try {
       await window.electronAPI.saveProject(project);
     } catch (error) {
       console.error('Failed to save project:', error);
+      set({ projects: prev });
     }
   },
 
@@ -84,27 +97,37 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setPendingWorkflowFocus: (focus) => set({ pendingWorkflowFocus: focus }),
 
   updateProject: async (id, updates) => {
-    const projects = get().projects.map((p) =>
+    const prev = get().projects;
+    const projects = prev.map((p) =>
       p.id === id ? { ...p, ...updates, updatedAt: new Date().toISOString() } : p
     );
-    set({ projects });
+    const currentProject = get().currentProject;
+    set({
+      projects,
+      currentProject: currentProject?.id === id
+        ? { ...currentProject, ...updates, updatedAt: new Date().toISOString() }
+        : currentProject,
+    });
     const updatedProject = projects.find(p => p.id === id);
     if (updatedProject) {
       try {
         await window.electronAPI.saveProject(updatedProject);
       } catch (error) {
         console.error('Failed to update project:', error);
+        set({ projects: prev });
       }
     }
   },
 
   deleteProject: async (id) => {
-    const newProjects = get().projects.filter((p) => p.id !== id);
+    const prev = get().projects;
+    const newProjects = prev.filter((p) => p.id !== id);
     set({ projects: newProjects });
     try {
       await window.electronAPI.deleteProject(id);
     } catch (error) {
       console.error('Failed to delete project:', error);
+      set({ projects: prev });
     }
   },
 

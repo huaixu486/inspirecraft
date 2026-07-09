@@ -40,9 +40,26 @@ import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
+import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
 import { WritingTemplate, TemplateNode, StageConfig, TemplateOutputFileType, TemplateFormatRules } from '../../../shared/types';
 import { getAllStages, getGlobalStageProgress } from '../../utils/timelineStages';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
+import {
+  mapTemplateNodes,
+  removeTemplateNodeById,
+  canMoveTemplateNode,
+  moveTemplateNodeById,
+  collectTemplateNodeMoveAvailability,
+  flattenTemplateNodeRows,
+  flattenVisibleTemplateNodeRows,
+  findTemplateNodeAncestorIds,
+  collectTemplateNodeIdsByLevel,
+  collectCollapsibleTemplateNodeIds,
+  countSelectedTemplateNodesWithChildren,
+  removeTemplateNodesByIds,
+  rebuildTemplateTree,
+  findEmptyNodeTitle,
+} from './templateNodeUtils';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -1846,154 +1863,6 @@ function buildCommonExampleTemplateNodes(sourceNodes: TemplateNode[], files: Imp
   };
 }
 
-function mapTemplateNodes(nodes: TemplateNode[], id: string, updater: (node: TemplateNode) => TemplateNode): TemplateNode[] {
-  return nodes.map(node => {
-    if (node.id === id) return updater(node);
-    if (node.children?.length) {
-      return { ...node, children: mapTemplateNodes(node.children, id, updater) };
-    }
-    return node;
-  });
-}
-
-function removeTemplateNodeById(nodes: TemplateNode[], id: string): TemplateNode[] {
-  return nodes
-    .filter(node => node.id !== id)
-    .map(node => node.children?.length
-      ? { ...node, children: removeTemplateNodeById(node.children, id) }
-      : node);
-}
-
-function canMoveTemplateNode(nodes: TemplateNode[], id: string, direction: 'up' | 'down'): boolean {
-  const index = nodes.findIndex(node => node.id === id);
-  if (index >= 0) {
-    return direction === 'up' ? index > 0 : index < nodes.length - 1;
-  }
-  return nodes.some(node => node.children?.length && canMoveTemplateNode(node.children, id, direction));
-}
-
-function moveTemplateNodeById(nodes: TemplateNode[], id: string, direction: 'up' | 'down'): TemplateNode[] {
-  const index = nodes.findIndex(node => node.id === id);
-  if (index >= 0) {
-    const newIndex = direction === 'up' ? index - 1 : index + 1;
-    if (newIndex < 0 || newIndex >= nodes.length) return nodes;
-    const updated = [...nodes];
-    [updated[index], updated[newIndex]] = [updated[newIndex], updated[index]];
-    return updated;
-  }
-
-  return nodes.map(node => node.children?.length
-    ? { ...node, children: moveTemplateNodeById(node.children, id, direction) }
-    : node);
-}
-
-function collectTemplateNodeMoveAvailability(nodes: TemplateNode[]): { up: Set<string>; down: Set<string> } {
-  const up = new Set<string>();
-  const down = new Set<string>();
-  const visit = (items: TemplateNode[]) => {
-    items.forEach((node, index) => {
-      if (index > 0) up.add(node.id);
-      if (index < items.length - 1) down.add(node.id);
-      if (node.children?.length) visit(node.children);
-    });
-  };
-  visit(nodes);
-  return { up, down };
-}
-
-function flattenTemplateNodeRows(nodes: TemplateNode[], depth = 0): Array<{ node: TemplateNode; depth: number }> {
-  return nodes.flatMap(node => [
-    { node, depth },
-    ...(node.children?.length ? flattenTemplateNodeRows(node.children, depth + 1) : []),
-  ]);
-}
-
-function flattenVisibleTemplateNodeRows(nodes: TemplateNode[], collapsedIds: Set<string>, depth = 0): Array<{ node: TemplateNode; depth: number }> {
-  return nodes.flatMap(node => [
-    { node, depth },
-    ...(node.children?.length && !collapsedIds.has(node.id) ? flattenVisibleTemplateNodeRows(node.children, collapsedIds, depth + 1) : []),
-  ]);
-}
-
-function findTemplateNodeAncestorIds(nodes: TemplateNode[], targetId: string, trail: string[] = []): string[] | null {
-  for (const node of nodes) {
-    if (node.id === targetId) return trail;
-    if (node.children?.length) {
-      const found = findTemplateNodeAncestorIds(node.children, targetId, [...trail, node.id]);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
-function collectTemplateNodeIdsByLevel(nodes: TemplateNode[], levels: number[]): string[] {
-  const allowed = new Set(levels);
-  const ids: string[] = [];
-  const visit = (items: TemplateNode[]) => {
-    items.forEach(node => {
-      if (allowed.has(node.level)) ids.push(node.id);
-      if (node.children?.length) visit(node.children);
-    });
-  };
-  visit(nodes);
-  return ids;
-}
-
-function collectCollapsibleTemplateNodeIds(nodes: TemplateNode[]): Set<string> {
-  const ids = new Set<string>();
-  const visit = (items: TemplateNode[]) => {
-    items.forEach(node => {
-      if (node.children?.length) {
-        ids.add(node.id);
-        visit(node.children);
-      }
-    });
-  };
-  visit(nodes);
-  return ids;
-}
-
-function countSelectedTemplateNodesWithChildren(nodes: TemplateNode[], selectedIds: Set<string>, parentSelected = false): number {
-  return nodes.reduce((count, node) => {
-    const selected = parentSelected || selectedIds.has(node.id);
-    return count + (selected ? 1 : 0) + (node.children?.length ? countSelectedTemplateNodesWithChildren(node.children, selectedIds, selected) : 0);
-  }, 0);
-}
-
-function removeTemplateNodesByIds(nodes: TemplateNode[], selectedIds: Set<string>): TemplateNode[] {
-  return nodes
-    .filter(node => !selectedIds.has(node.id))
-    .map(node => node.children?.length ? { ...node, children: removeTemplateNodesByIds(node.children, selectedIds) } : node);
-}
-
-function rebuildTemplateTree(nodes: TemplateNode[]): TemplateNode[] {
-  const roots: TemplateNode[] = [];
-  const stack: TemplateNode[] = [];
-  nodes.forEach(source => {
-    const node: TemplateNode = { ...source, children: undefined };
-    while (stack.length && stack[stack.length - 1].level >= node.level) {
-      stack.pop();
-    }
-    const parent = stack[stack.length - 1];
-    if (parent) {
-      if (!parent.children) parent.children = [];
-      parent.children.push(node);
-    } else {
-      roots.push(node);
-    }
-    stack.push(node);
-  });
-  return roots;
-}
-
-function findEmptyNodeTitle(nodes: TemplateNode[]): TemplateNode | undefined {
-  for (const node of nodes) {
-    if (!node.title.trim()) return node;
-    const child = node.children?.length ? findEmptyNodeTitle(node.children) : undefined;
-    if (child) return child;
-  }
-  return undefined;
-}
 
 const AI_EXTRACT_STALE_SECONDS = 300;
 
@@ -2463,7 +2332,7 @@ const TemplateManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
               onClick={(event) => event.stopPropagation()}
               onChange={(event) => {
                 if (!nodeVisible) return;
-                updateTemplateNodeSelection(node.id, event.target.checked, event.nativeEvent.shiftKey);
+                updateTemplateNodeSelection(node.id, event.target.checked, (event.nativeEvent as MouseEvent).shiftKey);
               }}
             />
             <span className="template-node-level">{nodeNumber.join('.')}</span>
@@ -2511,7 +2380,7 @@ const TemplateManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
                   title={nodeVisible ? '选择该筛选结果' : '仅作为层级上下文显示'}
                   onChange={(e) => {
                     if (!nodeVisible) return;
-                    updateTemplateNodeSelection(node.id, e.target.checked, e.nativeEvent.shiftKey);
+                    updateTemplateNodeSelection(node.id, e.target.checked, (e.nativeEvent as MouseEvent).shiftKey);
                   }}
                 />
                 {hasChildren ? (
@@ -2736,8 +2605,50 @@ ${content.slice(0, 22000)}`;
 `;
     const prompt = `${currentType === 'example' ? examplePrompt : directPrompt}${strictJsonInstruction}`;
 
-    const response = await window.electronAPI.callAI(prompt);
+    const aiConfig = await window.electronAPI.loadAIConfig();
+    const useParallel = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1 && window.electronAPI.callAIParallelDetails;
+    let response = '';
+    let parallelEvidence: string[] = [];
+    if (useParallel) {
+      const details = await useAIJobStore.getState().runAIJob<{ synthesis: string; variants: Array<{ modelName: string; ok: boolean; output: string; error?: string }> }>(
+        {
+          scene: 'templateExtract',
+          title: 'AI 识别模板结构',
+          resultPreview: (value) => value.synthesis,
+        },
+        async ({ setProgress, throwIfCancelled }) => {
+          setProgress(35);
+          const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
+          throwIfCancelled();
+          setProgress(85);
+          return value;
+        },
+      );
+      response = details.synthesis;
+      parallelEvidence = details.variants.map(variant => variant.ok
+        ? `${variant.modelName}: \u5df2\u53c2\u4e0e\u6a21\u677f\u7ed3\u6784/\u683c\u5f0f\u8bc6\u522b`
+        : `${variant.modelName}: \u8bc6\u522b\u5931\u8d25\uff0c${variant.error || '\u65e0\u8fd4\u56de'}`
+      );
+    } else {
+      response = await useAIJobStore.getState().runAIJob<string>(
+        {
+          scene: 'templateExtract',
+          title: 'AI 识别模板结构',
+          resultPreview: (value) => value,
+        },
+        async ({ setProgress, throwIfCancelled }) => {
+          setProgress(35);
+          const value = await window.electronAPI.callAI(prompt);
+          throwIfCancelled();
+          setProgress(85);
+          return String(value || '');
+        },
+      );
+    }
     const aiResult = parseAiHeadingResponse(response);
+    if (parallelEvidence.length) {
+      aiResult.evidence = [...parallelEvidence, ...aiResult.evidence].slice(0, 16);
+    }
     if (aiResult.nodes.length === 0) {
       console.warn('[Template AI] Empty node result. Raw response preview:', String(response || '').slice(0, 1200));
     }

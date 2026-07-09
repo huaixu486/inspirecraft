@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+import React, { useState } from 'react';
 import {
   Card,
   Button,
@@ -113,6 +113,7 @@ const ProjectList: React.FC<Props> = ({ onEnterProject }) => {
         id: Date.now().toString(),
         name: values.name,
         description: values.description || '',
+        descriptionSource: values.description?.trim() ? 'manual' : 'auto',
         folderPath,
         status: 'active',
         progress: 0,
@@ -180,6 +181,7 @@ const ProjectList: React.FC<Props> = ({ onEnterProject }) => {
       id: Date.now().toString(),
       name: folderName,
       description: '',
+      descriptionSource: 'auto',
       folderPath,
       status: 'active',
       progress: 0,

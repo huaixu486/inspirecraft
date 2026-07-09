@@ -1,5 +1,6 @@
-﻿import { Project, ProjectDocument, StageConfig, WritingTemplate } from '../../shared/types';
+import { Project, ProjectDocument, StageConfig, WritingTemplate } from '../../shared/types';
 import { detectTimelineStage } from './timelineStages';
+import { buildLifecyclePatch, inferProjectDocumentLifecycle } from './documentLifecycle';
 
 interface ScannedStageFile {
   name: string;
@@ -22,6 +23,7 @@ interface SyncResult {
   matched: number;
   created: number;
   updated: number;
+  createdFileNames: string[];
 }
 
 const normalizePath = (value: string) => value.toLowerCase().replace(/\\/g, '/');
@@ -87,14 +89,15 @@ export const syncProjectStageFiles = async (
   project: Project,
   deps: SyncDeps,
 ): Promise<SyncResult> => {
-  if (!project.folderPath) return { matched: 0, created: 0, updated: 0 };
+  if (!project.folderPath) return { matched: 0, created: 0, updated: 0, createdFileNames: [] };
 
   const result = await window.electronAPI.scanStageFiles(project.folderPath);
-  if (!result.success) return { matched: 0, created: 0, updated: 0 };
+  if (!result.success) return { matched: 0, created: 0, updated: 0, createdFileNames: [] };
 
   const files = result.files.filter(f => hasStageKeyword(deps.allStages, f));
   let created = 0;
   let updated = 0;
+  const createdFileNames: string[] = [];
 
   for (const file of files) {
     const stage = detectTimelineStage(deps.allStages, file.name, file.path);
@@ -112,16 +115,17 @@ export const syncProjectStageFiles = async (
       sourceFileCreatedAt: file.createdAt,
       sourceFileModifiedAt: file.modifiedAt,
       autoStage: true,
-      completedAt: file.modifiedAt || file.createdAt,
     };
 
     if (existing) {
       const changed = existing.name !== file.name ||
         existing.sourceFileCreatedAt !== file.createdAt ||
-        existing.sourceFileModifiedAt !== file.modifiedAt ||
-        !existing.completedAt;
+        existing.sourceFileModifiedAt !== file.modifiedAt;
       if (changed) {
-        await deps.updateProjectDoc(existing.id, common);
+        await deps.updateProjectDoc(existing.id, {
+          ...common,
+          ...buildLifecyclePatch(existing.lifecycleStatus === 'imported' ? 'identified' : inferProjectDocumentLifecycle(existing)),
+        });
         updated += 1;
       }
       if (matchedTemplate?.id && existing.templateId !== matchedTemplate.id) {
@@ -138,11 +142,13 @@ export const syncProjectStageFiles = async (
       name: file.name,
       sections: [],
       overallProgress: 0,
+      ...buildLifecyclePatch('identified', file.modifiedAt || new Date().toISOString()),
       createdAt: file.createdAt,
       ...common,
     });
     created += 1;
+    createdFileNames.push(file.name);
   }
 
-  return { matched: files.length, created, updated };
+  return { matched: files.length, created, updated, createdFileNames };
 };

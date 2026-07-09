@@ -1,15 +1,597 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Notification } from 'electron';
 import { net } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
 import * as zlib from 'zlib';
-import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, AIModelConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode } from './types';
+import * as http from 'http';
+import * as dgram from 'dgram';
+import * as os from 'os';
+import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, AIModelConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode, StageMemoryEntry, ReferenceMaterial, PromptScene, PromptTemplate, SkillPackage, StructuredPrompt, PromptRule, OutputField } from './types';
+import {
+  checkWithinWorkspace,
+  checkAllWithinWorkspace,
+  checkParentWithinWorkspace,
+  checkSafeChildName,
+  checkPathInside,
+} from './shared/pathGuard';
+import {
+  appendAiLog,
+  loadAIConfigFromDisk,
+  saveAIConfigToDisk,
+  normalizeAIConfig,
+  getEnabledAIModels,
+  getActiveAIModel,
+  callDefaultAI,
+  callConfiguredAI,
+  callAIWithConfig,
+  callParallelAI,
+  callParallelAIDetails,
+  callAIModel,
+} from './services/aiService';
+import { composePromptMain } from './shared/promptComposer';
 import * as mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
 const JSZip = require('jszip');
 
 let mainWindow: BrowserWindow | null = null;
+const DEV_SERVER_URL = 'http://127.0.0.1:5173';
+const APP_USER_MODEL_ID = 'com.projecthub.desktop';
+const APP_DISPLAY_NAME = 'ProjectHub';
+let devReloadTimer: NodeJS.Timeout | null = null;
+let didEnsureWindowsNotificationShortcut = false;
+
+let collaborationServer: http.Server | null = null;
+let collaborationPort = 0;
+let collaborationDiscoverySocket: dgram.Socket | null = null;
+let collaborationDiscoveryTimer: NodeJS.Timeout | null = null;
+const COLLABORATION_DISCOVERY_PORT = 39219;
+const COLLABORATION_PEER_TTL_MS = 12000;
+const discoveredCollaborationPeers = new Map<string, LanPeerRecord>();
+
+type CollaborationTaskPayload = {
+  task?: TaskItem;
+  projectName?: string;
+  senderName?: string;
+  sentAt?: string;
+};
+
+type CollaborationFriend = {
+  id: string;
+  name: string;
+  nickname?: string;
+  email?: string;
+  deviceName?: string;
+  host: string;
+  port: number;
+  source: 'lan' | 'email' | 'nickname' | 'manual' | 'invite';
+  status: 'pending' | 'accepted' | 'blocked';
+  addedAt: string;
+  lastSeenAt?: string;
+  online?: boolean;
+};
+
+type CollaborationFriendRequest = {
+  id: string;
+  fromId: string;
+  fromName: string;
+  fromDeviceName?: string;
+  fromHost: string;
+  fromPort: number;
+  targetId?: string;
+  message?: string;
+  createdAt: string;
+  status: 'pending' | 'accepted' | 'rejected';
+};
+
+type LanPeerRecord = {
+  id: string;
+  name: string;
+  deviceName?: string;
+  host: string;
+  port: number;
+  lastSeenAt: string;
+};
+
+type CollaborationFileSendParams = {
+  endpoint?: string;
+  friendId?: string;
+  filePath: string;
+  projectName?: string;
+  senderName?: string;
+};
+
+function getLanAddresses() {
+  const addresses: string[] = [];
+  const interfaces = os.networkInterfaces();
+  Object.values(interfaces).forEach(items => {
+    (items || []).forEach(item => {
+      if (item.family === 'IPv4' && !item.internal) addresses.push(item.address);
+    });
+  });
+  return addresses;
+}
+
+function readRequestBody(req: http.IncomingMessage) {
+  return new Promise<string>((resolve, reject) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 1024 * 1024) {
+        reject(new Error('Payload too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+function writeJson(res: http.ServerResponse, statusCode: number, payload: any) {
+  const body = JSON.stringify(payload);
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.end(body);
+}
+
+function getLocalCollaborationIdentity() {
+  ensureDataDir();
+  try {
+    if (fs.existsSync(collaborationIdentityFile)) {
+      const saved = JSON.parse(fs.readFileSync(collaborationIdentityFile, 'utf-8'));
+      if (saved?.id) return saved as { id: string; name: string; deviceName: string };
+    }
+  } catch {}
+  const identity = {
+    id: 'peer-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
+    name: os.userInfo().username || os.hostname() || APP_DISPLAY_NAME,
+    deviceName: os.hostname() || APP_DISPLAY_NAME,
+  };
+  fs.writeFileSync(collaborationIdentityFile, JSON.stringify(identity, null, 2), 'utf-8');
+  return identity;
+}
+
+function isPeerOnline(lastSeenAt?: string) {
+  if (!lastSeenAt) return false;
+  return Date.now() - new Date(lastSeenAt).getTime() < COLLABORATION_PEER_TTL_MS;
+}
+
+function loadCollaborationFriendsFromDisk(): CollaborationFriend[] {
+  ensureDataDir();
+  if (!fs.existsSync(collaborationFriendsFile)) return [];
+  try {
+    const rows = JSON.parse(fs.readFileSync(collaborationFriendsFile, 'utf-8'));
+    if (!Array.isArray(rows)) return [];
+    return rows.filter(item => item?.id && item?.host && item?.port).map(item => ({
+      id: String(item.id),
+      name: String(item.name || item.deviceName || item.host),
+      nickname: item.nickname ? String(item.nickname) : undefined,
+      email: item.email ? String(item.email) : undefined,
+      deviceName: item.deviceName ? String(item.deviceName) : undefined,
+      host: String(item.host),
+      port: Number(item.port) || 39218,
+      source: (item.source || 'lan') as CollaborationFriend['source'],
+      status: (item.status || 'accepted') as CollaborationFriend['status'],
+      addedAt: String(item.addedAt || new Date().toISOString()),
+      lastSeenAt: item.lastSeenAt ? String(item.lastSeenAt) : undefined,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function saveCollaborationFriendsToDisk(friends: CollaborationFriend[]) {
+  ensureDataDir();
+  fs.writeFileSync(collaborationFriendsFile, JSON.stringify(friends, null, 2), 'utf-8');
+}
+
+function getCollaborationPeers() {
+  const friends = loadCollaborationFriendsFromDisk();
+  const friendIds = new Set(friends.map(friend => friend.id));
+  const localId = getLocalCollaborationIdentity().id;
+  return Array.from(discoveredCollaborationPeers.values())
+    .filter(peer => peer.id !== localId)
+    .map(peer => ({ ...peer, online: isPeerOnline(peer.lastSeenAt), added: friendIds.has(peer.id) }))
+    .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+}
+
+function getCollaborationFriends() {
+  const discovered = new Map(Array.from(discoveredCollaborationPeers.values()).map(peer => [peer.id, peer]));
+  return loadCollaborationFriendsFromDisk().map(friend => {
+    const live = discovered.get(friend.id);
+    return {
+      ...friend,
+      host: live?.host || friend.host,
+      port: live?.port || friend.port,
+      lastSeenAt: live?.lastSeenAt || friend.lastSeenAt,
+      online: isPeerOnline(live?.lastSeenAt || friend.lastSeenAt),
+    };
+  }).sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+}
+
+function emitCollaborationPeersChanged() {
+  mainWindow?.webContents.send('collaboration:peersChanged', {
+    peers: getCollaborationPeers(),
+    friends: getCollaborationFriends(),
+  });
+}
+
+function sendCollaborationDiscoveryBeat() {
+  if (!collaborationDiscoverySocket || !collaborationPort) return;
+  const identity = getLocalCollaborationIdentity();
+  const payload = Buffer.from(JSON.stringify({
+    type: 'projecthub:hello',
+    id: identity.id,
+    name: identity.name,
+    deviceName: identity.deviceName,
+    port: collaborationPort,
+    app: APP_DISPLAY_NAME,
+    sentAt: new Date().toISOString(),
+  }));
+  collaborationDiscoverySocket.send(payload, 0, payload.length, COLLABORATION_DISCOVERY_PORT, '255.255.255.255', () => {});
+}
+
+function startCollaborationDiscovery() {
+  if (collaborationDiscoverySocket) return;
+  try {
+    const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    socket.on('message', (message, rinfo) => {
+      try {
+        const payload = JSON.parse(message.toString('utf8'));
+        if (payload?.type !== 'projecthub:hello' || !payload.id || payload.id === getLocalCollaborationIdentity().id) return;
+        const peer: LanPeerRecord = {
+          id: String(payload.id),
+          name: String(payload.name || payload.deviceName || rinfo.address),
+          deviceName: payload.deviceName ? String(payload.deviceName) : undefined,
+          host: rinfo.address,
+          port: Number(payload.port) || 39218,
+          lastSeenAt: new Date().toISOString(),
+        };
+        discoveredCollaborationPeers.set(peer.id, peer);
+        emitCollaborationPeersChanged();
+      } catch {}
+    });
+    socket.on('error', () => { stopCollaborationDiscovery(); });
+    socket.bind(COLLABORATION_DISCOVERY_PORT, () => {
+      try { socket.setBroadcast(true); } catch {}
+      sendCollaborationDiscoveryBeat();
+      collaborationDiscoveryTimer = setInterval(sendCollaborationDiscoveryBeat, 3000);
+    });
+    collaborationDiscoverySocket = socket;
+  } catch {}
+}
+
+function stopCollaborationDiscovery() {
+  if (collaborationDiscoveryTimer) clearInterval(collaborationDiscoveryTimer);
+  collaborationDiscoveryTimer = null;
+  if (collaborationDiscoverySocket) {
+    try { collaborationDiscoverySocket.close(); } catch {}
+  }
+  collaborationDiscoverySocket = null;
+}
+
+function resolveCollaborationTarget(params: { endpoint?: string; friendId?: string }) {
+  if (params.endpoint) return normalizeCollaborationEndpoint(params.endpoint);
+  if (!params.friendId) throw new Error('Missing collaboration target');
+  const friend = getCollaborationFriends().find(item => item.id === params.friendId);
+  if (!friend) throw new Error('Friend not found');
+  const url = new URL('http://' + friend.host + ':' + friend.port);
+  url.pathname = '/tasks';
+  return url;
+}
+
+function sanitizeTransferFileName(name: string) {
+  const value = path.basename(String(name || 'file')).replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
+  return value || 'file';
+}
+
+function getUniqueTransferPath(targetPath: string) {
+  if (!fs.existsSync(targetPath)) return targetPath;
+  const ext = path.extname(targetPath);
+  const base = targetPath.slice(0, targetPath.length - ext.length);
+  let index = 1;
+  while (fs.existsSync(base + ' (' + index + ')' + ext)) index += 1;
+  return base + ' (' + index + ')' + ext;
+}
+
+function getIncomingFilesDir() {
+  const dir = path.join(app.getPath('downloads'), 'ProjectHub Received');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function saveIncomingCollaborationFile(req: http.IncomingMessage, requestUrl: URL) {
+  const headerName = Array.isArray(req.headers['x-projecthub-file-name']) ? req.headers['x-projecthub-file-name'][0] : req.headers['x-projecthub-file-name'];
+  const fileName = sanitizeTransferFileName(decodeURIComponent(String(headerName || requestUrl.searchParams.get('name') || 'file')));
+  const senderName = decodeURIComponent(String(req.headers['x-projecthub-sender-name'] || requestUrl.searchParams.get('senderName') || ''));
+  const projectName = decodeURIComponent(String(req.headers['x-projecthub-project-name'] || requestUrl.searchParams.get('projectName') || ''));
+  const finalPath = getUniqueTransferPath(path.join(getIncomingFilesDir(), fileName));
+  const tempPath = finalPath + '.part-' + Date.now();
+  return new Promise<{ filePath: string; fileName: string; size: number }>((resolve, reject) => {
+    let size = 0;
+    const output = fs.createWriteStream(tempPath);
+    req.on('data', chunk => { size += Buffer.byteLength(chunk); });
+    req.on('error', reject);
+    output.on('error', reject);
+    output.on('finish', () => {
+      try {
+        fs.renameSync(tempPath, finalPath);
+        const payload = { filePath: finalPath, fileName, size, senderName, projectName, receivedAt: new Date().toISOString() };
+        mainWindow?.webContents.send('collaboration:fileReceived', payload);
+        resolve({ filePath: finalPath, fileName, size });
+      } catch (error) {
+        reject(error);
+      }
+    });
+    req.pipe(output);
+  }).catch(error => {
+    try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}
+    throw error;
+  });
+}
+
+function sendFileToPeer(params: CollaborationFileSendParams) {
+  const stat = fs.statSync(params.filePath);
+  if (stat.isDirectory()) throw new Error('Folder transfer is not supported yet');
+  const url = resolveCollaborationTarget(params);
+  url.pathname = '/files';
+  const fileName = path.basename(params.filePath);
+  return new Promise<any>((resolve, reject) => {
+    const req = http.request({
+      hostname: url.hostname,
+      port: url.port || 80,
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': stat.size,
+        'X-ProjectHub-File-Name': encodeURIComponent(fileName),
+        'X-ProjectHub-Sender-Name': encodeURIComponent(params.senderName || os.userInfo().username || APP_DISPLAY_NAME),
+        'X-ProjectHub-Project-Name': encodeURIComponent(params.projectName || ''),
+      },
+    }, res => {
+      let response = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { response += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(response || '{}');
+          if (res.statusCode && res.statusCode >= 400) reject(new Error(parsed.error || 'HTTP ' + res.statusCode));
+          else resolve(parsed);
+        } catch {
+          if (res.statusCode && res.statusCode >= 400) reject(new Error('HTTP ' + res.statusCode));
+          else resolve({ success: true, raw: response });
+        }
+      });
+    });
+    req.on('error', reject);
+    fs.createReadStream(params.filePath).on('error', reject).pipe(req);
+  });
+}
+
+function normalizeCollaborationEndpoint(endpoint: string) {
+  const value = String(endpoint || '').trim();
+  if (!value) throw new Error('Peer address is empty');
+  const withProtocol = /^https?:\/\//i.test(value) ? value : `http://${value}`;
+  const url = new URL(withProtocol);
+  if (!url.pathname || url.pathname === '/') url.pathname = '/tasks';
+  return url;
+}
+
+function saveIncomingCollaborationTask(payload: CollaborationTaskPayload) {
+  if (!payload.task) throw new Error('Missing task payload');
+  const now = new Date().toISOString();
+  const incoming = payload.task;
+  const senderLine = payload.senderName || payload.projectName
+    ? `\n\n[LAN] From ${payload.senderName || 'ProjectHub'}${payload.projectName ? ` / ${payload.projectName}` : ''}`
+    : '';
+  const task: TaskItem = {
+    ...incoming,
+    id: `lan-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    status: 'pending',
+    assigneeName: incoming.assigneeName || os.userInfo().username || 'Local user',
+    description: `${incoming.description || ''}${senderLine}`.trim(),
+    createdAt: now,
+    completedAt: undefined,
+    result: undefined,
+  };
+  const tasks = loadTasksFromDisk();
+  saveTasksToDisk([...tasks, task]);
+  mainWindow?.webContents.send('collaboration:taskReceived', {
+    task,
+    projectName: payload.projectName || '',
+    senderName: payload.senderName || '',
+    sentAt: payload.sentAt || now,
+  });
+  return task;
+}
+
+function createCollaborationHttpServer() {
+  return http.createServer(async (req, res) => {
+    try {
+      if (req.method === 'OPTIONS') return writeJson(res, 200, { success: true });
+      if (req.method === 'GET' && (req.url === '/status' || req.url === '/')) {
+        return writeJson(res, 200, { success: true, app: APP_DISPLAY_NAME, port: collaborationPort });
+      }
+      const requestUrl = new URL(req.url || '/', 'http://' + (req.headers.host || 'localhost'));
+      if (req.method === 'POST' && requestUrl.pathname === '/files') {
+        const file = await saveIncomingCollaborationFile(req, requestUrl);
+        return writeJson(res, 200, { success: true, file });
+      }
+      if (req.method === 'POST' && requestUrl.pathname === '/friend-request') {
+        const body = await readRequestBody(req);
+        const payload = JSON.parse(body || '{}');
+        // 保存收到的好友请求
+        const requests = loadFriendRequestsFromDisk();
+        const existing = requests.find(r => r.fromId === payload.fromId && r.status === 'pending');
+        if (!existing) {
+          const request: CollaborationFriendRequest = {
+            id: `req-${Date.now()}-${payload.fromId}`,
+            fromId: payload.fromId,
+            fromName: payload.fromName || payload.fromDeviceName || 'Unknown',
+            fromDeviceName: payload.fromDeviceName,
+            fromHost: payload.fromHost || req.socket.remoteAddress || '',
+            fromPort: payload.fromPort || 0,
+            message: payload.message,
+            createdAt: new Date().toISOString(),
+            status: 'pending',
+          };
+          saveFriendRequestsToDisk([request, ...requests]);
+          mainWindow?.webContents.send('collaboration:friendRequestReceived', request);
+        }
+        return writeJson(res, 200, { success: true });
+      }
+      if (req.method !== 'POST' || !String(req.url || '').startsWith('/tasks')) {
+        return writeJson(res, 404, { success: false, error: 'Not found' });
+      }
+      const body = await readRequestBody(req);
+      const payload = JSON.parse(body || '{}') as CollaborationTaskPayload;
+      const task = saveIncomingCollaborationTask(payload);
+      return writeJson(res, 200, { success: true, taskId: task.id });
+    } catch (error: any) {
+      return writeJson(res, 400, { success: false, error: error?.message || String(error) });
+    }
+  });
+}
+
+function listenCollaborationServer(server: http.Server, port: number) {
+  return new Promise<number>((resolve, reject) => {
+    const onError = (error: any) => reject(error);
+    server.once('error', onError);
+    server.listen(port, '0.0.0.0', () => {
+      server.off('error', onError);
+      const address = server.address();
+      resolve(typeof address === 'object' && address ? address.port : port);
+    });
+  });
+}
+
+async function startCollaborationServer(preferredPort = 39218) {
+  if (collaborationServer) {
+    startCollaborationDiscovery();
+    return {
+      success: true,
+      port: collaborationPort,
+      addresses: getLanAddresses(),
+      urls: getLanAddresses().map(address => `http://${address}:${collaborationPort}/tasks`),
+      peers: getCollaborationPeers(),
+      friends: getCollaborationFriends(),
+    };
+  }
+
+  let server = createCollaborationHttpServer();
+  try {
+    collaborationPort = await listenCollaborationServer(server, preferredPort);
+  } catch (firstError: any) {
+    try {
+      server.close();
+    } catch {}
+    server = createCollaborationHttpServer();
+    try {
+      collaborationPort = await listenCollaborationServer(server, 0);
+    } catch (secondError: any) {
+      throw new Error(secondError?.message || firstError?.message || 'Failed to start LAN receiver');
+    }
+  }
+
+  collaborationServer = server;
+  startCollaborationDiscovery();
+  return {
+    success: true,
+    port: collaborationPort,
+    addresses: getLanAddresses(),
+    urls: getLanAddresses().map(address => `http://${address}:${collaborationPort}/tasks`),
+    peers: getCollaborationPeers(),
+    friends: getCollaborationFriends(),
+  };
+}
+
+function stopCollaborationServer() {
+  return new Promise<{ success: boolean; error?: string }>((resolve) => {
+    if (!collaborationServer) return resolve({ success: true });
+    collaborationServer.close((error) => {
+      collaborationServer = null;
+      collaborationPort = 0;
+      stopCollaborationDiscovery();
+      resolve(error ? { success: false, error: error.message } : { success: true });
+    });
+  });
+}
+
+function postJsonToPeer(endpoint: string, payload: any) {
+  const url = normalizeCollaborationEndpoint(endpoint);
+  const body = JSON.stringify(payload);
+  return new Promise<any>((resolve, reject) => {
+    const req = http.request({
+      hostname: url.hostname,
+      port: url.port || 80,
+      path: `${url.pathname}${url.search}`,
+      method: 'POST',
+      timeout: 8000,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, res => {
+      let response = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { response += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(response || '{}');
+          if (res.statusCode && res.statusCode >= 400) reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+          else resolve(parsed);
+        } catch {
+          if (res.statusCode && res.statusCode >= 400) reject(new Error(`HTTP ${res.statusCode}`));
+          else resolve({ success: true, raw: response });
+        }
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error('Connection timeout'));
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
+
+function getWindowsNotificationShortcutPath() {
+  const appData = app.getPath('appData');
+  return path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', `${APP_DISPLAY_NAME}.lnk`);
+}
+
+function ensureWindowsNotificationShortcut() {
+  if (process.platform !== 'win32') return { success: true, skipped: true };
+  try {
+    const shortcutPath = getWindowsNotificationShortcutPath();
+    fs.mkdirSync(path.dirname(shortcutPath), { recursive: true });
+    const target = process.execPath;
+    const appPath = app.getAppPath();
+    const args = app.isPackaged ? '' : `"${appPath}"`;
+    const ok = shell.writeShortcutLink(shortcutPath, 'replace', {
+      target,
+      args,
+      cwd: app.isPackaged ? path.dirname(process.execPath) : appPath,
+      description: APP_DISPLAY_NAME,
+      appUserModelId: APP_USER_MODEL_ID,
+      icon: process.execPath,
+      iconIndex: 0,
+    });
+    didEnsureWindowsNotificationShortcut = ok;
+    return { success: ok, shortcutPath, appUserModelId: APP_USER_MODEL_ID };
+  } catch (error: any) {
+    console.warn('Failed to ensure Windows notification shortcut:', error?.message || error);
+    return { success: false, error: error?.message || String(error), appUserModelId: APP_USER_MODEL_ID };
+  }
+}
 
 // 文件夹监听器
 const folderWatchers: Map<string, fs.FSWatcher> = new Map();
@@ -23,52 +605,18 @@ const templatesFile = path.join(dataDir, 'templates.json');
 const reviewsFile = path.join(dataDir, 'reviews.json');
 const aiConfigFile = path.join(dataDir, 'ai-config.json');
 const tasksFile = path.join(dataDir, 'tasks.json');
+const collaborationFriendsFile = path.join(dataDir, 'collaboration-friends.json');
+const collaborationRequestsFile = path.join(dataDir, 'collaboration-requests.json');
+const collaborationIdentityFile = path.join(dataDir, 'collaboration-identity.json');
 const settingsFile = path.join(dataDir, 'settings.json');
 const projectDocsFile = path.join(dataDir, 'project-documents.json');
+const stageMemoriesFile = path.join(dataDir, 'stage-memories.json');
+const referenceMaterialsFile = path.join(dataDir, 'reference-materials.json');
+const promptTemplatesFile = path.join(dataDir, 'prompt-templates.json');
+const skillPackagesFile = path.join(dataDir, 'skill-packages.json');
 const templateFilesDir = path.join(dataDir, 'template-files');
 const logsDir = path.join(userDataPath, 'logs');
 const aiLogFile = path.join(logsDir, 'ai.log');
-
-function createSafeLogReplacer() {
-  const seen = new WeakSet<object>();
-  return (key: string, value: any) => {
-    if (/api[-_]?key|authorization|token|secret/i.test(key)) return '[redacted]';
-    if (value instanceof Error) {
-      return {
-        name: value.name,
-        message: value.message,
-        stack: value.stack?.split('\n').slice(0, 6).join('\n'),
-      };
-    }
-    if (typeof value === 'string') {
-      return value.length > 1200 ? value.slice(0, 1200) + '...[truncated]' : value;
-    }
-    if (value && typeof value === 'object') {
-      if (seen.has(value)) return '[circular]';
-      seen.add(value);
-    }
-    return value;
-  };
-}
-
-function formatAiLogValue(value: any, maxLength = 2400): string {
-  try {
-    const raw = typeof value === 'string' ? value : JSON.stringify(value, createSafeLogReplacer());
-    return String(raw || '').replace(/\s+/g, ' ').slice(0, maxLength);
-  } catch {
-    return String(value || '').replace(/\s+/g, ' ').slice(0, maxLength);
-  }
-}
-
-function appendAiLog(event: string, data?: any) {
-  try {
-    fs.mkdirSync(logsDir, { recursive: true });
-    const payload = data === undefined ? '' : ' ' + formatAiLogValue(data);
-    fs.appendFileSync(aiLogFile, '[' + new Date().toISOString() + '] ' + event + payload + '\n', 'utf-8');
-  } catch {
-    // Logging must never break the AI request flow.
-  }
-}
 
 // 确保数据目录存在
 function ensureDataDir() {
@@ -157,81 +705,6 @@ function saveReviewsToDisk(reviews: ReviewResult[]) {
   fs.writeFileSync(reviewsFile, JSON.stringify(reviews, null, 2), 'utf-8');
 }
 
-// 读取 AI 配置
-function loadAIConfigFromDisk(): AIConfig | null {
-  ensureDataDir();
-  if (!fs.existsSync(aiConfigFile)) {
-    return null;
-  }
-  try {
-    const data = fs.readFileSync(aiConfigFile, 'utf-8');
-    return normalizeAIConfig(JSON.parse(data));
-  } catch {
-    return null;
-  }
-}
-
-// 保存 AI 配置到磁盘
-function saveAIConfigToDisk(config: AIConfig) {
-  ensureDataDir();
-  fs.writeFileSync(aiConfigFile, JSON.stringify(normalizeAIConfig(config), null, 2), 'utf-8');
-}
-
-function normalizeAIConfig(config: AIConfig | null): AIConfig | null {
-  if (!config) return null;
-  if (Array.isArray(config.models) && config.models.length > 0) {
-    const models = config.models.map((model, index) => ({
-      ...model,
-      id: model.id || `model-${Date.now()}-${index}`,
-      name: model.name || model.model || `模型 ${index + 1}`,
-      enabled: model.enabled !== false,
-    }));
-    const activeModelId = config.activeModelId && models.some(model => model.id === config.activeModelId)
-      ? config.activeModelId
-      : models[0].id;
-    const parallelModelIds = (config.parallelModelIds || [activeModelId]).filter(id => models.some(model => model.id === id));
-    return {
-      models,
-      activeModelId,
-      parallelModelIds: parallelModelIds.length > 0 ? parallelModelIds : [activeModelId],
-      multiModelMode: config.multiModelMode || 'single',
-    };
-  }
-
-  if (config.provider && config.apiKey && config.model) {
-    const legacyModel: AIModelConfig = {
-      id: 'default',
-      name: config.model,
-      provider: config.provider,
-      apiKey: config.apiKey,
-      model: config.model,
-      endpoint: config.endpoint,
-      enabled: true,
-    };
-    return {
-      models: [legacyModel],
-      activeModelId: legacyModel.id,
-      parallelModelIds: [legacyModel.id],
-      multiModelMode: 'single',
-    };
-  }
-
-  return { models: [], multiModelMode: 'single' };
-}
-
-function getEnabledAIModels(config: AIConfig | null): AIModelConfig[] {
-  return normalizeAIConfig(config)?.models?.filter(model => model.enabled !== false && model.apiKey && model.model) || [];
-}
-
-function getActiveAIModel(config: AIConfig | null, modelId?: string): AIModelConfig | null {
-  const normalized = normalizeAIConfig(config);
-  const models = getEnabledAIModels(normalized);
-  if (models.length === 0) return null;
-  return models.find(model => model.id === modelId)
-    || models.find(model => model.id === normalized?.activeModelId)
-    || models[0];
-}
-
 // 读取所有任务
 function loadTasksFromDisk(): TaskItem[] {
   ensureDataDir();
@@ -240,16 +713,54 @@ function loadTasksFromDisk(): TaskItem[] {
   }
   try {
     const data = fs.readFileSync(tasksFile, 'utf-8');
-    return JSON.parse(data);
+    return dedupeTasksForPersistence(JSON.parse(data));
   } catch {
     return [];
   }
 }
 
 // 保存任务列表到磁盘
+
+function taskTimeMs(value?: string) {
+  if (!value) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function normalizeTaskText(value?: string) {
+  return String(value || '')
+    .replace(/^\u6765\u81ea AI \u5199\u4f5c\u6846\u67b6\u5de5\u4f5c\u6d41\uff1a.*$/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function getTaskSemanticKey(task: TaskItem) {
+  return [
+    task.projectId,
+    task.relatedDocId || '',
+    task.source || 'manual',
+    task.type,
+    normalizeTaskText(task.title),
+    normalizeTaskText(task.description),
+  ].join('|');
+}
+
+function dedupeTasksForPersistence(tasks: TaskItem[]) {
+  const byKey = new Map<string, TaskItem>();
+  tasks.forEach((task) => {
+    const key = getTaskSemanticKey(task);
+    const existing = byKey.get(key);
+    if (!existing || taskTimeMs(task.createdAt) >= taskTimeMs(existing.createdAt)) {
+      byKey.set(key, task);
+    }
+  });
+  return Array.from(byKey.values()).sort((a, b) => taskTimeMs(b.createdAt) - taskTimeMs(a.createdAt));
+}
+
 function saveTasksToDisk(tasks: TaskItem[]) {
   ensureDataDir();
-  fs.writeFileSync(tasksFile, JSON.stringify(tasks, null, 2), 'utf-8');
+  fs.writeFileSync(tasksFile, JSON.stringify(dedupeTasksForPersistence(tasks), null, 2), 'utf-8');
 }
 
 // 默认工作区路径
@@ -270,18 +781,19 @@ function loadSettingsFromDisk(): AppSettings {
 }
 
 // 递归计算目录大小（字节）
-function getDirSize(dirPath: string): number {
+async function getDirSize(dirPath: string): Promise<number> {
   if (!fs.existsSync(dirPath)) return 0;
   let totalSize = 0;
   try {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = path.join(dirPath, entry.name);
       if (entry.isDirectory()) {
-        totalSize += getDirSize(fullPath);
+        totalSize += await getDirSize(fullPath);
       } else {
         try {
-          totalSize += fs.statSync(fullPath).size;
+          const stat = await fs.promises.stat(fullPath);
+          totalSize += stat.size;
         } catch {}
       }
     }
@@ -294,6 +806,450 @@ function saveSettingsToDisk(settings: AppSettings) {
   ensureDataDir();
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), 'utf-8');
 }
+
+// ─── 提示词模板系统 ─────────────────────────────────────
+
+/** 内置默认提示词 */
+const BUILTIN_PROMPTS: Record<PromptScene, { name: string; content: string }> = {
+  report: {
+    name: '报告生成',
+    content: `你是项目阶段文档的写作框架助手。请基于当前文档、关联模板、模板章节要求和范文写法，生成"报告详情页"可展示的 AI 写作框架报告。
+注意：
+1. 这不是审查结论，不要打分，不要泛泛说风险。
+2. 如果模板里有范文，只提取范文的结构、写法、段落组织和表达特征，不要把范文事实当作当前项目要求；范文模板的标题只代表写作方向，不作为固定标题。
+3. 模板格式要求是硬性规则；即使是范文模板，也必须把标题/正文/图表格式作为严格约束。
+4. 输出必须是 JSON 对象，不要 Markdown，不要代码块。
+4. 任务建议要贴合"AI先写初稿/人工补资料/AI再优化/人工确认/再审查"的工作流。
+5. 七章节结构属于全局模板约束，不要在每个章节建议里反复输出；只有章节缺失、顺序错误或结构错乱时，才在对应章节提一次。
+JSON 字段：
+{
+  "reportTitle": "标题",
+  "reportSummary": "300字以内概述当前文档写作状态和下一步方向",
+  "templateFit": [...],
+  "writingStyleNotes": [...],
+  "writingFramework": [...],
+  "writingDirection": [...],
+  "materialPlan": [...],
+  "draftPlan": [...],
+  "humanTasks": [...],
+  "aiTasks": [...],
+  "sectionAdvice": [...],
+  "workflowPlan": [...]
+}
+项目：{{projectName}}
+阶段：{{stage}}
+文档：{{docName}}
+文件名：{{fileName}}
+创建时间：{{createdAt}}
+完成度：{{progress}}%
+模板：{{templateName}}
+模板分类：{{templateCategory}}
+模板说明：{{templateDescription}}
+{{templateNodesLabel}}
+{{templateNodes}}
+Low-weight stage memory, for style and acceptance direction only: {{stageMemory}}
+Low-weight project reference materials, for evidence type and structure only: {{reference}}
+当前章节分析：{{sectionStatus}}
+当前文档正文摘录：{{content}}`,
+  },
+  review: {
+    name: '文档审查',
+    content: `你是文档审查与改稿助手。请严格按模板章节输出审查建议。
+目标：模板里有多个结构章节，例如"一、总体目标""二、研究内容"。只输出存在问题或需要优化的章节；没有问题的章节不要输出。每个章节下面固定包含"问题"和"建议"。
+输出格式（必须严格遵守，不要添加其他标题、总体评估、寒暄或结尾）：
+## 一、章节名称
+问题：
+- 用一句话说明该章节的核心问题。
+- 如有第二个问题，再用一句话说明。
+建议：
+- 给出一条可执行修改建议。
+- 如需补写正文，给出一条简短参考句式；缺少事实数据时写"需人工补充：..."。
+规则：
+1. 只输出有问题或需要优化的模板章节。
+2. 章节标题必须尽量使用模板中的原始章节名。
+3. 每个章节必须同时包含"问题："和"建议："。
+4. 每个章节的问题最多 2 条，建议最多 3 条，每条不超过 80 字。
+5. 不要把程序已经模糊匹配到的章节重新判定为缺失；如果标题写法不同，只说明它与模板章节如何对应。
+6. 建议要围绕当前正文和模板要求，避免泛泛而谈。
+7. 不要输出长段落、引用块、成段示例、总体评估、"以下是建议""好的"等非章节内容。
+模板必需章节：{{requiredOutline}}
+{{analysisContext}}程序审查结果：{{issueText}}
+正文摘录：{{content}}`,
+  },
+  rewrite: {
+    name: '章节改稿',
+    content: `You are a Chinese technical document rewriting assistant.
+Only output the final replacement body text for this section. Do not output the section title, markdown, explanations, or extra notes.
+Section: {{sectionTitle}}
+Writing requirements: {{requirement}}
+Example/reference from template: {{example}}
+Low-weight stage memory, for style and acceptance direction only:
+{{stageMemory}}
+Low-weight reference materials selected by the user:
+{{reference}}
+Current body: {{currentContent}}
+Rules:
+1. Priority order: current project facts and current body > template format and requirements > user selected references > stage memory.
+2. Keep existing facts and project context. Do not invent data or copy facts from memory/reference materials as if they belong to this project.
+3. If required data is missing, use a short placeholder such as "需补充...".
+4. The output must be suitable for direct replacement of the current section body and keep the original section formatting when applied.`,
+  },
+  diff: {
+    name: '版本对比',
+    content: `你是一个文档版本对比分析专家。请对比以下两个版本的差异，并给出详细的分析报告。
+## 版本A：{{versionAName}}
+{{contentA}}
+## 版本B：{{versionBName}}
+{{contentB}}
+请分析：
+1. 主要变更内容概述
+2. 新增了哪些内容
+3. 删除了哪些内容
+4. 修改了哪些内容
+5. 这些变更对文档质量的影响评估
+6. 建议和注意事项`,
+  },
+  summary: {
+    name: '文档摘要',
+    content: `请为以下文档内容生成一个简短的摘要（100-200字）：
+{{content}}`,
+  },
+  memory: {
+    name: '阶段记忆学习',
+    content: `You are building a low-weight writing memory for a Chinese project document assistant.
+Summarize the final accepted state of this stage. This memory is only a reference direction, not a hard requirement.
+Do not copy project-specific confidential facts as reusable rules. Extract reusable writing patterns, acceptance signals, evidence types, structure tendencies, tone, and common quality checks.
+Output concise Chinese bullets under these headings: 写作方向, 常见结构, 必备证据, 完成度特征, 注意事项.
+Stage: {{stageName}}
+Document: {{docName}}
+Final content: {{content}}`,
+  },
+  description: {
+    name: '项目描述生成',
+    content: `用一句简明中文概括项目，最多35字，只输出描述，不要解释。
+项目名：{{projectName}}
+阶段：{{stages}}
+本周期新增文件：{{pendingFiles}}
+已有文件：{{existingFiles}}`,
+  },
+  taskExecute: {
+    name: '任务执行',
+    content: `你是一个文档处理助手。请根据以下指令处理文档内容：
+指令：{{instruction}}
+文档内容：{{content}}
+请直接输出处理后的内容，不要添加额外说明。`,
+  },
+  sectionAnalysis: {
+    name: '章节完成度分析',
+    content: `你是一个文档审查专家。请分析以下章节内容的完成度。
+章节标题：{{sectionTitle}}
+{{requirement}}章节内容（前1000字）：{{content}}
+请评估：
+1. 内容是否满足模板要求，状态为 completed/partial/missing
+2. 简短评语（30字以内）
+请用 JSON 格式回复：{"status":"completed","comment":"评语"}`,
+  },
+  templateExtract: {
+    name: '模板结构提取',
+    content: `你是一位专业的文档写作分析助手。请分析以下范文，生成一份精炼的写作分析摘要，供后续写作时参考。
+模板名称：{{templateName}}
+模板章节结构：{{templateNodes}}
+分析要求：
+1. 整体格式特征
+2. 写作风格总结
+3. 各章节字数参考
+4. 内容要点
+5. 常见开头/结尾模式
+请用以下 JSON 格式输出（仅输出JSON，不要其他文字）：
+{ "overallStyle": ..., "formatFeatures": ..., "sectionGuidance": [...], "openingPatterns": ..., "closingPatterns": ..., "generalTips": ... }
+范文内容：{{content}}`,
+  },
+};
+
+/** 各场景默认结构化提示词 */
+const DEFAULT_STRUCTURED: Record<PromptScene, Omit<StructuredPrompt, 'scene'>> = {
+  report: {
+    mode: 'structured',
+    role: '项目阶段文档写作框架助手',
+    goals: ['生成报告摘要', '提取模板要求', '给出写作方向', '拆分人工任务', '拆分AI任务'],
+    rules: [
+      { id: 'r1', text: '不要评分，不要泛泛说风险', enabled: true, type: 'must_not' },
+      { id: 'r2', text: '范文事实不等于当前项目事实', enabled: true, type: 'must_not' },
+      { id: 'r3', text: '模板格式要求是硬性规则', enabled: true, type: 'must' },
+      { id: 'r4', text: '输出必须是 JSON 对象', enabled: true, type: 'must' },
+      { id: 'r5', text: '任务建议贴合"AI写初稿→人工补资料→AI优化→人工确认"工作流', enabled: true, type: 'prefer' },
+    ],
+    outputFields: [
+      { key: 'reportTitle', label: '报告标题', description: '建议的报告标题' },
+      { key: 'reportSummary', label: '报告摘要', description: '300字以内概述当前写作状态和下一步方向' },
+      { key: 'templateFit', label: '模板匹配说明', description: '模板要求转化成的写作约束' },
+      { key: 'writingStyleNotes', label: '写作风格建议', description: '从范文或模板中提取的写法特征' },
+      { key: 'writingFramework', label: '写作框架', description: '建议的章节框架或段落组织' },
+      { key: 'writingDirection', label: '写作方向', description: '下一版写作方向' },
+      { key: 'materialPlan', label: '资料补充计划', description: '需要人工补充的资料、数据' },
+      { key: 'draftPlan', label: '初稿计划', description: 'AI可以执行的初稿、润色任务' },
+      { key: 'humanTasks', label: '人工任务', description: '人工下一步任务' },
+      { key: 'aiTasks', label: 'AI任务', description: 'AI下一步任务' },
+      { key: 'sectionAdvice', label: '章节建议', description: '各章节的问题和建议' },
+      { key: 'workflowPlan', label: '工作流计划', description: '按优先级排列的任务计划' },
+    ],
+  },
+  review: {
+    mode: 'structured',
+    role: '文档审查与改稿助手',
+    goals: ['按模板章节审查文档', '输出问题和修改建议'],
+    rules: [
+      { id: 'rv1', text: '只输出有问题或需要优化的章节', enabled: true, type: 'must' },
+      { id: 'rv2', text: '章节标题使用模板中的原始名称', enabled: true, type: 'must' },
+      { id: 'rv3', text: '每个章节最多2个问题、3个建议', enabled: true, type: 'must' },
+      { id: 'rv4', text: '不要把已匹配的章节重新判定为缺失', enabled: true, type: 'must_not' },
+      { id: 'rv5', text: '建议围绕正文和模板要求，避免泛泛而谈', enabled: true, type: 'prefer' },
+    ],
+    outputFields: [
+      { key: 'sectionName', label: '章节名称', description: '模板章节标题' },
+      { key: 'problems', label: '问题列表', description: '该章节存在的问题' },
+      { key: 'suggestions', label: '建议列表', description: '修改建议' },
+    ],
+  },
+  rewrite: {
+    mode: 'structured',
+    role: '中文技术文档改写助手',
+    goals: ['输出可直接替换的正文内容', '保持原文格式'],
+    rules: [
+      { id: 'rw1', text: '当前项目事实和正文优先级最高', enabled: true, type: 'must' },
+      { id: 'rw2', text: '不要编造数据或复制其他项目的事实', enabled: true, type: 'must_not' },
+      { id: 'rw3', text: '缺少数据时用"需补充..."占位', enabled: true, type: 'must' },
+      { id: 'rw4', text: '输出适合直接替换当前章节正文', enabled: true, type: 'must' },
+    ],
+    outputFields: [
+      { key: 'rewrittenText', label: '改写后正文', description: '可直接替换原章节的正文内容' },
+    ],
+  },
+  diff: {
+    mode: 'structured',
+    role: '文档版本对比分析专家',
+    goals: ['对比两个版本的差异', '分析变更对文档质量的影响'],
+    rules: [
+      { id: 'd1', text: '不要假设A是模板、B是成品', enabled: true, type: 'must_not' },
+      { id: 'd2', text: '只评价两个版本之间不同的地方', enabled: true, type: 'must' },
+      { id: 'd3', text: '从内容、结构、格式、风险、建议五个角度总结', enabled: true, type: 'must' },
+    ],
+    outputFields: [
+      { key: 'overview', label: '总体判断', description: '变更的整体评价' },
+      { key: 'mainChanges', label: '主要变化', description: '关键变更内容' },
+      { key: 'risks', label: '可能风险', description: '变更带来的风险' },
+      { key: 'suggestions', label: '建议处理方式', description: '下一步建议' },
+    ],
+  },
+  summary: {
+    mode: 'structured',
+    role: '文档摘要生成助手',
+    goals: ['生成100-200字的简短摘要'],
+    rules: [
+      { id: 's1', text: '只输出摘要内容，不要添加额外说明', enabled: true, type: 'must' },
+    ],
+    outputFields: [
+      { key: 'summary', label: '文档摘要', description: '100-200字的内容概述' },
+    ],
+  },
+  memory: {
+    mode: 'structured',
+    role: '写作经验提炼助手',
+    goals: ['提炼可复用的写作模式', '总结完成度特征和注意事项'],
+    rules: [
+      { id: 'm1', text: '不复制项目机密事实作为可复用规则', enabled: true, type: 'must_not' },
+      { id: 'm2', text: '只作为参考方向，不作为硬性要求', enabled: true, type: 'must_not' },
+      { id: 'm3', text: '输出简洁的中文要点', enabled: true, type: 'must' },
+    ],
+    outputFields: [
+      { key: 'writingDirection', label: '写作方向', description: '该阶段的写作方向参考' },
+      { key: 'commonStructure', label: '常见结构', description: '常见的文档结构' },
+      { key: 'requiredEvidence', label: '必备证据', description: '必须包含的证据类型' },
+      { key: 'completionFeatures', label: '完成度特征', description: '完成状态的判断依据' },
+      { key: 'notes', label: '注意事项', description: '需要特别注意的事项' },
+    ],
+  },
+  description: {
+    mode: 'structured',
+    role: '项目描述生成助手',
+    goals: ['用一句简明中文概括项目，最多35字'],
+    rules: [
+      { id: 'ds1', text: '只输出描述，不要解释', enabled: true, type: 'must' },
+      { id: 'ds2', text: '不超过35个字', enabled: true, type: 'must' },
+    ],
+    outputFields: [
+      { key: 'description', label: '项目描述', description: '35字以内的项目概括' },
+    ],
+  },
+  taskExecute: {
+    mode: 'structured',
+    role: '文档处理助手',
+    goals: ['根据指令处理文档内容', '直接输出处理后的内容'],
+    rules: [
+      { id: 't1', text: '直接输出处理后的内容', enabled: true, type: 'must' },
+      { id: 't2', text: '不要添加额外说明', enabled: true, type: 'must_not' },
+    ],
+    outputFields: [
+      { key: 'result', label: '处理结果', description: '处理后的文档内容' },
+    ],
+  },
+  sectionAnalysis: {
+    mode: 'structured',
+    role: '文档审查专家',
+    goals: ['分析章节内容的完成度', '给出状态和评语'],
+    rules: [
+      { id: 'sa1', text: '状态必须是 completed/partial/missing 之一', enabled: true, type: 'must' },
+      { id: 'sa2', text: '评语不超过30字', enabled: true, type: 'must' },
+      { id: 'sa3', text: '用JSON格式回复', enabled: true, type: 'must' },
+    ],
+    outputFields: [
+      { key: 'status', label: '完成状态', description: 'completed/partial/missing' },
+      { key: 'comment', label: '评语', description: '30字以内的简短评语' },
+    ],
+  },
+  templateExtract: {
+    mode: 'structured',
+    role: '文档写作分析助手',
+    goals: ['分析范文的写作方法和格式特征', '生成写作指导摘要'],
+    rules: [
+      { id: 'te1', text: '输出JSON格式', enabled: true, type: 'must' },
+      { id: 'te2', text: 'level只允许1-4', enabled: true, type: 'must' },
+      { id: 'te3', text: 'title只能是干净的章节标题', enabled: true, type: 'must' },
+      { id: 'te4', text: '不要把范文项目事实当成模板要求', enabled: true, type: 'must_not' },
+    ],
+    outputFields: [
+      { key: 'overallStyle', label: '整体风格', description: '写作风格描述' },
+      { key: 'formatFeatures', label: '格式特征', description: '格式规范描述' },
+      { key: 'sectionGuidance', label: '章节指导', description: '各章节的写作建议' },
+      { key: 'openingPatterns', label: '开头模式', description: '常见开头方式' },
+      { key: 'closingPatterns', label: '结尾模式', description: '常见结尾方式' },
+      { key: 'generalTips', label: '通用建议', description: '通用写作建议' },
+    ],
+  },
+};
+
+/** 生成内置默认模板列表 */
+function getDefaultPromptTemplates(): PromptTemplate[] {
+  const now = new Date().toISOString();
+  return Object.entries(BUILTIN_PROMPTS).map(([scene, def]) => ({
+    id: `builtin-${scene}`,
+    scene: scene as PromptScene,
+    name: def.name,
+    content: def.content,
+    isBuiltin: true,
+    createdAt: now,
+    updatedAt: now,
+    structured: { ...DEFAULT_STRUCTURED[scene as PromptScene], scene: scene as PromptScene },
+  }));
+}
+
+/** 加载提示词模板（首次自动生成内置默认） */
+function loadPromptTemplatesFromDisk(): PromptTemplate[] {
+  ensureDataDir();
+  if (!fs.existsSync(promptTemplatesFile)) {
+    const defaults = getDefaultPromptTemplates();
+    savePromptTemplatesToDisk(defaults);
+    return defaults;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(promptTemplatesFile, 'utf-8'));
+  } catch {
+    const defaults = getDefaultPromptTemplates();
+    savePromptTemplatesToDisk(defaults);
+    return defaults;
+  }
+}
+
+/** 保存提示词模板 */
+function savePromptTemplatesToDisk(templates: PromptTemplate[]) {
+  ensureDataDir();
+  fs.writeFileSync(promptTemplatesFile, JSON.stringify(templates, null, 2), 'utf-8');
+}
+
+// ─── IPC: 提示词模板 ────────────────────────────────────
+
+ipcMain.handle('prompt:loadAll', () => {
+  return loadPromptTemplatesFromDisk();
+});
+
+ipcMain.handle('prompt:save', (_event, template: PromptTemplate) => {
+  const templates = loadPromptTemplatesFromDisk();
+  const idx = templates.findIndex(t => t.id === template.id);
+  if (idx >= 0) {
+    templates[idx] = template;
+  } else {
+    templates.push(template);
+  }
+  savePromptTemplatesToDisk(templates);
+});
+
+ipcMain.handle('prompt:reset', (_event, id: string) => {
+  const templates = loadPromptTemplatesFromDisk();
+  const defaults = getDefaultPromptTemplates();
+  const defaultTmpl = defaults.find(t => t.id === id);
+  if (!defaultTmpl) return;
+  const idx = templates.findIndex(t => t.id === id);
+  if (idx >= 0) {
+    templates[idx] = defaultTmpl;
+  } else {
+    templates.push(defaultTmpl);
+  }
+  savePromptTemplatesToDisk(templates);
+});
+
+// ─── Skill 包管理 ──────────────────────────────────────
+
+function loadSkillPackagesFromDisk(): SkillPackage[] {
+  ensureDataDir();
+  if (!fs.existsSync(skillPackagesFile)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(skillPackagesFile, 'utf-8'));
+  } catch { return []; }
+}
+
+function saveSkillPackagesToDisk(skills: SkillPackage[]) {
+  ensureDataDir();
+  fs.writeFileSync(skillPackagesFile, JSON.stringify(skills, null, 2), 'utf-8');
+}
+
+ipcMain.handle('skill:loadAll', () => {
+  return loadSkillPackagesFromDisk();
+});
+
+ipcMain.handle('skill:import', (_event, pkg: SkillPackage) => {
+  const skills = loadSkillPackagesFromDisk();
+  const idx = skills.findIndex(s => s.id === pkg.id);
+  if (idx >= 0) {
+    skills[idx] = pkg;
+  } else {
+    skills.push(pkg);
+  }
+  saveSkillPackagesToDisk(skills);
+  return pkg;
+});
+
+ipcMain.handle('skill:delete', (_event, id: string) => {
+  const skills = loadSkillPackagesFromDisk();
+  saveSkillPackagesToDisk(skills.filter(s => s.id !== id));
+});
+
+ipcMain.handle('skill:setEnabled', (_event, id: string, enabled: boolean) => {
+  const skills = loadSkillPackagesFromDisk();
+  const skill = skills.find(s => s.id === id);
+  if (skill) {
+    skill.enabled = enabled;
+    saveSkillPackagesToDisk(skills);
+  }
+});
+
+ipcMain.handle('skill:setWeight', (_event, id: string, weight: number) => {
+  const skills = loadSkillPackagesFromDisk();
+  const skill = skills.find(s => s.id === id);
+  if (skill) {
+    skill.weight = Math.max(0, Math.min(100, weight));
+    saveSkillPackagesToDisk(skills);
+  }
+});
 
 // 读取项目文档
 function loadProjectDocsFromDisk(): ProjectDocument[] {
@@ -314,6 +1270,88 @@ function saveProjectDocsToDisk(docs: ProjectDocument[]) {
 
 // 中文数字映射
 const cnNumMap: Record<string, number> = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12 };
+
+function loadStageMemoriesFromDisk(): StageMemoryEntry[] {
+  ensureDataDir();
+  if (!fs.existsSync(stageMemoriesFile)) return [];
+  try { return JSON.parse(fs.readFileSync(stageMemoriesFile, 'utf-8')); } catch { return []; }
+}
+
+function saveStageMemoriesToDisk(entries: StageMemoryEntry[]) {
+  ensureDataDir();
+  fs.writeFileSync(stageMemoriesFile, JSON.stringify(entries, null, 2), 'utf-8');
+}
+
+function loadReferenceMaterialsFromDisk(): ReferenceMaterial[] {
+  ensureDataDir();
+  if (!fs.existsSync(referenceMaterialsFile)) return [];
+  try { return JSON.parse(fs.readFileSync(referenceMaterialsFile, 'utf-8')); } catch { return []; }
+}
+
+function saveReferenceMaterialsToDisk(entries: ReferenceMaterial[]) {
+  ensureDataDir();
+  fs.writeFileSync(referenceMaterialsFile, JSON.stringify(entries, null, 2), 'utf-8');
+}
+
+function normalizeKnowledgeStageName(value?: string): string {
+  return String(value || '').trim().replace(/\s+/g, ' ') || 'unknown';
+}
+
+function clipKnowledgeText(value: string, maxLength = 12000): string {
+  const normalized = normalizeExtractedText(String(value || '')).trim();
+  return normalized.length > maxLength ? normalized.slice(0, maxLength) : normalized;
+}
+
+async function extractKnowledgeTextFromFile(filePath?: string): Promise<{ success: boolean; content?: string; fileName?: string; error?: string }> {
+  if (!filePath) return { success: false, error: 'missing file path' };
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    const fileName = path.basename(filePath);
+    const buffer = fs.readFileSync(filePath);
+    if (ext === '.docx') {
+      const docxContent = await extractDocxTextWithNumbering(buffer);
+      if (docxContent) return { success: true, content: clipKnowledgeText(docxContent), fileName };
+      const result = await mammoth.extractRawText({ buffer });
+      return { success: true, content: clipKnowledgeText(result.value), fileName };
+    }
+    if (ext === '.doc') {
+      const convertedPath = convertLegacyDocToDocx(filePath);
+      if (convertedPath) {
+        const convertedBuffer = fs.readFileSync(convertedPath);
+        const docxContent = await extractDocxTextWithNumbering(convertedBuffer);
+        if (docxContent) return { success: true, content: clipKnowledgeText(docxContent), fileName };
+      }
+      const content = extractLegacyDocText(buffer);
+      return content ? { success: true, content: clipKnowledgeText(content), fileName } : { success: false, error: 'unable to extract legacy doc text' };
+    }
+    if (ext === '.pdf') {
+      const data = await pdfParse(buffer);
+      return { success: true, content: clipKnowledgeText(data.text), fileName };
+    }
+    if (ext === '.pptx') {
+      const content = await extractPptxText(buffer);
+      return content ? { success: true, content: clipKnowledgeText(content), fileName } : { success: false, error: 'empty pptx text' };
+    }
+    if (ext === '.xlsx') {
+      const content = await extractXlsxText(buffer);
+      return content ? { success: true, content: clipKnowledgeText(content), fileName } : { success: false, error: 'empty xlsx text' };
+    }
+    if (ext === '.rtf') return { success: true, content: clipKnowledgeText(stripRtf(buffer.toString('utf8'))), fileName };
+    if (ext === '.txt' || ext === '.md') return { success: true, content: clipKnowledgeText(fs.readFileSync(filePath, 'utf-8')), fileName };
+    return { success: false, error: 'unsupported file format' };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+}
+
+function saveReferenceMaterialUpsert(material: ReferenceMaterial): ReferenceMaterial {
+  const materials = loadReferenceMaterialsFromDisk();
+  const index = materials.findIndex(item => item.id === material.id);
+  if (index >= 0) materials[index] = material;
+  else materials.push(material);
+  saveReferenceMaterialsToDisk(materials);
+  return material;
+}
 
 function normalizeTechnicalValueText(value: string): string {
   return String(value || '')
@@ -735,395 +1773,19 @@ function analyzeBasic(content: string, template: WritingTemplate): SectionAnalys
   return results;
 }
 
-// HTTP 请求函数
-const AI_REQUEST_TIMEOUT_MS = 240000;
-const AI_REQUEST_RETRY_DELAY_MS = 900;
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-function isRetryableAIRequestError(error: any): boolean {
-  const message = String(error?.message || error || '');
-  return /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ECONNRESET|ETIMEDOUT|ERR_TIMED_OUT|ERR_NETWORK_CHANGED|socket hang up/i.test(message);
-}
-
-function normalizeAIRequestError(error: any): Error {
-  const message = String(error?.message || error || '');
-  if (/ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ECONNRESET|socket hang up/i.test(message)) {
-    return new Error('AI 接口连接被中断。可能是网络不稳定、代理/网关关闭连接，或请求内容过长。系统已自动重试，仍失败时请稍后重试或检查 AI 接口地址/代理。');
-  }
-  if (/ETIMEDOUT|ERR_TIMED_OUT|请求超时/i.test(message)) {
-    return new Error('AI 接口请求超时。请检查网络、代理或模型服务是否可用，也可以减少导入文档内容后重试。');
-  }
-  if (/ENOTFOUND|ERR_NAME_NOT_RESOLVED|getaddrinfo/i.test(message)) {
-    return new Error('无法解析 AI 接口地址。请检查 AI 设置中的接口地址或当前网络 DNS。');
-  }
-  return error instanceof Error ? error : new Error(message || 'AI 请求失败');
-}
-
-async function makeRequest(url: string, options: any, body?: string): Promise<any> {
-  const maxAttempts = 2;
-  let lastError: any;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await makeSingleRequest(url, options, body, attempt);
-    } catch (error: any) {
-      lastError = error;
-      if (attempt < maxAttempts && isRetryableAIRequestError(error)) {
-        appendAiLog('Request failed; retrying', { attempt, maxAttempts, error });
-        console.warn(`[AI] Request failed, retrying (${attempt}/${maxAttempts}): ${error?.message || error}`);
-        await sleep(AI_REQUEST_RETRY_DELAY_MS);
-        continue;
-      }
-      throw normalizeAIRequestError(error);
-    }
-  }
-
-  throw normalizeAIRequestError(lastError);
-}
-
-function makeSingleRequest(url: string, options: any, body: string | undefined, attempt: number): Promise<any> {
-  return new Promise((resolve, reject) => {
-    appendAiLog('Request start', {
-      method: options?.method || 'GET',
-      url,
-      attempt,
-      bodyLength: body?.length || 0,
+function scheduleDevServerReload(reason: string) {
+  if (process.env.NODE_ENV !== 'development' || !mainWindow || mainWindow.isDestroyed()) return;
+  if (devReloadTimer) return;
+  console.warn(`[dev-server] renderer load interrupted: ${reason}; reloading shortly...`);
+  devReloadTimer = setTimeout(() => {
+    devReloadTimer = null;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.loadURL(DEV_SERVER_URL).catch((error) => {
+      scheduleDevServerReload(error?.message || 'reload failed');
     });
-    console.log(`[AI] Request: ${options?.method || 'GET'} ${url} (attempt ${attempt})`);
-    const request = net.request({
-      url,
-      method: options?.method || 'GET',
-    });
-
-    let settled = false;
-    const finish = (callback: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      callback();
-    };
-
-    const timeout = setTimeout(() => {
-      appendAiLog('Request timeout', {
-        url,
-        attempt,
-        timeoutMs: AI_REQUEST_TIMEOUT_MS,
-        bodyLength: body?.length || 0,
-      });
-      try {
-        request.abort();
-      } catch {}
-      finish(() => reject(new Error(`请求超时（${Math.round(AI_REQUEST_TIMEOUT_MS / 1000)}秒）`)));
-    }, AI_REQUEST_TIMEOUT_MS);
-
-    Object.entries(options?.headers || {}).forEach(([key, value]) => {
-      request.setHeader(key, String(value));
-    });
-
-    request.on('response', (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('error', (err) => {
-        appendAiLog('Response stream error', { url, attempt, error: err });
-        console.error('[AI] Response stream error:', err);
-        finish(() => reject(err));
-      });
-      res.on('end', () => {
-        finish(() => {
-          appendAiLog('Response end', {
-            url,
-            attempt,
-            statusCode: res.statusCode,
-            responseLength: data.length,
-            responsePreview: data.substring(0, 500),
-          });
-          console.log(`[AI] Response: ${res.statusCode} ${data.substring(0, 200)}`);
-          let parsed: any = data;
-          try {
-            parsed = JSON.parse(data);
-          } catch {
-            parsed = data;
-          }
-          if (res.statusCode >= 400) {
-            const message = parsed?.error?.message || parsed?.message || data || `HTTP ${res.statusCode}`;
-            reject(new Error(`HTTP ${res.statusCode}: ${message}`));
-            return;
-          }
-          resolve(parsed);
-        });
-      });
-    });
-
-    request.on('error', (err) => {
-      appendAiLog('Request error', { url, attempt, error: err });
-      console.error('[AI] Request error:', err);
-      finish(() => reject(err));
-    });
-
-    request.on('abort', () => {
-      appendAiLog('Request abort', { url, attempt });
-      finish(() => reject(new Error('AI 请求已中止')));
-    });
-
-    if (body) request.write(body);
-    request.end();
-  });
-}
-
-function sanitizeAIResponseForLog(value: any): any {
-  if (!value || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(item => sanitizeAIResponseForLog(item));
-  if (value.type === 'thinking') {
-    const thinking = typeof value.thinking === 'string' ? value.thinking : '';
-    return {
-      ...value,
-      thinking: thinking ? `[thinking omitted, ${thinking.length} chars]` : '[thinking omitted]',
-    };
-  }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entryValue]) => [key, sanitizeAIResponseForLog(entryValue)]),
-  );
-}
-
-function compactResponse(value: any, maxLength = 600): string {
-  const safeValue = sanitizeAIResponseForLog(value);
-  const raw = typeof safeValue === 'string' ? safeValue : JSON.stringify(safeValue);
-  return (raw || '')
-    .replace(/\s+/g, ' ')
-    .slice(0, maxLength);
-}
-
-function getTextFromContent(content: any): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    // 优先提取 text 类型的块
-    const textParts = content
-      .map(item => {
-        if (typeof item === 'string') return item;
-        if (item?.type === 'text') return item.text || '';
-        return '';
-      })
-      .filter(Boolean);
-    if (textParts.length > 0) return textParts.join('\n');
-
-    // 如果没有 text 块，尝试提取所有非 thinking 块
-    return content
-      .map(item => {
-        if (typeof item === 'string') return item;
-        if (item?.type === 'thinking') return '';
-        return item?.text || item?.content || item?.value || '';
-      })
-      .filter(Boolean)
-      .join('\n');
-  }
-  return content?.text || content?.content || '';
-}
-
-function extractAIText(result: any): string {
-  if (!result) return '';
-  if (typeof result === 'string') return result;
-  if (typeof result.output_text === 'string') return result.output_text;
-  if (typeof result.text === 'string') return result.text;
-  if (typeof result.content === 'string') return result.content;
-  if (Array.isArray(result.content)) return getTextFromContent(result.content);
-
-  const firstChoice = result.choices?.[0];
-  if (firstChoice) {
-    return getTextFromContent(firstChoice.message?.content)
-      || getTextFromContent(firstChoice.delta?.content)
-      || firstChoice.text
-      || '';
-  }
-
-  if (Array.isArray(result.output)) {
-    return result.output
-      .map((item: any) => getTextFromContent(item.content) || item.text || '')
-      .filter(Boolean)
-      .join('\n');
-  }
-
-  if (result.data) return extractAIText(result.data);
-  if (result.result) return extractAIText(result.result);
-  return '';
-}
-
-
-function getAIContentBlocks(result: any): any[] {
-  if (!result || typeof result !== 'object') return [];
-  if (Array.isArray(result.content)) return result.content;
-  if (Array.isArray(result.output)) {
-    return result.output.flatMap((item: any) => Array.isArray(item?.content) ? item.content : []);
-  }
-  const firstChoice = result.choices?.[0];
-  const choiceContent = firstChoice?.message?.content || firstChoice?.delta?.content;
-  return Array.isArray(choiceContent) ? choiceContent : [];
-}
-
-function isThinkingOnlyMaxTokensResponse(result: any): boolean {
-  if (!result || typeof result !== 'object') return false;
-  if (extractAIText(result).trim()) return false;
-  const blocks = getAIContentBlocks(result);
-  const hasThinking = blocks.some((item: any) => item?.type === 'thinking');
-  const hasText = blocks.some((item: any) => item?.type === 'text' && String(item?.text || '').trim());
-  return hasThinking && !hasText && /max_tokens/i.test(String(result.stop_reason || result.finish_reason || ''));
-}
-
-function buildNoReadableAITextError(provider: string, url: string, result: any): Error {
-  if (isThinkingOnlyMaxTokensResponse(result)) {
-    return new Error(`${provider} API 调用失败：模型输出额度耗尽，只返回了 thinking 思考块，没有返回最终文本。系统已尝试让模型直接输出结果；如果仍失败，请减少导入文档内容，或在 AI 服务中关闭思考输出/提高输出上限。`);
-  }
-  return new Error(result.error?.message || result.message || `${provider} API 调用失败：响应中没有可读取文本（${url}）。响应：${compactResponse(result)}`);
-}
-
-function normalizeOpenAIEndpoint(endpoint?: string): string {
-  const fallback = 'https://api.openai.com/v1/chat/completions';
-  const raw = (endpoint || fallback).trim();
-  if (!raw) return fallback;
-  const normalized = raw.replace(/\/+$/, '');
-  if (/\/chat\/completions$/i.test(normalized)) return normalized;
-  if (/\/v\d+$/i.test(normalized)) return `${normalized}/chat/completions`;
-  return normalized;
-}
-
-function normalizeClaudeEndpoint(endpoint?: string): string {
-  const fallback = 'https://api.anthropic.com/v1/messages';
-  const raw = (endpoint || fallback).trim();
-  if (!raw) return fallback;
-  const normalized = raw.replace(/\/+$/, '');
-  if (/\/v\d+\/messages$/i.test(normalized) || /\/messages$/i.test(normalized)) return normalized;
-  if (/\/v\d+$/i.test(normalized)) return `${normalized}/messages`;
-  if (/\/anthropic$/i.test(normalized)) return `${normalized}/v1/messages`;
-  return normalized;
-}
-
-// 调用 Claude API
-async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<string> {
-  const url = normalizeClaudeEndpoint(config.endpoint);
-  const buildBody = (maxTokens: number, userPrompt = prompt) => JSON.stringify({
-    model: config.model || 'claude-3-sonnet-20240229',
-    max_tokens: maxTokens,
-    temperature: 0,
-    system: '直接输出最终答案，不要输出思考过程、分析过程或 Markdown 包裹。若任务要求 JSON，只输出可被 JSON.parse 解析的 JSON。',
-    messages: [{ role: 'user', content: userPrompt }],
-  });
-
-  const options = {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': config.apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-  };
-
-  let result = await makeRequest(url, options, buildBody(4096));
-  let text = extractAIText(result);
-  if (text) return text;
-
-  if (isThinkingOnlyMaxTokensResponse(result)) {
-    console.warn('[AI] Claude returned thinking-only max_tokens response; retrying with direct-output prompt.');
-    const retryPrompt = `请不要输出思考过程。请直接完成下面任务，并只输出最终结果。\n\n${prompt}`;
-    result = await makeRequest(url, options, buildBody(8192, retryPrompt));
-    text = extractAIText(result);
-    if (text) return text;
-  }
-
-  throw buildNoReadableAITextError('Claude', url, result);
-}
-
-// 调用 OpenAI API
-async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<string> {
-  const url = normalizeOpenAIEndpoint(config.endpoint);
-  appendAiLog('OpenAI call', { url, model: config.model || 'gpt-3.5-turbo', endpoint: config.endpoint });
-  console.log(`[AI] OpenAI call: url=${url}, model=${config.model || 'gpt-3.5-turbo'}, endpoint=${config.endpoint}`);
-  const body = JSON.stringify({
-    model: config.model || 'gpt-3.5-turbo',
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 4096,
-  });
-
-  const options = {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`,
-    },
-  };
-
-  const result = await makeRequest(url, options, body);
-  appendAiLog('OpenAI result parsed', { preview: compactResponse(result, 500) });
-  console.log(`[AI] OpenAI result:`, JSON.stringify(result).substring(0, 500));
-  const text = extractAIText(result);
-  if (text) return text;
-  throw buildNoReadableAITextError('OpenAI', url, result);
-}
-
-async function callAIModel(config: AIModelConfig, prompt: string): Promise<string> {
-  if (config.provider === 'claude') return callClaudeAPI(config, prompt);
-  if (config.provider === 'custom' && /\/anthropic(?:\/|$)/i.test(config.endpoint || '')) {
-    return callClaudeAPI(config, prompt);
-  }
-  if (config.provider === 'openai' || config.provider === 'custom') return callOpenAIAPI(config, prompt);
-  throw new Error('不支持的 AI 提供商');
-}
-
-async function callDefaultAI(prompt: string, modelId?: string): Promise<string> {
-  const model = getActiveAIModel(loadAIConfigFromDisk(), modelId);
-  if (!model) throw new Error('请先配置至少一个可用 AI 模型');
-  return callAIModel(model, prompt);
-}
-
-async function callParallelAI(prompt: string, modelIds?: string[]): Promise<string> {
-  const config = normalizeAIConfig(loadAIConfigFromDisk());
-  const enabledModels = getEnabledAIModels(config);
-  const selectedIds = modelIds?.length ? modelIds : config?.parallelModelIds || [];
-  const selectedModels = enabledModels.filter(model => selectedIds.includes(model.id));
-  const models = selectedModels.length > 0 ? selectedModels : enabledModels.slice(0, 1);
-  if (models.length === 0) throw new Error('请先配置至少一个可用 AI 模型');
-
-  const results = await Promise.all(models.map(async model => {
-    try {
-      const output = await callAIModel(model, prompt);
-      return `【${model.name}】\n${output}`;
-    } catch (error: any) {
-      return `【${model.name}】调用失败：${error.message}`;
-    }
-  }));
-  return results.join('\n\n');
-}
-
-async function callConfiguredAI(prompt: string): Promise<string> {
-  const config = normalizeAIConfig(loadAIConfigFromDisk());
-  return config?.multiModelMode === 'parallel'
-    ? callParallelAI(prompt, config.parallelModelIds)
-    : callDefaultAI(prompt, config?.activeModelId);
-}
-
-async function callAIWithConfig(configValue: AIConfig, prompt: string, modelId?: string, modelIds?: string[], mode?: 'single' | 'parallel'): Promise<string> {
-  const config = normalizeAIConfig(configValue);
-  const enabledModels = getEnabledAIModels(config);
-  if (enabledModels.length === 0) throw new Error('请先配置至少一个可用 AI 模型');
-
-  if (mode === 'parallel') {
-    const selectedIds = modelIds?.length ? modelIds : config?.parallelModelIds || [];
-    const selectedModels = enabledModels.filter(model => selectedIds.includes(model.id));
-    const models = selectedModels.length > 0 ? selectedModels : enabledModels.slice(0, 1);
-    const results = await Promise.all(models.map(async model => {
-      try {
-        const output = await callAIModel(model, prompt);
-        return `【${model.name}】\n${output}`;
-      } catch (error: any) {
-        return `【${model.name}】调用失败：${error.message}`;
-      }
-    }));
-    return results.join('\n\n---\n\n');
-  }
-
-  const activeModel = enabledModels.find(model => model.id === modelId)
-    || enabledModels.find(model => model.id === config?.activeModelId)
-    || enabledModels[0];
-  return callAIModel(activeModel, prompt);
+  }, 900);
 }
 
 function createWindow() {
@@ -1140,15 +1802,31 @@ function createWindow() {
     title: '项目进度管理工具',
   });
 
-  // 开发环境加载本地服务器，生产环境加载打包文件
+  // Development loads the local Vite server; production loads bundled files.
   if (process.env.NODE_ENV === 'development') {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+      if (validatedURL?.startsWith(DEV_SERVER_URL) && [-21, -102, -105, -106, -118].includes(errorCode)) {
+        scheduleDevServerReload(`${errorCode} ${errorDescription}`);
+      }
+    });
+    mainWindow.webContents.on('did-fail-provisional-load', (_event, errorCode, errorDescription, validatedURL) => {
+      if (validatedURL?.startsWith(DEV_SERVER_URL) && [-21, -102, -105, -106, -118].includes(errorCode)) {
+        scheduleDevServerReload(`${errorCode} ${errorDescription}`);
+      }
+    });
+    mainWindow.loadURL(DEV_SERVER_URL).catch((error) => {
+      scheduleDevServerReload(error?.message || 'initial load failed');
+    });
     mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
   mainWindow.on('closed', () => {
+    if (devReloadTimer) {
+      clearTimeout(devReloadTimer);
+      devReloadTimer = null;
+    }
     mainWindow = null;
   });
 }
@@ -1284,6 +1962,10 @@ ipcMain.on('shell:startDrag', (event: any, filePath: string) => {
 ipcMain.handle('file:rename', async (_event: any, params: { filePath: string; newName: string }) => {
   try {
     const { filePath, newName } = params;
+    const pathCheck = checkWithinWorkspace(filePath);
+    if (!pathCheck.ok) return { success: false, error: pathCheck.error };
+    const nameCheck = checkSafeChildName(newName);
+    if (!nameCheck.ok) return { success: false, error: nameCheck.error };
     if (!fs.existsSync(filePath)) return { success: false, error: '文件不存在' };
     const safeName = path.basename(newName.trim());
     if (!safeName) return { success: false, error: '文件名不能为空' };
@@ -1345,6 +2027,12 @@ ipcMain.handle('file:move', async (_event: any, params: { sourcePaths: string[];
   try {
     const { sourcePaths, targetFolder } = params;
     if (!targetFolder) return { success: false, error: '目标文件夹无效' };
+    for (const sp of sourcePaths) {
+      const c = checkWithinWorkspace(sp);
+      if (!c.ok) return { success: false, error: c.error };
+    }
+    const tc = checkWithinWorkspace(targetFolder);
+    if (!tc.ok) return { success: false, error: tc.error };
     if (!fs.existsSync(targetFolder)) fs.mkdirSync(targetFolder, { recursive: true });
     if (!fs.statSync(targetFolder).isDirectory()) return { success: false, error: '目标位置不是文件夹' };
 
@@ -1397,6 +2085,12 @@ ipcMain.handle('file:move', async (_event: any, params: { sourcePaths: string[];
 ipcMain.handle('file:duplicate', async (_event: any, params: { sourcePaths: string[]; targetFolder: string }) => {
   try {
     const { sourcePaths, targetFolder } = params;
+    for (const sp of sourcePaths) {
+      const c = checkWithinWorkspace(sp);
+      if (!c.ok) return { success: false, error: c.error };
+    }
+    const tc = checkWithinWorkspace(targetFolder);
+    if (!tc.ok) return { success: false, error: tc.error };
     if (!fs.existsSync(targetFolder)) fs.mkdirSync(targetFolder, { recursive: true });
     const copies: { name: string; path: string; isDirectory: boolean }[] = [];
 
@@ -1434,6 +2128,8 @@ ipcMain.handle('file:duplicate', async (_event: any, params: { sourcePaths: stri
 // 删除文件
 ipcMain.handle('file:delete', async (_event: any, filePath: string) => {
   try {
+    const check = checkWithinWorkspace(filePath);
+    if (!check.ok) return { success: false, error: check.error };
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }
@@ -1444,11 +2140,15 @@ ipcMain.handle('file:delete', async (_event: any, filePath: string) => {
 });
 
 ipcMain.handle('file:read', async (_event: any, filePath: string) => {
+  const check = checkWithinWorkspace(filePath);
+  if (!check.ok) throw new Error(check.error);
   return fs.readFileSync(filePath, 'utf-8');
 });
 
 ipcMain.handle('file:readDir', async (_event: any, dirPath: string) => {
-  return fs.readdirSync(dirPath);
+  const check = checkWithinWorkspace(dirPath);
+  if (!check.ok) throw new Error(check.error);
+  return fs.promises.readdir(dirPath);
 });
 
 const fallbackFontNames = [
@@ -1494,6 +2194,49 @@ ipcMain.handle('system:listFonts', async () => {
   } catch (error: any) {
     return { success: false, fonts: fallbackFontNames, error: error.message };
   }
+});
+
+
+ipcMain.handle('system:notify', async (_event: any, params: { title?: string; body?: string; silent?: boolean; target?: string; projectId?: string }) => {
+  try {
+    const shortcut = didEnsureWindowsNotificationShortcut
+      ? { success: true, appUserModelId: APP_USER_MODEL_ID }
+      : ensureWindowsNotificationShortcut();
+    if (!Notification.isSupported()) return { success: false, error: 'System notifications are not supported', shortcut };
+    const title = String(params?.title || APP_DISPLAY_NAME);
+    const body = String(params?.body || '');
+    const target = typeof params?.target === 'string' ? params.target : undefined;
+    const projectId = typeof params?.projectId === 'string' ? params.projectId : undefined;
+    const notification = new Notification({ title, body, silent: Boolean(params?.silent) });
+    notification.on('click', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+        mainWindow.webContents.send('system:notification-click', { target, projectId });
+      }
+      app.focus({ steal: true });
+    });
+    notification.on('show', () => {
+      console.log('[Notification] 已显示:', title);
+    });
+    notification.on('close', () => {
+      console.log('[Notification] 已关闭:', title);
+    });
+    notification.show();
+    console.log('[Notification] 已调用 show():', title, body?.substring(0, 60));
+    return { success: true, shortcut, appUserModelId: APP_USER_MODEL_ID };
+  } catch (error: any) {
+    return { success: false, error: error.message, appUserModelId: APP_USER_MODEL_ID };
+  }
+});
+
+ipcMain.handle('system:notificationStatus', async () => {
+  return {
+    supported: Notification.isSupported(),
+    shortcut: ensureWindowsNotificationShortcut(),
+    appUserModelId: APP_USER_MODEL_ID,
+  };
 });
 
 // 项目持久化
@@ -1545,10 +2288,27 @@ function getLatestProjectFolderModifiedAt(folderPath: string): string | undefine
 }
 
 ipcMain.handle('project:loadAll', async () => {
-  return loadProjectsFromDisk().map(project => ({
-    ...project,
-    folderModifiedAt: getLatestProjectFolderModifiedAt(project.folderPath) || project.updatedAt,
-  }));
+  // 直接返回缓存数据，不做实时目录扫描
+  return loadProjectsFromDisk();
+});
+
+// 后台刷新指定项目的目录修改时间（异步、非阻塞）
+ipcMain.handle('project:refreshFolderModifiedAt', async (_event: any, projectIds: string[]) => {
+  const projects = loadProjectsFromDisk();
+  const updates: { id: string; folderModifiedAt: string }[] = [];
+  for (const project of projects) {
+    if (projectIds.length > 0 && !projectIds.includes(project.id)) continue;
+    if (!project.folderPath) continue;
+    const folderModifiedAt = getLatestProjectFolderModifiedAt(project.folderPath) || project.updatedAt;
+    if (folderModifiedAt) {
+      updates.push({ id: project.id, folderModifiedAt });
+      // 同时持久化到项目 JSON
+      const idx = projects.findIndex(p => p.id === project.id);
+      if (idx >= 0) projects[idx].folderModifiedAt = folderModifiedAt;
+    }
+  }
+  if (updates.length > 0) saveProjectsToDisk(projects);
+  return updates;
 });
 
 ipcMain.handle('project:delete', async (_event: any, projectId: string) => {
@@ -2453,6 +3213,113 @@ ipcMain.handle('file:parseWord', async (_event: any, filePath: string) => {
   }
 });
 
+interface DocxParagraphBlock {
+  xml: string;
+  text: string;
+  start: number;
+  end: number;
+}
+
+function collectDocxParagraphBlocks(documentXml: string): DocxParagraphBlock[] {
+  const blocks: DocxParagraphBlock[] = [];
+  const regex = /<w:p\b[\s\S]*?<\/w:p>/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(documentXml))) {
+    const xml = match[0];
+    const text = xmlTextFromBlock(xml);
+    if (!text) continue;
+    blocks.push({ xml, text, start: match.index, end: match.index + xml.length });
+  }
+  return blocks;
+}
+
+function replaceParagraphProperties(targetParagraph: string, sourceParagraph: string): string {
+  const sourcePPr = sourceParagraph.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] || '';
+  const sourceRPr = sourceParagraph.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] || '';
+  let next = targetParagraph;
+
+  if (sourcePPr) {
+    if (/<w:pPr\b[\s\S]*?<\/w:pPr>/.test(next)) {
+      next = next.replace(/<w:pPr\b[\s\S]*?<\/w:pPr>/, sourcePPr);
+    } else {
+      next = next.replace(/(<w:p\b[^>]*>)/, `$1${sourcePPr}`);
+    }
+  }
+
+  if (sourceRPr) {
+    next = next.replace(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g, (runXml) => {
+      if (/<w:rPr\b[\s\S]*?<\/w:rPr>/.test(runXml)) {
+        return runXml.replace(/<w:rPr\b[\s\S]*?<\/w:rPr>/, sourceRPr);
+      }
+      return runXml.replace(/(<w:r\b[^>]*>)/, `$1${sourceRPr}`);
+    });
+  }
+
+  return next;
+}
+
+async function applyDocumentParagraphFormats(params: { sourcePath: string; targetPath: string; paragraphIndices: number[] }) {
+  const sourcePath = String(params?.sourcePath || '');
+  const targetPath = String(params?.targetPath || '');
+  const paragraphIndices = Array.from(new Set((params?.paragraphIndices || []).map(Number).filter(index => Number.isInteger(index) && index >= 0))).sort((a, b) => a - b);
+  if (!sourcePath || !targetPath) return { success: false, error: '源文件或目标文件路径无效' };
+  if (paragraphIndices.length === 0) return { success: false, error: '请先选择要套用格式的段落' };
+
+  const sourceCheck = checkWithinWorkspace(sourcePath);
+  if (!sourceCheck.ok) return { success: false, error: sourceCheck.error };
+  const targetCheck = checkWithinWorkspace(targetPath);
+  if (!targetCheck.ok) return { success: false, error: targetCheck.error };
+  if (!fs.existsSync(sourcePath) || !fs.existsSync(targetPath)) return { success: false, error: '源文件或目标文件不存在' };
+
+  const sourceExt = path.extname(sourcePath).toLowerCase();
+  const targetExt = path.extname(targetPath).toLowerCase();
+  const resolvedSource = sourceExt === '.doc' ? convertLegacyDocToDocx(sourcePath) : sourcePath;
+  if (!resolvedSource || path.extname(resolvedSource).toLowerCase() !== '.docx') {
+    return { success: false, error: '源文件需要是 .docx，旧版 .doc 需要能自动转换为 .docx' };
+  }
+  if (targetExt !== '.docx') {
+    return { success: false, error: '目前只支持把格式套用到 .docx 目标文件' };
+  }
+
+  const backupPath = getBackupPath(targetPath);
+  fs.copyFileSync(targetPath, backupPath);
+
+  try {
+    const sourceZip = await JSZip.loadAsync(fs.readFileSync(resolvedSource));
+    const targetZip = await JSZip.loadAsync(fs.readFileSync(targetPath));
+    const sourceDoc = sourceZip.file('word/document.xml');
+    const targetDoc = targetZip.file('word/document.xml');
+    if (!sourceDoc || !targetDoc) return { success: false, error: '未找到 docx 主文档内容', backupPath };
+
+    const sourceXml = await sourceDoc.async('string');
+    const targetXml = await targetDoc.async('string');
+    const sourceParagraphs = collectDocxParagraphBlocks(sourceXml);
+    const targetParagraphs = collectDocxParagraphBlocks(targetXml);
+
+    let nextXml = targetXml;
+    let appliedCount = 0;
+    for (const index of paragraphIndices.slice().sort((a, b) => b - a)) {
+      const sourceParagraph = sourceParagraphs[index];
+      const targetParagraph = targetParagraphs[index];
+      if (!sourceParagraph || !targetParagraph) continue;
+      const replacement = replaceParagraphProperties(targetParagraph.xml, sourceParagraph.xml);
+      nextXml = nextXml.slice(0, targetParagraph.start) + replacement + nextXml.slice(targetParagraph.end);
+      appliedCount++;
+    }
+
+    if (appliedCount === 0) return { success: false, error: '没有找到可套用的对应段落', backupPath };
+    targetZip.file('word/document.xml', nextXml);
+    fs.writeFileSync(targetPath, await targetZip.generateAsync({ type: 'nodebuffer' }));
+    return { success: true, appliedCount, backupPath };
+  } catch (error: any) {
+    try {
+      if (fs.existsSync(backupPath)) fs.copyFileSync(backupPath, targetPath);
+    } catch {}
+    return { success: false, error: error.message || '套用格式失败，已尝试恢复原文件', backupPath };
+  }
+}
+
+ipcMain.handle('file:applyDocumentParagraphFormats', async (_event: any, params: { sourcePath: string; targetPath: string; paragraphIndices: number[] }) => applyDocumentParagraphFormats(params));
 ipcMain.handle('file:extractTemplateFormatRules', async (_event: any, filePath: string) => {
   try {
     return await extractDocxTemplateFormatRules(filePath);
@@ -2915,10 +3782,14 @@ ipcMain.handle('review:execute', async (_event: any, params: {
       const analysisContext = isExampleTemplate && template.exampleAnalysis
         ? `\n范文分析摘要：\n${template.exampleAnalysis.slice(0, 2000)}\n`
         : '';
-      const reviewPrompt = isExampleTemplate
-        ? `你是文档审查与改稿助手。当前使用的是“范文模板”，范文标题不是固定标题，不要按标题逐字判定缺失。\n\n目标：根据范文体现的写作方向、技术展开顺序、材料组织方式和表达风格，指出当前正文可以如何优化。只输出需要优化的方向；不要打分，不要说某个范文标题缺失。\n\n输出格式：\n## 写作方向名称\n问题：\n- 当前正文在该方向上的不足，最多 2 条。\n建议：\n- 下一步如何补材料、展开技术、调整顺序或润色表达，最多 3 条。\n\n规则：\n1. 范文标题仅作参考方向，可以改写成更适合当前项目的标题。\n2. 只关注“整体概述 -> 技术层面由浅入深展开 -> 试验/应用 -> 总结展望”等写作路径是否完整。\n3. 不要把范文里的项目事实、数据、时间、设备名称当成当前项目必须满足的要求。\n4. 如果程序审查结果包含格式问题，必须明确说明格式规则是硬性要求，不能按范文参考放宽。\n5. 不要输出长段落、总体评估或寒暄。\n\n范文写作方向：\n${exampleDirections || '无'}\n\n${analysisContext}程序审查结果：\n${issueText}\n\n正文摘录：\n${content.slice(0, 6000)}`
-        : `你是文档审查与改稿助手。请严格按模板章节输出审查建议。\n\n目标：模板里有多个结构章节，例如“一、总体目标”“二、研究内容”。只输出存在问题或需要优化的章节；没有问题的章节不要输出。每个章节下面固定包含“问题”和“建议”。\n\n输出格式（必须严格遵守，不要添加其他标题、总体评估、寒暄或结尾）：\n## 一、章节名称\n问题：\n- 用一句话说明该章节的核心问题。\n- 如有第二个问题，再用一句话说明。\n建议：\n- 给出一条可执行修改建议。\n- 如需补写正文，给出一条简短参考句式；缺少事实数据时写“需人工补充：...”。\n\n规则：\n1. 只输出有问题或需要优化的模板章节。\n2. 章节标题必须尽量使用模板中的原始章节名。\n3. 每个章节必须同时包含“问题：”和“建议：”。\n4. 每个章节的问题最多 2 条，建议最多 3 条，每条不超过 80 字。\n5. 不要把程序已经模糊匹配到的章节重新判定为缺失；如果标题写法不同，只说明它与模板章节如何对应。\n6. 建议要围绕当前正文和模板要求，避免泛泛而谈。\n7. 不要输出长段落、引用块、成段示例、总体评估、“以下是建议”“好的”等非章节内容。\n\n模板必需章节：\n${requiredOutline || '无'}\n\n
-${analysisContext}程序审查结果：\n${issueText}\n\n正文摘录：\n${content.slice(0, 6000)}`;
+      const reviewPrompt = composePromptMain('review', {
+        requiredOutline: isExampleTemplate
+          ? `范文写作方向：\n${exampleDirections || '无'}`
+          : `模板必需章节：\n${requiredOutline || '无'}`,
+        analysisContext,
+        issueText,
+        content: content.slice(0, 6000),
+      });
       aiSuggestions = await callDefaultAI(reviewPrompt);
     } catch (error) {
       console.warn('AI review suggestion failed:', error);
@@ -2979,9 +3850,20 @@ ipcMain.handle('ai:call', async (_event: any, prompt: string | { prompt: string;
   }
 });
 
+
+ipcMain.handle('ai:callParallelDetails', async (_event: any, params: { prompt: string; modelId?: string; modelIds?: string[]; config?: AIConfig }) => {
+  try {
+    return await callParallelAIDetails(params.prompt, params.modelIds, params.config, params.modelId);
+  } catch (error: any) {
+    throw new Error(`AI parallel details failed: ${error.message}`);
+  }
+});
+
 // AI 生成摘要
 ipcMain.handle('ai:generateSummary', async (_event: any, content: string) => {
-  const prompt = `请为以下文档内容生成一个简短的摘要（100-200字）：\n\n${content.substring(0, 3000)}`;
+  const prompt = composePromptMain('summary', {
+    content: content.substring(0, 3000),
+  });
 
   try {
     const summary = await callConfiguredAI(prompt);
@@ -2993,19 +3875,12 @@ ipcMain.handle('ai:generateSummary', async (_event: any, content: string) => {
 
 // AI 审查建议
 ipcMain.handle('ai:reviewSuggestion', async (_event: any, params: { content: string; template: string }) => {
-  const prompt = `你是一个文档审查专家。请根据以下模板要求，审查文档内容并给出修改建议。
-
-模板要求：
-${params.template}
-
-文档内容：
-${params.content.substring(0, 3000)}
-
-请指出：
-1. 缺少的必要章节
-2. 内容不完整或需要补充的部分
-3. 格式或结构问题
-4. 具体的修改建议`;
+  const prompt = composePromptMain('review', {
+    requiredOutline: params.template,
+    analysisContext: '',
+    issueText: '',
+    content: params.content.substring(0, 3000),
+  });
 
   try {
     const suggestions = await callConfiguredAI(prompt);
@@ -3068,6 +3943,8 @@ ipcMain.handle('folder:stopWatch', async (_event: any, projectId: string) => {
 
 ipcMain.handle('folder:listFiles', async (_event: any, folderPath: string) => {
   try {
+    const check = checkWithinWorkspace(folderPath);
+    if (!check.ok) return { success: false, error: check.error, files: [] };
     const files = fs.readdirSync(folderPath);
     const supportedExts = ['.docx', '.pdf', '.txt'];
     const filteredFiles = files.filter(file => {
@@ -3080,17 +3957,19 @@ ipcMain.handle('folder:listFiles', async (_event: any, folderPath: string) => {
   }
 });
 
-// 获取文件夹完整内容（含元数据）
+// 获取文件夹完整内容（含元数据）— 异步 I/O 避免阻塞主进程
 ipcMain.handle('folder:getContents', async (_event: any, folderPath: string) => {
   try {
+    const check = checkWithinWorkspace(folderPath);
+    if (!check.ok) return { success: false, error: check.error, items: [] };
     if (!fs.existsSync(folderPath)) return { success: true, items: [] };
-    const entries = fs.readdirSync(folderPath, { withFileTypes: true });
-    const items = entries.map(entry => {
+    const entries = await fs.promises.readdir(folderPath, { withFileTypes: true });
+    const items = await Promise.all(entries.map(async entry => {
       const fullPath = path.join(folderPath, entry.name);
       let size = 0;
       let modifiedAt = '';
       try {
-        const stat = fs.statSync(fullPath);
+        const stat = await fs.promises.stat(fullPath);
         size = entry.isDirectory() ? 0 : stat.size;
         modifiedAt = stat.mtime.toISOString();
       } catch {}
@@ -3102,7 +3981,7 @@ ipcMain.handle('folder:getContents', async (_event: any, folderPath: string) => 
         modifiedAt,
         path: fullPath,
       };
-    });
+    }));
     // 目录在前，文件在后，各自按名称排序
     items.sort((a, b) => {
       if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
@@ -3111,6 +3990,76 @@ ipcMain.handle('folder:getContents', async (_event: any, folderPath: string) => 
     return { success: true, items };
   } catch (error: any) {
     return { success: false, items: [], error: error.message };
+  }
+});
+
+interface SearchedProjectFile {
+  name: string;
+  path: string;
+  ext: string;
+  size: number;
+  modifiedAt: string;
+}
+
+const normalizeFileSearchText = (value: string) =>
+  String(value || '').trim().replace(/\s+/g, '').toLowerCase();
+
+async function searchProjectFiles(
+  folderPath: string,
+  query: string,
+  output: SearchedProjectFile[] = [],
+  state = { visited: 0 },
+): Promise<SearchedProjectFile[]> {
+  if (!fs.existsSync(folderPath) || output.length >= 500) return output;
+  const entries = await fs.promises.readdir(folderPath, { withFileTypes: true });
+  const needle = normalizeFileSearchText(query);
+
+  for (const entry of entries) {
+    if (state.visited >= 10000 || output.length >= 500) break;
+    const fullPath = path.join(folderPath, entry.name);
+
+    if (entry.isDirectory()) {
+      if (!ignoredScanDirs.has(entry.name)) {
+        await searchProjectFiles(fullPath, query, output, state);
+      }
+      continue;
+    }
+
+    if (!entry.isFile()) continue;
+    state.visited += 1;
+
+    const ext = path.extname(entry.name).toLowerCase();
+    const fileNameText = normalizeFileSearchText(entry.name);
+    const extText = normalizeFileSearchText(ext.replace('.', ''));
+    if (!fileNameText.includes(needle) && !extText.includes(needle)) continue;
+
+    try {
+      const stat = await fs.promises.stat(fullPath);
+      output.push({
+        name: entry.name,
+        path: fullPath,
+        ext,
+        size: stat.size,
+        modifiedAt: stat.mtime.toISOString(),
+      });
+    } catch {}
+  }
+
+  return output;
+}
+
+ipcMain.handle('folder:searchFiles', async (_event: any, params: { folderPath: string; query: string }) => {
+  try {
+    const { folderPath, query } = params;
+    const check = checkWithinWorkspace(folderPath);
+    if (!check.ok) return { success: false, error: check.error, files: [] };
+    const normalizedQuery = normalizeFileSearchText(query);
+    if (!normalizedQuery) return { success: true, files: [] };
+    const files = (await searchProjectFiles(folderPath, normalizedQuery))
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    return { success: true, files };
+  } catch (error: any) {
+    return { success: false, files: [], error: error.message };
   }
 });
 
@@ -3126,13 +4075,13 @@ interface ScannedStageFile {
 const stageScanExts = new Set(['.doc', '.docx', '.pdf', '.txt', '.ppt', '.pptx', '.xls', '.xlsx']);
 const ignoredScanDirs = new Set(['.git', 'node_modules', 'dist', 'build', '.cache']);
 
-function scanStageFiles(folderPath: string, output: ScannedStageFile[] = []): ScannedStageFile[] {
+async function scanStageFiles(folderPath: string, output: ScannedStageFile[] = []): Promise<ScannedStageFile[]> {
   if (!fs.existsSync(folderPath)) return output;
-  const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+  const entries = await fs.promises.readdir(folderPath, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = path.join(folderPath, entry.name);
     if (entry.isDirectory()) {
-      if (!ignoredScanDirs.has(entry.name)) scanStageFiles(fullPath, output);
+      if (!ignoredScanDirs.has(entry.name)) await scanStageFiles(fullPath, output);
       continue;
     }
 
@@ -3140,7 +4089,7 @@ function scanStageFiles(folderPath: string, output: ScannedStageFile[] = []): Sc
     if (!stageScanExts.has(ext)) continue;
 
     try {
-      const stat = fs.statSync(fullPath);
+      const stat = await fs.promises.stat(fullPath);
       output.push({
         name: entry.name,
         path: fullPath,
@@ -3156,13 +4105,141 @@ function scanStageFiles(folderPath: string, output: ScannedStageFile[] = []): Sc
 
 ipcMain.handle('folder:scanStageFiles', async (_event: any, folderPath: string) => {
   try {
-    const files = scanStageFiles(folderPath)
+    const check = checkWithinWorkspace(folderPath);
+    if (!check.ok) return { success: false, error: check.error, files: [] };
+    const files = (await scanStageFiles(folderPath))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     return { success: true, files };
   } catch (error: any) {
     return { success: false, files: [], error: error.message };
   }
 });
+// ---- folder:getTreeStats ----
+interface TreeFileEntry {
+  name: string;
+  path: string;
+  relativePath: string;
+  ext: string;
+  size: number;
+  modifiedAt: string;
+}
+
+interface TreeFolderEntry {
+  name: string;
+  path: string;
+  relativePath: string;
+}
+
+interface TreeStatsResult {
+  success: boolean;
+  stats?: {
+    fileCount: number;
+    folderCount: number;
+    totalSize: number;
+    typeCount: Record<string, number>;
+  };
+  files?: TreeFileEntry[];
+  folders?: TreeFolderEntry[];
+  error?: string;
+}
+
+const TREE_STATS_MAX_FILES = 20000;
+const TREE_STATS_MAX_FOLDERS = 5000;
+
+async function collectTreeStats(
+  rootPath: string,
+  currentDir: string,
+  files: TreeFileEntry[],
+  folders: TreeFolderEntry[],
+  typeCount: Record<string, number>,
+  knownExts: Set<string>,
+): Promise<{ fileCount: number; folderCount: number; totalSize: number }> {
+  if (!fs.existsSync(currentDir)) return { fileCount: 0, folderCount: 0, totalSize: 0 };
+  const entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+  let fileCount = 0;
+  let folderCount = 0;
+  let totalSize = 0;
+
+  for (const entry of entries) {
+    if (files.length >= TREE_STATS_MAX_FILES && folders.length >= TREE_STATS_MAX_FOLDERS) break;
+    const fullPath = path.join(currentDir, entry.name);
+    const relativePath = path.relative(rootPath, fullPath);
+
+    if (entry.isDirectory()) {
+      if (ignoredScanDirs.has(entry.name)) continue;
+      folderCount += 1;
+      if (folders.length < TREE_STATS_MAX_FOLDERS) {
+        folders.push({ name: entry.name, path: fullPath, relativePath });
+      }
+      const sub = await collectTreeStats(rootPath, fullPath, files, folders, typeCount, knownExts);
+      fileCount += sub.fileCount;
+      folderCount += sub.folderCount;
+      totalSize += sub.totalSize;
+      continue;
+    }
+
+    if (!entry.isFile()) continue;
+    fileCount += 1;
+
+    let size = 0;
+    let modifiedAt = '';
+    try {
+      const stat = await fs.promises.stat(fullPath);
+      size = stat.size;
+      modifiedAt = stat.mtime.toISOString();
+      totalSize += size;
+    } catch {}
+
+    const ext = path.extname(entry.name).toLowerCase();
+    const typeKey = knownExts.has(ext) ? ext : '其他';
+    typeCount[typeKey] = (typeCount[typeKey] || 0) + 1;
+
+    if (files.length < TREE_STATS_MAX_FILES) {
+      files.push({ name: entry.name, path: fullPath, relativePath, ext, size, modifiedAt });
+    }
+  }
+
+  return { fileCount, folderCount, totalSize };
+}
+
+ipcMain.handle('folder:getTreeStats', async (_event: any, folderPath: string): Promise<TreeStatsResult> => {
+  try {
+    const check = checkWithinWorkspace(folderPath);
+    if (!check.ok) return { success: false, error: check.error };
+    if (!fs.existsSync(folderPath)) {
+      return {
+        success: true,
+        stats: { fileCount: 0, folderCount: 0, totalSize: 0, typeCount: {} },
+        files: [],
+        folders: [],
+      };
+    }
+
+    const knownExts = new Set(['.docx', '.doc', '.pdf', '.xlsx', '.xls', '.pptx', '.ppt', '.txt']);
+    const typeCount: Record<string, number> = {};
+    for (const ext of knownExts) typeCount[ext] = 0;
+    typeCount['其他'] = 0;
+
+    const files: TreeFileEntry[] = [];
+    const folders: TreeFolderEntry[] = [];
+    const { fileCount, folderCount, totalSize } = await collectTreeStats(
+      folderPath, folderPath, files, folders, typeCount, knownExts,
+    );
+
+    files.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    folders.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+
+    return {
+      success: true,
+      stats: { fileCount, folderCount, totalSize, typeCount },
+      files,
+      folders,
+    };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
 // 任务操作
 ipcMain.handle('task:save', async (_event: any, task: TaskItem) => {
   const tasks = loadTasksFromDisk();
@@ -3179,6 +4256,203 @@ ipcMain.handle('task:loadAll', async () => {
   return loadTasksFromDisk();
 });
 
+
+ipcMain.handle('collaboration:startReceiver', async (_event: any, params?: { port?: number }) => {
+  try {
+    return await startCollaborationServer(params?.port || 39218);
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+ipcMain.handle('collaboration:stopReceiver', async () => stopCollaborationServer());
+
+ipcMain.handle('collaboration:getStatus', async () => ({
+  success: true,
+  running: Boolean(collaborationServer),
+  port: collaborationPort,
+  addresses: getLanAddresses(),
+  urls: collaborationServer ? getLanAddresses().map(address => `http://${address}:${collaborationPort}/tasks`) : [],
+  peers: getCollaborationPeers(),
+  friends: getCollaborationFriends(),
+}));
+
+ipcMain.handle('collaboration:sendTask', async (_event: any, params: { endpoint?: string; friendId?: string; task: TaskItem; projectName?: string; senderName?: string }) => {
+  try {
+    const endpoint = resolveCollaborationTarget(params).toString();
+    const result = await postJsonToPeer(endpoint, {
+      task: params.task,
+      projectName: params.projectName || '',
+      senderName: params.senderName || os.userInfo().username || APP_DISPLAY_NAME,
+      sentAt: new Date().toISOString(),
+    });
+    return { success: true, result };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+ipcMain.handle('collaboration:listPeers', async () => ({
+  success: true,
+  peers: getCollaborationPeers(),
+  friends: getCollaborationFriends(),
+}));
+
+ipcMain.handle('collaboration:addFriend', async (_event: any, peer: Partial<LanPeerRecord> & { source?: string; status?: string }) => {
+  try {
+    if (!peer?.id || !peer.host || !peer.port) throw new Error('Invalid peer');
+    const friends = loadCollaborationFriendsFromDisk();
+    const next: CollaborationFriend = {
+      id: String(peer.id),
+      name: String(peer.name || peer.deviceName || peer.host),
+      deviceName: peer.deviceName ? String(peer.deviceName) : undefined,
+      host: String(peer.host),
+      port: Number(peer.port),
+      source: (['lan', 'email', 'nickname', 'manual', 'invite'].includes(peer.source as string) ? peer.source : 'lan') as CollaborationFriend['source'],
+      status: (['pending', 'accepted', 'blocked'].includes(peer.status as string) ? peer.status : 'accepted') as CollaborationFriend['status'],
+      addedAt: new Date().toISOString(),
+      lastSeenAt: peer.lastSeenAt ? String(peer.lastSeenAt) : new Date().toISOString(),
+    };
+    saveCollaborationFriendsToDisk([next, ...friends.filter(item => item.id !== next.id)]);
+    emitCollaborationPeersChanged();
+    return { success: true, friend: next, friends: getCollaborationFriends() };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+ipcMain.handle('collaboration:removeFriend', async (_event: any, friendId: string) => {
+  const friends = loadCollaborationFriendsFromDisk().filter(item => item.id !== friendId);
+  saveCollaborationFriendsToDisk(friends);
+  emitCollaborationPeersChanged();
+  return { success: true, friends: getCollaborationFriends() };
+});
+
+ipcMain.handle('collaboration:listFriends', async () => ({
+  success: true,
+  friends: getCollaborationFriends(),
+}));
+
+ipcMain.handle('collaboration:sendFile', async (_event: any, params: CollaborationFileSendParams) => {
+  try {
+    const result = await sendFileToPeer(params);
+    return { success: true, result };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+// ─── 好友请求 ────────────────────────────────────────────
+
+function loadFriendRequestsFromDisk(): CollaborationFriendRequest[] {
+  try {
+    if (!fs.existsSync(collaborationRequestsFile)) return [];
+    return JSON.parse(fs.readFileSync(collaborationRequestsFile, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function saveFriendRequestsToDisk(requests: CollaborationFriendRequest[]) {
+  fs.writeFileSync(collaborationRequestsFile, JSON.stringify(requests, null, 2), 'utf-8');
+}
+
+ipcMain.handle('collaboration:sendFriendRequest', async (_event: any, params: { targetId: string; targetHost: string; targetPort: number; message?: string }) => {
+  try {
+    const identity = getLocalCollaborationIdentity();
+    const requests = loadFriendRequestsFromDisk();
+    const existing = requests.find(r => r.fromId === identity.id && r.targetId === params.targetId && r.status === 'pending');
+    if (existing) return { success: false, error: '已发送过好友请求，等待对方确认' };
+
+    // 通过 HTTP 发送请求给目标
+    const targetUrl = `http://${params.targetHost}:${params.targetPort}/friend-request`;
+    const payload = {
+      fromId: identity.id,
+      fromName: identity.name,
+      fromDeviceName: identity.deviceName,
+      fromHost: getLanAddresses()[0] || '127.0.0.1',
+      fromPort: collaborationPort,
+      message: params.message || '',
+    };
+    try {
+      await postJsonToPeer(targetUrl, payload);
+    } catch {
+      // 目标可能不在线，仍然记录请求
+    }
+
+    const request: CollaborationFriendRequest = {
+      id: `req-${Date.now()}-${identity.id}`,
+      fromId: identity.id,
+      fromName: identity.name,
+      fromDeviceName: identity.deviceName,
+      fromHost: payload.fromHost,
+      fromPort: payload.fromPort,
+      targetId: params.targetId,
+      message: params.message,
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+    };
+    saveFriendRequestsToDisk([request, ...requests]);
+    return { success: true, request };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+ipcMain.handle('collaboration:listFriendRequests', async () => ({
+  success: true,
+  requests: loadFriendRequestsFromDisk(),
+}));
+
+ipcMain.handle('collaboration:acceptFriendRequest', async (_event: any, requestId: string) => {
+  try {
+    const requests = loadFriendRequestsFromDisk();
+    const req = requests.find(r => r.id === requestId);
+    if (!req) return { success: false, error: '请求不存在' };
+
+    // 更新请求状态
+    req.status = 'accepted';
+    saveFriendRequestsToDisk(requests);
+
+    // 自动添加为好友
+    const friends = loadCollaborationFriendsFromDisk();
+    const already = friends.some(f => f.id === req.fromId);
+    if (!already) {
+      const friend: CollaborationFriend = {
+        id: req.fromId,
+        name: req.fromName,
+        deviceName: req.fromDeviceName,
+        host: req.fromHost,
+        port: req.fromPort,
+        source: 'lan',
+        status: 'accepted',
+        addedAt: new Date().toISOString(),
+      };
+      saveCollaborationFriendsToDisk([friend, ...friends]);
+    }
+    emitCollaborationPeersChanged();
+    return { success: true, friends: getCollaborationFriends() };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+ipcMain.handle('collaboration:rejectFriendRequest', async (_event: any, requestId: string) => {
+  try {
+    const requests = loadFriendRequestsFromDisk();
+    const req = requests.find(r => r.id === requestId);
+    if (!req) return { success: false, error: '请求不存在' };
+    req.status = 'rejected';
+    saveFriendRequestsToDisk(requests);
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+// 在 HTTP server 中添加好友请求路由
+const originalCreateServer = createCollaborationHttpServer;
+
 ipcMain.handle('task:delete', async (_event: any, taskId: string) => {
   const tasks = loadTasksFromDisk();
   const filtered = tasks.filter(t => t.id !== taskId);
@@ -3187,14 +4461,10 @@ ipcMain.handle('task:delete', async (_event: any, taskId: string) => {
 
 // AI 执行任务
 ipcMain.handle('task:executeAI', async (_event: any, params: { taskId: string; content: string; instruction: string }) => {
-  const prompt = `你是一个文档处理助手。请根据以下指令处理文档内容：
-
-指令：${params.instruction}
-
-文档内容：
-${params.content.substring(0, 3000)}
-
-请直接输出处理后的内容，不要添加额外说明。`;
+  const prompt = composePromptMain('taskExecute', {
+    instruction: params.instruction,
+    content: params.content.substring(0, 3000),
+  });
 
   try {
     const result = await callConfiguredAI(prompt);
@@ -3226,7 +4496,7 @@ ipcMain.handle('settings:save', async (_event: any, settings: AppSettings) => {
 // 获取工作区已用大小
 ipcMain.handle('workspace:getSize', async (_event: any, workspacePath: string) => {
   try {
-    const bytes = getDirSize(workspacePath);
+    const bytes = await getDirSize(workspacePath);
     return { success: true, bytes };
   } catch (error: any) {
     return { success: true, bytes: 0 };
@@ -3253,9 +4523,128 @@ ipcMain.handle('projectDoc:loadAll', async () => {
 ipcMain.handle('projectDoc:delete', async (_event: any, docId: string) => {
   const docs = loadProjectDocsFromDisk();
   saveProjectDocsToDisk(docs.filter(d => d.id !== docId));
+  removeStageMemoriesForDoc(docId);
 });
 
 // 项目文档分析
+// Knowledge and reference materials
+ipcMain.handle('knowledge:loadStageMemories', async () => loadStageMemoriesFromDisk());
+
+ipcMain.handle('knowledge:saveStageMemory', async (_event: any, entry: StageMemoryEntry) => {
+  const entries = loadStageMemoriesFromDisk();
+  const index = entries.findIndex(item => item.id === entry.id);
+  if (index >= 0) entries[index] = entry;
+  else entries.push(entry);
+  saveStageMemoriesToDisk(entries);
+  return entry;
+});
+
+ipcMain.handle('knowledge:deleteStageMemory', async (_event: any, memoryId: string) => {
+  const entries = loadStageMemoriesFromDisk();
+  saveStageMemoriesToDisk(entries.filter(item => item.id !== memoryId));
+});
+
+function removeStageMemoriesForDoc(docId?: string): number {
+  if (!docId) return 0;
+  const entries = loadStageMemoriesFromDisk();
+  const nextEntries = entries.filter(item => item.docId !== docId);
+  if (nextEntries.length !== entries.length) saveStageMemoriesToDisk(nextEntries);
+  return entries.length - nextEntries.length;
+}
+
+ipcMain.handle('knowledge:deleteStageMemoriesForDoc', async (_event: any, docId: string) => {
+  return { success: true, removed: removeStageMemoriesForDoc(docId) };
+});
+
+ipcMain.handle('knowledge:learnStageFinal', async (_event: any, params: {
+  projectId: string;
+  projectName: string;
+  stageName: string;
+  docId?: string;
+  docName: string;
+  sourceFilePath?: string;
+  content?: string;
+}) => {
+  try {
+    let content = clipKnowledgeText(params.content || '', 18000);
+    if (!content && params.sourceFilePath) {
+      const extracted = await extractKnowledgeTextFromFile(params.sourceFilePath);
+      if (!extracted.success || !extracted.content) return { success: false, error: extracted.error || 'unable to extract text' };
+      content = clipKnowledgeText(extracted.content, 18000);
+    }
+    if (!content) return { success: false, error: 'empty final document content' };
+    const stageName = normalizeKnowledgeStageName(params.stageName);
+    const prompt = composePromptMain('memory', {
+      stageName,
+      docName: params.docName,
+      content,
+    });
+    const summary = await callConfiguredAI(prompt);
+    const now = new Date().toISOString();
+    const entries = loadStageMemoriesFromDisk();
+    const existingIndex = params.docId
+      ? entries.findIndex(item =>
+          item.projectId === params.projectId &&
+          normalizeKnowledgeStageName(item.stageName) === stageName &&
+          item.docId === params.docId
+        )
+      : -1;
+    const previous = existingIndex >= 0 ? entries[existingIndex] : undefined;
+    const entry: StageMemoryEntry = {
+      id: previous?.id || `memory-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      projectId: params.projectId,
+      projectName: params.projectName,
+      stageName,
+      docId: params.docId,
+      docName: params.docName,
+      sourceFilePath: params.sourceFilePath,
+      summary: String(summary || '').trim(),
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
+    };
+    if (existingIndex >= 0) entries[existingIndex] = entry;
+    else entries.push(entry);
+    saveStageMemoriesToDisk(entries);
+    return { success: true, entry };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('knowledge:loadReferenceMaterials', async () => loadReferenceMaterialsFromDisk());
+
+ipcMain.handle('knowledge:saveReferenceMaterial', async (_event: any, material: ReferenceMaterial) => saveReferenceMaterialUpsert(material));
+
+ipcMain.handle('knowledge:deleteReferenceMaterial', async (_event: any, materialId: string) => {
+  const materials = loadReferenceMaterialsFromDisk();
+  saveReferenceMaterialsToDisk(materials.filter(item => item.id !== materialId));
+});
+
+ipcMain.handle('knowledge:importReferenceFiles', async (_event: any, params: { projectId: string; filePaths: string[]; source?: 'project-file' | 'external' }) => {
+  try {
+    const imported: ReferenceMaterial[] = [];
+    for (const filePath of params.filePaths || []) {
+      const extracted = await extractKnowledgeTextFromFile(filePath);
+      const now = new Date().toISOString();
+      const material: ReferenceMaterial = {
+        id: `ref-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        projectId: params.projectId,
+        name: extracted.fileName || path.basename(filePath),
+        filePath,
+        source: params.source || 'external',
+        contentPreview: extracted.success ? clipKnowledgeText(extracted.content || '', 6000) : '',
+        summary: extracted.success ? undefined : extracted.error,
+        createdAt: now,
+        updatedAt: now,
+      };
+      imported.push(saveReferenceMaterialUpsert(material));
+    }
+    return { success: true, materials: imported };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('projectDoc:analyze', async (_event: any, params: {
   content: string;
   template: WritingTemplate;
@@ -3282,18 +4671,11 @@ ipcMain.handle('projectDoc:analyze', async (_event: any, params: {
           const templateNode = allTemplateNodes.find(node => node.id === section.nodeId);
           const requirement = templateNode?.description?.trim();
 
-          const prompt = `你是一个文档审查专家。请分析以下章节内容的完成度。
-
-章节标题：${section.title}
-${requirement ? `模板要求：\n${requirement}\n` : ''}
-章节内容（前1000字）：
-${matched.content.substring(0, 1000)}
-
-请评估：
-1. 内容是否满足模板要求，状态为 completed/partial/missing
-2. 简短评语（30字以内）
-
-请用 JSON 格式回复：{"status":"completed","comment":"评语"}`;
+          const prompt = composePromptMain('sectionAnalysis', {
+            sectionTitle: section.title,
+            requirement: requirement ? `模板要求：\n${requirement}\n` : '',
+            content: matched.content.substring(0, 1000),
+          });
 
           try {
             const response = await callConfiguredAI(prompt);
@@ -3366,6 +4748,10 @@ ipcMain.handle('workspace:listFolders', async (_event: any, dirPath: string) => 
 ipcMain.handle('workspace:moveFolder', async (_event: any, params: { src: string; dest: string }) => {
   try {
     const { src, dest } = params;
+    const sc = checkWithinWorkspace(src);
+    if (!sc.ok) return { success: false, error: sc.error };
+    const dc = checkWithinWorkspace(dest);
+    if (!dc.ok) return { success: false, error: dc.error };
     if (!fs.existsSync(src)) {
       return { success: false, error: '源文件夹不存在' };
     }
@@ -3384,6 +4770,8 @@ ipcMain.handle('workspace:moveFolder', async (_event: any, params: { src: string
 // 删除文件夹
 ipcMain.handle('workspace:deleteFolder', async (_event: any, folderPath: string) => {
   try {
+    const check = checkWithinWorkspace(folderPath);
+    if (!check.ok) return { success: false, error: check.error };
     if (!fs.existsSync(folderPath)) return { success: true };
     fs.rmSync(folderPath, { recursive: true, force: true });
     return { success: true };
@@ -3396,6 +4784,8 @@ ipcMain.handle('workspace:deleteFolder', async (_event: any, folderPath: string)
 ipcMain.handle('file:createFolder', async (_event: any, params: { folderPath: string; folderName: string }) => {
   try {
     const parentPath = path.resolve(String(params.folderPath || '').trim());
+    const parentCheck = checkParentWithinWorkspace(parentPath);
+    if (!parentCheck.ok) return { success: false, error: parentCheck.error };
     const rawName = String(params.folderName || '').trim();
     const safeName = path.basename(rawName);
     if (!rawName) return { success: false, error: '文件夹名称不能为空' };
@@ -3418,6 +4808,10 @@ ipcMain.handle('file:createFolder', async (_event: any, params: { folderPath: st
 ipcMain.handle('file:createBlank', async (_event: any, params: { folderPath: string; fileName: string; fileType: string }) => {
   try {
     const { folderPath, fileName, fileType } = params;
+    const parentCheck = checkParentWithinWorkspace(folderPath);
+    if (!parentCheck.ok) return { success: false, error: parentCheck.error };
+    const nameCheck = checkSafeChildName(fileName);
+    if (!nameCheck.ok) return { success: false, error: nameCheck.error };
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
@@ -3441,6 +4835,10 @@ ipcMain.handle('file:generateFromContent', async (_event: any, params: {
 }) => {
   try {
     const { template, sectionContents, folderPath, fileName } = params;
+    const parentCheck = checkParentWithinWorkspace(folderPath);
+    if (!parentCheck.ok) return { success: false, error: parentCheck.error };
+    const nameCheck = checkSafeChildName(fileName);
+    if (!nameCheck.ok) return { success: false, error: nameCheck.error };
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
@@ -3457,6 +4855,10 @@ ipcMain.handle('file:generateFromContent', async (_event: any, params: {
 ipcMain.handle('file:createFromTemplate', async (_event: any, params: { folderPath: string; fileName: string; template: WritingTemplate; fileType?: string }) => {
   try {
     const { folderPath, fileName, template } = params;
+    const parentCheck = checkParentWithinWorkspace(folderPath);
+    if (!parentCheck.ok) return { success: false, error: parentCheck.error };
+    const nameCheck = checkSafeChildName(fileName);
+    if (!nameCheck.ok) return { success: false, error: nameCheck.error };
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
@@ -3848,6 +5250,8 @@ ipcMain.handle('dialog:saveZip', async (_event: any, projectName: string) => {
 ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: string; workspacePath: string }) => {
   try {
     const { zipPath, workspacePath } = params;
+    const wsCheck = checkWithinWorkspace(workspacePath);
+    if (!wsCheck.ok) return { success: false, error: wsCheck.error };
 
     if (!fs.existsSync(zipPath)) {
       return { success: false, error: 'ZIP 文件不存在' };
@@ -3870,8 +5274,13 @@ ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: s
     });
     const uniqueRoots = [...new Set(rootEntries)];
     if (uniqueRoots.length === 1) {
-      // 只有一个顶级目录，用它作为文件夹名
-      projectFolderName = uniqueRoots[0];
+      // 只有一个顶级目录，用它作为文件夹名 — 但必须是安全的 basename
+      const rootName = uniqueRoots[0];
+      const nameCheck = checkSafeChildName(rootName);
+      if (nameCheck.ok) {
+        projectFolderName = rootName;
+      }
+      // 如果不安全，回退到 zipBaseName（已由 path.basename 保证）
     }
 
     // 在workspace中创建项目文件夹
@@ -3911,8 +5320,15 @@ ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: s
       filesToExtract.push({ path: cleanPath, data: zipEntry });
     });
 
+    const resolvedFolder = path.resolve(folderPath);
     for (const file of filesToExtract) {
-      const fullPath = path.join(folderPath, file.path);
+      // Zip Slip 防护：显式拒绝 ../ 和绝对路径
+      if (file.path.includes('..') || path.isAbsolute(file.path)) {
+        return { success: false, error: `ZIP 条目包含不安全路径: ${file.path}` };
+      }
+      const fullPath = path.resolve(folderPath, file.path);
+      const slipCheck = checkPathInside(fullPath, resolvedFolder);
+      if (!slipCheck.ok) return { success: false, error: `ZIP 条目 "${file.path}" ${slipCheck.error}` };
       const dir = path.dirname(fullPath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
@@ -4001,16 +5417,22 @@ ipcMain.handle('zip:listFiles', async (_event: any, zipPath: string) => {
 ipcMain.handle('zip:extractFiles', async (_event: any, params: { zipPath: string; targetPath: string; filePaths: string[] }) => {
   try {
     const { zipPath, targetPath, filePaths } = params;
+    const targetCheck = checkWithinWorkspace(targetPath);
+    if (!targetCheck.ok) return { success: false, error: targetCheck.error };
     if (!fs.existsSync(zipPath)) {
       return { success: false, error: 'ZIP 文件不存在' };
     }
     const buffer = fs.readFileSync(zipPath);
     const zip = await JSZip.loadAsync(buffer);
+    const resolvedTarget = path.resolve(targetPath);
     const extracted: string[] = [];
     for (const filePath of filePaths) {
       const zipEntry = zip.file(filePath);
       if (!zipEntry) continue;
-      const fullPath = path.join(targetPath, path.basename(filePath));
+      // Zip Slip 防护：用 path.resolve 而非 path.basename，显式拒绝 ../
+      const fullPath = path.resolve(targetPath, filePath);
+      const slipCheck = checkPathInside(fullPath, resolvedTarget);
+      if (!slipCheck.ok) return { success: false, error: `ZIP 条目 "${filePath}" ${slipCheck.error}` };
       const dir = path.dirname(fullPath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
@@ -4057,7 +5479,11 @@ ipcMain.handle('project:exportZip', async (_event: any, params: { project: any; 
   }
 });
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  ensureWindowsNotificationShortcut();
+  createWindow();
+  startCollaborationServer().catch(() => {});
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

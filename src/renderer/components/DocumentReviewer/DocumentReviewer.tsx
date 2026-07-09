@@ -16,6 +16,8 @@ import {
   Statistic,
   Alert,
   Input,
+  Spin,
+  Tooltip,
 } from 'antd';
 import {
   CheckCircleOutlined,
@@ -41,6 +43,9 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { DocumentVersion, ProjectDocument, ReviewConfig, ReviewIssue, ReviewResult, TaskItem } from '../../../shared/types';
 import { detectTimelineStage, getAllStages } from '../../utils/timelineStages';
 import DiffMatchPatch from 'diff-match-patch';
+import { composePrompt } from '../../utils/promptComposer';
+import { buildLifecyclePatch, reviewLifecycleStatus } from '../../utils/documentLifecycle';
+import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -155,6 +160,15 @@ type AiSuggestionBlock = {
   suggestion: string;
 };
 
+type AiRewriteVariant = {
+  id: string;
+  modelName: string;
+  ok: boolean;
+  replacement: string;
+  reason?: string;
+  error?: string;
+};
+
 type AiRewritePreview = {
   id: string;
   title: string;
@@ -162,6 +176,7 @@ type AiRewritePreview = {
   replacement: string;
   reason?: string;
   status?: 'pending' | 'accepted';
+  variants?: AiRewriteVariant[];
 };
 
 type ReviewSectionFinding = {
@@ -301,7 +316,7 @@ const splitAiSuggestionText = (value = ''): AiSuggestionBlock[] => {
 };
 
 
-const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
+const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../../shared/types').WorkbenchFocus }> = ({ onBack, focus }) => {
   const {
     currentProject,
     currentStageName,
@@ -330,6 +345,12 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   // 版本对比状态
   const [selectedVersionA, setSelectedVersionA] = useState<string>('');
   const [selectedVersionB, setSelectedVersionB] = useState<string>('');
+  const [stageCompareFiles, setStageCompareFiles] = useState<Array<{ name: string; path: string; ext: string; size: number; createdAt: string; modifiedAt: string }>>([]);
+  const [parsedCompareContent, setParsedCompareContent] = useState<Record<string, string>>({});
+  const [parsingCompareIds, setParsingCompareIds] = useState<Record<string, boolean>>({});
+  const [formatCompareById, setFormatCompareById] = useState<Record<string, { loading?: boolean; error?: string; paragraphs?: any[] }>>({});
+  const [selectedFormatDiffKeys, setSelectedFormatDiffKeys] = useState<Record<string, boolean>>({});
+  const [applyingFormat, setApplyingFormat] = useState('');
   const [isAnalyzingDiff, setIsAnalyzingDiff] = useState(false);
   const [diffAnalysis, setDiffAnalysis] = useState<string>('');
   const [editingSuggestionKey, setEditingSuggestionKey] = useState<string>('');
@@ -366,78 +387,92 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const projectTasks = currentProject ? tasks.filter(t => t.projectId === currentProject.id) : [];
   const latestReview = projectReviews[0];
   const allStages = useMemo(() => getAllStages(customStages), [customStages]);
+
+  const getProjectDocStageName = (doc: ProjectDocument) => {
+    const template = templates.find(t => t.id === doc.templateId);
+    const version = doc.versionId ? projectVersions.find(item => item.id === doc.versionId) : undefined;
+    return detectTimelineStage(
+      allStages,
+      doc.name,
+      doc.sourceFilePath,
+      template?.name,
+      template?.category,
+      version?.fileName,
+    );
+  };
+
+  const getReviewTemplateStageName = (template: typeof templates[number]) => {
+    if (allStages.some(stage => stage.name === template.category)) return template.category;
+    return detectTimelineStage(allStages, template.name, template.description, template.category);
+  };
+
+  const reviewerStageOptions = useMemo(() => {
+    return allStages.map(stage => {
+      const templateCount = templates.filter(template => getReviewTemplateStageName(template) === stage.name).length;
+      const docCount = currentProject
+        ? projectDocs.filter(doc => doc.projectId === currentProject.id && getProjectDocStageName(doc) === stage.name).length
+        : 0;
+      return {
+        value: stage.name,
+        label: `${stage.name}\uff08\u6a21\u677f ${templateCount} / \u6587\u4ef6 ${docCount}\uff09`,
+        templateCount,
+        docCount,
+      };
+    });
+  }, [allStages, currentProject?.id, projectDocs, projectVersions, templates]);
+
+  useEffect(() => {
+    if (!currentProject || currentStageName) return;
+    const preferredStage = reviewerStageOptions.find(option => option.templateCount > 0 || option.docCount > 0) || reviewerStageOptions[0];
+    if (preferredStage) setCurrentStageName(preferredStage.value);
+  }, [currentProject?.id, currentStageName, reviewerStageOptions, setCurrentStageName]);
+
   const visibleTemplates = useMemo(() => {
-    const stageScopedTemplates = currentStageName
-      ? templates.filter(template => {
-        const detectedStage = detectTimelineStage(allStages, template.name, template.description, template.category);
-        return template.category === currentStageName || detectedStage === currentStageName;
-      })
-      : templates;
-    const baseTemplates = stageScopedTemplates.length > 0 ? stageScopedTemplates : templates;
+    if (!currentStageName) return [];
+    const stageScopedTemplates = templates.filter(template => getReviewTemplateStageName(template) === currentStageName);
     const stageDocKinds = new Set(
       projectDocs
-        .filter(doc => {
-          if (!currentProject || doc.projectId !== currentProject.id) return false;
-          if (!currentStageName) return true;
-          const version = doc.versionId ? projectVersions.find(item => item.id === doc.versionId) : undefined;
-          const detectedStage = detectTimelineStage(allStages, doc.name, doc.sourceFilePath, version?.fileName);
-          return detectedStage === currentStageName;
-        })
+        .filter(doc => currentProject && doc.projectId === currentProject.id && getProjectDocStageName(doc) === currentStageName)
         .map(doc => inferReviewerProjectDocKind(doc, doc.versionId ? projectVersions.find(item => item.id === doc.versionId) : undefined))
         .filter(Boolean) as ReviewerDocKind[]
     );
-    return [...baseTemplates].sort((a, b) => {
+    return [...stageScopedTemplates].sort((a, b) => {
       const aKind = inferReviewerTemplateKind(a);
       const bKind = inferReviewerTemplateKind(b);
       const aScore = aKind && stageDocKinds.has(aKind) ? 1 : 0;
       const bScore = bKind && stageDocKinds.has(bKind) ? 1 : 0;
-      return bScore - aScore;
+      return bScore - aScore || new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime();
     });
-  }, [allStages, currentProject, currentStageName, projectDocs, projectVersions, templates]);
+  }, [currentProject?.id, currentStageName, projectDocs, projectVersions, templates]);
 
   useEffect(() => {
-    if (!currentProject || visibleTemplates.length === 0) return;
+    if (!currentProject || !currentStageName) return;
+    if (visibleTemplates.length === 0) {
+      if (selectedTemplate) setSelectedTemplate('');
+      if (selectedDocId) setSelectedDocId('');
+      return;
+    }
     if (selectedTemplate && visibleTemplates.some(template => template.id === selectedTemplate)) return;
     setSelectedTemplate(visibleTemplates[0].id);
     setSelectedDocId('');
-  }, [currentProject?.id, currentStageName, selectedTemplate, visibleTemplates]);
+  }, [currentProject?.id, currentStageName, selectedDocId, selectedTemplate, visibleTemplates]);
 
-  // 选中模板后，筛选该项目下属于该模板的文档
+  // Stage-first review: list files in the selected stage first, then sort by template compatibility.
   const matchedDocs = useMemo(() => {
-    if (!selectedTemplate || !currentProject) return [];
+    if (!currentProject || !currentStageName) return [];
     const selectedTpl = templates.find(t => t.id === selectedTemplate);
-    if (!selectedTpl) return [];
     const selectedKind = inferReviewerTemplateKind(selectedTpl);
-    const selectedKindGroup = findReviewerKindGroup(normalizeReviewerMatchText(selectedTpl.name, selectedTpl.category, selectedTpl.description));
-    return projectDocs.filter(d => {
-      if (d.projectId !== currentProject.id) return false;
-      const oldTemplate = templates.find(t => t.id === d.templateId);
-      const version = d.versionId ? projectVersions.find(item => item.id === d.versionId) : undefined;
-      if (currentStageName) {
-        const detectedStage = detectTimelineStage(
-          allStages,
-          d.name,
-          d.sourceFilePath,
-          oldTemplate?.name,
-          oldTemplate?.category,
-          version?.fileName,
-        );
-        if (detectedStage !== currentStageName && oldTemplate?.category !== currentStageName) return false;
-      }
-      const docKind = inferReviewerProjectDocKind(d, version);
-      if (selectedKind && docKind && !reviewerKindsCompatible(selectedKind, docKind)) return false;
-      if (selectedKind && docKind) return true;
-
-      const docText = normalizeReviewerMatchText(d.name, d.sourceFilePath, version?.fileName);
-      const docKindGroup = findReviewerKindGroup(docText);
-      if (docKindGroup) {
-        return reviewerTemplateMatchesKind(selectedTpl, docKindGroup);
-      }
-      if (d.templateId === selectedTemplate) return true;
-      if (oldTemplate?.category === selectedTpl.category && !selectedKindGroup) return true;
-      return Boolean(String(selectedTpl.name || '').toLowerCase() && docText.includes(String(selectedTpl.name || '').toLowerCase()));
+    const stageDocs = projectDocs.filter(doc => doc.projectId === currentProject.id && getProjectDocStageName(doc) === currentStageName);
+    return [...stageDocs].sort((a, b) => {
+      const aVersion = a.versionId ? projectVersions.find(item => item.id === a.versionId) : undefined;
+      const bVersion = b.versionId ? projectVersions.find(item => item.id === b.versionId) : undefined;
+      const aKind = inferReviewerProjectDocKind(a, aVersion);
+      const bKind = inferReviewerProjectDocKind(b, bVersion);
+      const aScore = selectedKind && aKind && reviewerKindsCompatible(selectedKind, aKind) ? 1 : 0;
+      const bScore = selectedKind && bKind && reviewerKindsCompatible(selectedKind, bKind) ? 1 : 0;
+      return bScore - aScore || new Date(b.analyzedAt || b.createdAt).getTime() - new Date(a.analyzedAt || a.createdAt).getTime();
     });
-  }, [allStages, currentStageName, projectDocs, projectVersions, selectedTemplate, templates, currentProject]);
+  }, [currentProject?.id, currentStageName, projectDocs, projectVersions, selectedTemplate, templates]);
 
   useEffect(() => {
     if (!pendingWorkflowFocus || pendingWorkflowFocus.target !== 'review') return;
@@ -502,7 +537,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     const existingVersion = getDocumentVersion(doc);
     if (existingVersion) {
       if (doc.versionId !== existingVersion.id) {
-        await updateProjectDoc(doc.id, { versionId: existingVersion.id });
+        await updateProjectDoc(doc.id, { versionId: existingVersion.id, ...buildLifecyclePatch('identified') });
       }
       return existingVersion.id;
     }
@@ -537,6 +572,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         versionId: version.id,
         sourceFilePath: doc.sourceFilePath || sourcePath,
         sourceFileModifiedAt: doc.sourceFileModifiedAt || now,
+        ...buildLifecyclePatch('identified'),
       });
       await loadVersions();
       return version.id;
@@ -728,6 +764,13 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       const versionId = await ensureDocumentVersion(selectedDoc);
       const result = await executeReview(versionId, selectedTemplate, reviewConfig);
       if (result.success) {
+        if (result.result) {
+          const reviewedAt = new Date().toISOString();
+          await updateProjectDoc(selectedDoc.id, {
+            reviewedAt,
+            ...buildLifecyclePatch(reviewLifecycleStatus(result.result.issues), reviewedAt),
+          });
+        }
         message.success('审查完成');
       } else {
         message.error(result.error || '审查失败');
@@ -739,56 +782,454 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     }
   };
 
-  // 版本对比相关函数
-  const getVersionContent = (versionId: string) => {
-    const version = versions.find(v => v.id === versionId);
-    return version?.content || '';
+  // 版本对比相关函数：同阶段项目文件都可参与，不要求先同步成版本或完成审查。
+  type ReviewerComparableVersion = {
+    id: string;
+    source: 'version' | 'project-doc' | 'project-file';
+    fileName: string;
+    filePath?: string;
+    content: string;
+    createdAt: string;
+    modifiedAt?: string;
   };
 
-  const computeDiff = (textA: string, textB: string) => {
+  const compareFileExts = new Set(['.doc', '.docx', '.pdf', '.txt', '.md', '.rtf', '.ppt', '.pptx', '.xls', '.xlsx']);
+  const normalizeComparePath = (value = '') => value.trim().toLowerCase();
+  const getCompareSourceLabel = (source: ReviewerComparableVersion['source']) => {
+    if (source === 'project-doc') return '项目文档';
+    if (source === 'project-file') return '项目文件';
+    return '版本记录';
+  };
+  const getCompareStage = (...parts: Array<string | undefined>) => detectTimelineStage(allStages, ...parts);
+
+  useEffect(() => {
+    let cancelled = false;
+    const scan = async () => {
+      if (!currentProject?.folderPath) {
+        setStageCompareFiles([]);
+        return;
+      }
+      try {
+        const result = await window.electronAPI.scanStageFiles(currentProject.folderPath);
+        if (!cancelled) setStageCompareFiles(result.success ? result.files || [] : []);
+      } catch (error) {
+        console.warn('Failed to scan reviewer compare files:', error);
+        if (!cancelled) setStageCompareFiles([]);
+      }
+    };
+    void scan();
+    return () => { cancelled = true; };
+  }, [currentProject?.id, currentProject?.folderPath]);
+
+  // 行级 diff：先按行拆分，再对每行做字符级 diff 高亮
+  type DiffLine = { type: 'equal' | 'insert' | 'delete'; text: string; lineA?: number; lineB?: number; charDiffs?: [number, string][] };
+
+  const computeLineDiff = (textA: string, textB: string): DiffLine[] => {
     const dmp = new DiffMatchPatch();
-    const diffs = dmp.diff_main(textA, textB);
+    const lineDiffs = dmp.diff_linesToChars_(textA, textB);
+    const diffs = dmp.diff_main(lineDiffs.chars1, lineDiffs.chars2, false);
+    dmp.diff_charsToLines_(diffs, lineDiffs.lineArray);
     dmp.diff_cleanupSemantic(diffs);
-    return diffs;
+
+    const result: DiffLine[] = [];
+    let lineA = 1, lineB = 1;
+    for (const [op, text] of diffs) {
+      const lines = text.split('\n');
+      const actualLines = lines[lines.length - 1] === '' ? lines.slice(0, -1) : lines;
+      for (const line of actualLines) {
+        if (op === 0) {
+          result.push({ type: 'equal', text: line, lineA, lineB });
+          lineA++;
+          lineB++;
+        } else if (op === -1) {
+          result.push({ type: 'delete', text: line, lineA });
+          lineA++;
+        } else if (op === 1) {
+          result.push({ type: 'insert', text: line, lineB });
+          lineB++;
+        }
+      }
+    }
+    return result;
   };
 
-  const stageVersionIds = new Set(matchedDocs.map(doc => getDocumentVersion(doc)?.id).filter(Boolean) as string[]);
-  const stageComparableVersions = projectVersions.filter(version => stageVersionIds.has(version.id));
-  const comparableVersions = [...(stageComparableVersions.length >= 2 ? stageComparableVersions : projectVersions)]
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const comparableVersions = useMemo((): ReviewerComparableVersion[] => {
+    if (!currentProject) return [];
+    const currentStage = currentStageName || '';
+    const isSameStage = (...parts: Array<string | undefined>) => !currentStage || getCompareStage(...parts) === currentStage;
+    const usedPaths = new Set<string>();
+    const usedVersionIds = new Set<string>();
+    const items: ReviewerComparableVersion[] = [];
+
+    for (const doc of projectDocs) {
+      if (doc.projectId !== currentProject.id) continue;
+      const version = getDocumentVersion(doc);
+      const filePath = doc.sourceFilePath || version?.filePath || '';
+      const fileName = version?.fileName || getFileBaseName(filePath) || doc.name;
+      const stageOk = isSameStage(doc.name, doc.sourceFilePath, version?.fileName, version?.filePath);
+      if (!stageOk) continue;
+      if (filePath) usedPaths.add(normalizeComparePath(filePath));
+      if (version?.id) usedVersionIds.add(version.id);
+      items.push({
+        id: `doc:${doc.id}`,
+        source: 'project-doc',
+        fileName,
+        filePath,
+        content: parsedCompareContent[`doc:${doc.id}`] || version?.content || '',
+        createdAt: doc.sourceFileCreatedAt || version?.createdAt || doc.createdAt,
+        modifiedAt: doc.sourceFileModifiedAt || doc.analyzedAt || version?.createdAt || doc.createdAt,
+      });
+    }
+
+    for (const version of projectVersions) {
+      if (usedVersionIds.has(version.id)) continue;
+      if (!isSameStage(version.fileName, version.filePath)) continue;
+      if (version.filePath) usedPaths.add(normalizeComparePath(version.filePath));
+      items.push({
+        id: `version:${version.id}`,
+        source: 'version',
+        fileName: version.fileName,
+        filePath: version.filePath,
+        content: parsedCompareContent[`version:${version.id}`] || version.content || '',
+        createdAt: version.createdAt,
+        modifiedAt: version.createdAt,
+      });
+    }
+
+    for (const file of stageCompareFiles) {
+      if (!compareFileExts.has(String(file.ext || '').toLowerCase())) continue;
+      if (!isSameStage(file.name, file.path)) continue;
+      const pathKey = normalizeComparePath(file.path);
+      if (usedPaths.has(pathKey)) continue;
+      const id = `file:${file.path}`;
+      items.push({
+        id,
+        source: 'project-file',
+        fileName: file.name || getFileBaseName(file.path),
+        filePath: file.path,
+        content: parsedCompareContent[id] || '',
+        createdAt: file.createdAt,
+        modifiedAt: file.modifiedAt || file.createdAt,
+      });
+      usedPaths.add(pathKey);
+    }
+
+    return items.sort((a, b) => {
+      const bTime = new Date(b.modifiedAt || b.createdAt).getTime();
+      const aTime = new Date(a.modifiedAt || a.createdAt).getTime();
+      return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+    });
+  }, [currentProject?.id, currentStageName, projectDocs, projectVersions, stageCompareFiles, parsedCompareContent]);
+
   const selectedVersionMetaA = comparableVersions.find(version => version.id === selectedVersionA);
   const selectedVersionMetaB = comparableVersions.find(version => version.id === selectedVersionB);
 
   useEffect(() => {
-    if (selectedVersionA && !projectVersions.some(version => version.id === selectedVersionA)) setSelectedVersionA('');
-    if (selectedVersionB && !projectVersions.some(version => version.id === selectedVersionB)) setSelectedVersionB('');
-  }, [projectVersions, selectedVersionA, selectedVersionB]);
+    if (selectedVersionA && !comparableVersions.some(version => version.id === selectedVersionA)) setSelectedVersionA('');
+    if (selectedVersionB && !comparableVersions.some(version => version.id === selectedVersionB)) setSelectedVersionB('');
+  }, [comparableVersions, selectedVersionA, selectedVersionB]);
 
-  const contentA = getVersionContent(selectedVersionA);
-  const contentB = getVersionContent(selectedVersionB);
+  const ensureCompareContent = async (item?: ReviewerComparableVersion) => {
+    if (!item || item.content || !item.filePath || parsedCompareContent[item.id] || parsingCompareIds[item.id]) return;
+    setParsingCompareIds(prev => ({ ...prev, [item.id]: true }));
+    try {
+      const parser = window.electronAPI.parseDocumentSilent || window.electronAPI.parseDocument;
+      const parsed = await parser(item.filePath);
+      let content = parsed.success ? parsed.content?.trim() || '' : '';
+      const ext = getFileExtension(item.fileName || item.filePath);
+      if (!content && ['.txt', '.md'].includes(ext)) {
+        content = (await window.electronAPI.readFile(item.filePath)).trim();
+      }
+      if (content) setParsedCompareContent(prev => ({ ...prev, [item.id]: content }));
+    } catch (error) {
+      console.warn('Failed to parse reviewer compare document:', error);
+    } finally {
+      setParsingCompareIds(prev => ({ ...prev, [item.id]: false }));
+    }
+  };
 
-  const diffResult = useMemo(() => {
+  useEffect(() => {
+    void ensureCompareContent(selectedVersionMetaA);
+    void ensureCompareContent(selectedVersionMetaB);
+  }, [selectedVersionA, selectedVersionB, selectedVersionMetaA?.filePath, selectedVersionMetaB?.filePath]);
+
+  const contentA = selectedVersionMetaA?.content || '';
+  const contentB = selectedVersionMetaB?.content || '';
+
+  const diffResult = useMemo((): DiffLine[] => {
     if (!selectedVersionA || !selectedVersionB) return [];
-    return computeDiff(contentA, contentB);
+    return computeLineDiff(contentA, contentB);
   }, [contentA, contentB, selectedVersionA, selectedVersionB]);
 
   const diffStats = useMemo(() => {
     let insert = 0, deleteCount = 0, equal = 0;
-    for (const [op, text] of diffResult) {
-      const lines = text.split('\n').length - 1 || 1;
-      if (op === 0) equal += lines;
-      else if (op === 1) insert += lines;
-      else if (op === -1) deleteCount += lines;
+    for (const line of diffResult) {
+      if (line.type === 'equal') equal++;
+      else if (line.type === 'insert') insert++;
+      else if (line.type === 'delete') deleteCount++;
     }
     return { insert, delete: deleteCount, equal, total: insert + deleteCount + equal };
   }, [diffResult]);
+  type FormatDiffFieldChange = {
+    fieldKey: string;
+    label: string;
+    left: string;
+    right: string;
+    text: string;
+  };
 
+  type FormatDiffItem = {
+    key: string;
+    index: number;
+    title: string;
+    aText: string;
+    bText: string;
+    diffs: string[];
+    fieldChanges: FormatDiffFieldChange[];
+    summary: string;
+  };
+
+  const formatFields: Array<{ key: string; label: string }> = [
+    { key: 'key', label: '段落类型' },
+    { key: 'styleName', label: '样式' },
+    { key: 'fontFamily', label: '字体' },
+    { key: 'fontSize', label: '字号' },
+    { key: 'fontWeight', label: '加粗' },
+    { key: 'fontStyle', label: '斜体' },
+    { key: 'alignment', label: '对齐方式' },
+    { key: 'lineHeight', label: '行距' },
+    { key: 'indentFirstLine', label: '首行缩进' },
+    { key: 'spaceBefore', label: '段前间距' },
+    { key: 'spaceAfter', label: '段后间距' },
+  ];
+
+  const styleNameLabels: Record<string, string> = {
+    body: '正文样式',
+    normal: '正文样式',
+    paragraph: '普通段落',
+    title: '标题样式',
+    subtitle: '副标题样式',
+    heading: '标题样式',
+    heading1: '一级标题',
+    heading2: '二级标题',
+    heading3: '三级标题',
+    heading4: '四级标题',
+    heading5: '五级标题',
+    heading6: '六级标题',
+  };
+
+  const normalizeFormatToken = (value: any) => String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  const formatValue = (value: any) => value === undefined || value === null || value === '' ? '未识别' : String(value);
+  const formatReadableValue = (fieldKey: string, value: any) => {
+    const raw = formatValue(value);
+    const token = normalizeFormatToken(raw);
+    if (raw === '未识别') return raw;
+    if (fieldKey === 'key' || fieldKey === 'styleName') return styleNameLabels[token] || raw;
+    if (fieldKey === 'fontWeight') {
+      if (['bold', 'bolder', '700', '800', '900', 'true', '1'].includes(token)) return '加粗';
+      if (['normal', 'regular', '400', 'false', '0'].includes(token)) return '不加粗';
+    }
+    if (fieldKey === 'fontStyle') {
+      if (['italic', 'oblique', 'true', '1'].includes(token)) return '斜体';
+      if (['normal', 'false', '0'].includes(token)) return '不斜体';
+    }
+    if (fieldKey === 'alignment') {
+      const alignmentMap: Record<string, string> = {
+        left: '左对齐',
+        center: '居中对齐',
+        centre: '居中对齐',
+        right: '右对齐',
+        justify: '两端对齐',
+        both: '两端对齐',
+        distribute: '分散对齐',
+      };
+      return alignmentMap[token] || raw;
+    }
+    return raw;
+  };
+  const buildFormatDiffText = (_fieldKey: string, label: string, left: string, right: string) =>
+    `${label}不同：A 是${left}，B 是${right}`;
+  const previewCompareText = (value = '') => value.replace(/\s+/g, ' ').slice(0, 42) || '空段落';
+  const canReadFormat = (item?: ReviewerComparableVersion) => Boolean(item?.filePath && ['.doc', '.docx'].includes(getFileExtension(item.filePath || item.fileName)));
+
+  const ensureCompareFormat = async (item?: ReviewerComparableVersion) => {
+    if (!item || !canReadFormat(item) || !window.electronAPI.extractTemplateFormatRules) return;
+    const cached = formatCompareById[item.id];
+    if (cached?.loading || cached?.paragraphs || cached?.error) return;
+    setFormatCompareById(prev => ({ ...prev, [item.id]: { loading: true } }));
+    try {
+      const result = await window.electronAPI.extractTemplateFormatRules!(item.filePath!);
+      setFormatCompareById(prev => ({
+        ...prev,
+        [item.id]: result.success
+          ? { paragraphs: result.paragraphs || [] }
+          : { error: result.error || '格式提取失败' },
+      }));
+    } catch (error: any) {
+      setFormatCompareById(prev => ({ ...prev, [item.id]: { error: error?.message || '格式提取失败' } }));
+    }
+  };
+
+  useEffect(() => {
+    void ensureCompareFormat(selectedVersionMetaA);
+    void ensureCompareFormat(selectedVersionMetaB);
+  }, [selectedVersionA, selectedVersionB, selectedVersionMetaA?.filePath, selectedVersionMetaB?.filePath]);
+
+  const formatDiffs = useMemo((): FormatDiffItem[] => {
+    const paragraphsA = selectedVersionMetaA ? formatCompareById[selectedVersionMetaA.id]?.paragraphs || [] : [];
+    const paragraphsB = selectedVersionMetaB ? formatCompareById[selectedVersionMetaB.id]?.paragraphs || [] : [];
+    const max = Math.min(Math.max(paragraphsA.length, paragraphsB.length), 80);
+    const result: FormatDiffItem[] = [];
+    for (let index = 0; index < max; index++) {
+      const a = paragraphsA[index];
+      const b = paragraphsB[index];
+      if (!a || !b) continue;
+      const fieldChanges = formatFields
+        .map(field => {
+          const leftRaw = formatValue(a[field.key]);
+          const rightRaw = formatValue(b[field.key]);
+          if (leftRaw === rightRaw) return null;
+          const left = formatReadableValue(field.key, leftRaw);
+          const right = formatReadableValue(field.key, rightRaw);
+          return {
+            fieldKey: field.key,
+            label: field.label,
+            left,
+            right,
+            text: buildFormatDiffText(field.key, field.label, left, right),
+          };
+        })
+        .filter(Boolean) as FormatDiffFieldChange[];
+      if (!fieldChanges.length) continue;
+      const diffs = fieldChanges.map(item => item.text);
+      result.push({
+        key: `format-${index}`,
+        index,
+        title: `第 ${index + 1} 段格式不一致`,
+        aText: previewCompareText(a.text),
+        bText: previewCompareText(b.text),
+        diffs,
+        fieldChanges,
+        summary: fieldChanges.slice(0, 2).map(item => item.text).join('；') + (fieldChanges.length > 2 ? ` 等 ${fieldChanges.length} 项` : ''),
+      });
+    }
+    return result;
+  }, [formatCompareById, selectedVersionMetaA?.id, selectedVersionMetaB?.id]);
+
+  useEffect(() => {
+    setSelectedFormatDiffKeys({});
+  }, [selectedVersionA, selectedVersionB]);
+
+  const selectedFormatDiffs = formatDiffs.filter(item => selectedFormatDiffKeys[item.key]);
+  const selectedFormatDiffKeySet = useMemo(() => new Set(selectedFormatDiffs.map(item => item.key)), [selectedFormatDiffs]);
+  const formatDiffByLine = useMemo(() => new Map(formatDiffs.map(item => [item.index + 1, item])), [formatDiffs]);
+  type DiffRow = { left?: DiffLine; right?: DiffLine; formatDiff?: FormatDiffItem };
+
+  const diffRows = useMemo((): DiffRow[] => {
+    const rows: DiffRow[] = [];
+    const resolveFormatDiff = (left?: DiffLine, right?: DiffLine) => {
+      const leftHit = left?.lineA ? formatDiffByLine.get(left.lineA) : undefined;
+      const rightHit = right?.lineB ? formatDiffByLine.get(right.lineB) : undefined;
+      return leftHit || rightHit;
+    };
+
+    for (let index = 0; index < diffResult.length; index++) {
+      const line = diffResult[index];
+      if (line.type === 'equal') {
+        rows.push({ left: line, right: line, formatDiff: resolveFormatDiff(line, line) });
+        continue;
+      }
+
+      if (line.type === 'delete') {
+        const deletes: DiffLine[] = [];
+        while (index < diffResult.length && diffResult[index].type === 'delete') {
+          deletes.push(diffResult[index]);
+          index++;
+        }
+        const inserts: DiffLine[] = [];
+        while (index < diffResult.length && diffResult[index].type === 'insert') {
+          inserts.push(diffResult[index]);
+          index++;
+        }
+        index--;
+        const count = Math.max(deletes.length, inserts.length);
+        for (let offset = 0; offset < count; offset++) {
+          const left = deletes[offset];
+          const right = inserts[offset];
+          rows.push({ left, right, formatDiff: resolveFormatDiff(left, right) });
+        }
+        continue;
+      }
+
+      const inserts: DiffLine[] = [];
+      while (index < diffResult.length && diffResult[index].type === 'insert') {
+        inserts.push(diffResult[index]);
+        index++;
+      }
+      index--;
+      for (const right of inserts) rows.push({ right, formatDiff: resolveFormatDiff(undefined, right) });
+    }
+    return rows;
+  }, [diffResult, formatDiffByLine]);
+
+  const toggleFormatDiff = (key: string, checked: boolean) => {
+    setSelectedFormatDiffKeys(prev => ({ ...prev, [key]: checked }));
+  };
+
+  const handleApplySelectedFormat = async (sourceSide: 'A' | 'B') => {
+    const source = sourceSide === 'A' ? selectedVersionMetaA : selectedVersionMetaB;
+    const target = sourceSide === 'A' ? selectedVersionMetaB : selectedVersionMetaA;
+    if (!source || !target) {
+      message.warning('请先选择两个文档');
+      return;
+    }
+    if (!window.electronAPI.applyDocumentParagraphFormats) {
+      message.warning('当前版本暂不支持格式套用');
+      return;
+    }
+    if (!source.filePath || !target.filePath) {
+      message.warning('源文档或目标文档缺少文件路径');
+      return;
+    }
+    if (getFileExtension(target.filePath) !== '.docx') {
+      message.warning('目前只支持把格式套用到 .docx 文档');
+      return;
+    }
+    const paragraphIndices = selectedFormatDiffs.map(item => item.index);
+    if (paragraphIndices.length === 0) {
+      message.warning('请先勾选需要套用格式的段落');
+      return;
+    }
+
+    setApplyingFormat(sourceSide);
+    try {
+      const result = await window.electronAPI.applyDocumentParagraphFormats({
+        sourcePath: source.filePath,
+        targetPath: target.filePath,
+        paragraphIndices,
+      });
+      if (!result.success) {
+        message.error(result.error || '格式套用失败');
+        return;
+      }
+      setFormatCompareById(prev => {
+        const next = { ...prev };
+        delete next[target.id];
+        return next;
+      });
+      setSelectedFormatDiffKeys({});
+      message.success(`已套用 ${result.appliedCount || paragraphIndices.length} 段格式${result.backupPath ? '，原文件已备份' : ''}`);
+      void ensureCompareFormat(target);
+    } finally {
+      setApplyingFormat('');
+    }
+  };
   const getSelectedDocumentPath = () => {
     if (!selectedDoc) return '';
     return selectedDoc.sourceFilePath || getDocumentVersion(selectedDoc)?.filePath || '';
   };
 
-  const parseAiRewritePreviews = (raw: string): AiRewritePreview[] => {
+  const parseAiRewritePreviews = (raw: string, sourceName = 'AI\u7248\u672c'): AiRewritePreview[] => {
     const text = String(raw || '').trim();
     const jsonText = text.match(/\[[\s\S]*\]/)?.[0] || text.match(/\{[\s\S]*\}/)?.[0] || '';
     try {
@@ -802,8 +1243,15 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
           replacement: String(item.replacement || item.revised || item.revisedText || item.suggestion || '').trim(),
           reason: String(item.reason || item.explanation || '').trim(),
           status: 'pending' as const,
+          variants: [{
+            id: 'variant-' + Date.now() + '-' + index,
+            modelName: sourceName,
+            ok: true,
+            replacement: String(item.replacement || item.revised || item.revisedText || item.suggestion || '').trim(),
+            reason: String(item.reason || item.explanation || '').trim(),
+          }],
         }))
-        .filter(item => item.original && item.replacement);
+        .filter((item: AiRewritePreview) => item.original && item.replacement);
     } catch {
       return [];
     }
@@ -811,6 +1259,42 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
   const updateAiRewritePreview = (id: string, updates: Partial<AiRewritePreview>) => {
     setAiRewritePreviews(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
+  };
+
+
+  const normalizeRewriteOriginalKey = (value: string) => String(value || '')
+    .replace(/\s+/g, '')
+    .slice(0, 180);
+
+  const mergeParallelRewritePreviews = (groups: Array<{ modelName: string; ok: boolean; error?: string; previews: AiRewritePreview[] }>) => {
+    const merged: AiRewritePreview[] = [];
+    const byKey = new Map<string, AiRewritePreview>();
+    groups.forEach((group, groupIndex) => {
+      group.previews.forEach((preview, previewIndex) => {
+        const key = normalizeRewriteOriginalKey(preview.original) || `${groupIndex}-${previewIndex}-${preview.title}`;
+        let target = byKey.get(key);
+        const variant: AiRewriteVariant = {
+          id: `${groupIndex}-${previewIndex}-${Date.now()}`,
+          modelName: group.modelName,
+          ok: group.ok,
+          replacement: preview.replacement,
+          reason: preview.reason,
+          error: group.error,
+        };
+        if (!target) {
+          target = {
+            ...preview,
+            id: `rewrite-${Date.now()}-${merged.length}`,
+            variants: [variant],
+          };
+          byKey.set(key, target);
+          merged.push(target);
+        } else {
+          target.variants = [...(target.variants || []), variant];
+        }
+      });
+    });
+    return merged;
   };
 
   const handleGenerateRewritePlan = async () => {
@@ -832,28 +1316,62 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         message.error(parsed.error || '未能读取文档内容');
         return;
       }
-      const prompt = [
-        '你是文档审查和改稿助手。请根据用户的修改要求，从文档内容中找出需要替换的原文，并给出可直接替换的建议修改文本。',
-        '',
-        '要求：',
-        '1. 只返回 JSON 数组，不要输出 Markdown。',
-        '2. 每一项包含 title、original、replacement、reason。',
-        '3. original 必须逐字复制自文档内容中的连续原文片段，不能概括。',
-        '4. replacement 必须是可直接替换 original 的正式正文内容，保持原文语气和文档格式要求。',
-        '5. 没有把握匹配原文时，返回空数组。',
-        '',
-        '修改要求：',
-        instruction,
-        '',
-        '文档内容：',
-        '-----BEGIN DOCUMENT-----',
-        parsed.content.slice(0, 16000),
-        '-----END DOCUMENT-----',
-      ].join('\\n');
-      const result = await window.electronAPI.callAI({ prompt });
-      const previews = parseAiRewritePreviews(result);
+      const prompt = composePrompt('rewrite', {
+        sectionTitle: '（全文改稿）',
+        requirement: `修改要求：${instruction}`,
+        example: 'None',
+        stageMemory: 'None',
+        reference: 'None',
+        currentContent: parsed.content.slice(0, 16000),
+      });
+      const aiConfig = await window.electronAPI.loadAIConfig();
+      const useParallel = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1 && window.electronAPI.callAIParallelDetails;
+      let previews: AiRewritePreview[] = [];
+      if (useParallel) {
+        const details = await useAIJobStore.getState().runAIJob<{ synthesis?: string; variants: Array<{ modelName: string; ok: boolean; output: string; error?: string }> }>(
+          {
+            scene: 'rewrite',
+            title: '生成审核修订预览',
+            projectId: currentProject?.id,
+            resultPreview: () => '已生成审核修订预览',
+          },
+          async ({ setProgress, throwIfCancelled }) => {
+            setProgress(35);
+            const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
+            throwIfCancelled();
+            setProgress(85);
+            return value;
+          },
+        );
+        previews = mergeParallelRewritePreviews(details.variants.map(variant => ({
+          modelName: variant.modelName,
+          ok: variant.ok,
+          error: variant.error,
+          previews: variant.ok ? parseAiRewritePreviews(variant.output, variant.modelName) : [],
+        })));
+        if (previews.length === 0 && details.synthesis) {
+          previews = parseAiRewritePreviews(details.synthesis, '\u7efc\u5408\u7248\u672c');
+        }
+      } else {
+        const result = await useAIJobStore.getState().runAIJob<string>(
+          {
+            scene: 'rewrite',
+            title: '生成审核修订预览',
+            projectId: currentProject?.id,
+            resultPreview: (value) => value,
+          },
+          async ({ setProgress, throwIfCancelled }) => {
+            setProgress(35);
+            const value = await window.electronAPI.callAI({ prompt });
+            throwIfCancelled();
+            setProgress(85);
+            return String(value || '');
+          },
+        );
+        previews = parseAiRewritePreviews(result);
+      }
       if (previews.length === 0) {
-        message.warning('AI 未生成可直接替换的原文块，请补充更明确的问题描述后重试');
+        message.warning('AI \u672a\u751f\u6210\u53ef\u76f4\u63a5\u66ff\u6362\u7684\u539f\u6587\u5757\uff0c\u8bf7\u8865\u5145\u66f4\u660e\u786e\u7684\u95ee\u9898\u63cf\u8ff0\u540e\u91cd\u8bd5');
       }
       setAiRewritePreviews(previews);
     } catch (error: any) {
@@ -863,13 +1381,14 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     }
   };
 
-  const handleAcceptRewrite = async (preview: AiRewritePreview) => {
+  const handleAcceptRewrite = async (preview: AiRewritePreview, variant?: AiRewriteVariant) => {
     const filePath = getSelectedDocumentPath();
     if (!filePath) {
       message.warning('未找到当前文档的源文件路径');
       return;
     }
-    if (!preview.original.trim() || !preview.replacement.trim()) {
+    const replacementText = (variant?.replacement || preview.replacement || '').trim();
+    if (!preview.original.trim() || !replacementText) {
       message.warning('原文和建议修改都不能为空');
       return;
     }
@@ -879,7 +1398,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
       const result = await window.electronAPI.replaceDocumentText({
         filePath,
         originalText: preview.original,
-        replacementText: preview.replacement,
+        replacementText,
       });
       if (!result.success) {
         message.error(result.error || '替换失败');
@@ -905,28 +1424,56 @@ const DocumentReviewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
     try {
       const versionA = versions.find(v => v.id === selectedVersionA);
       const versionB = versions.find(v => v.id === selectedVersionB);
-      const prompt = `你是一个文档版本对比分析专家。请对比以下两个版本的差异，并给出详细的分析报告。
+      const prompt = composePrompt('diff', {
+        versionAName: versionA?.fileName || '未知',
+        contentA: contentA.substring(0, 12000),
+        versionBName: versionB?.fileName || '未知',
+        contentB: contentB.substring(0, 12000),
+      });
 
-## 版本A：${versionA?.fileName || '未知'}
-\`\`\`
-${contentA.substring(0, 4000)}
-\`\`\`
+      const aiConfig = await window.electronAPI.loadAIConfig();
+      const useParallel = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1 && window.electronAPI.callAIParallelDetails;
+      if (useParallel) {
+        const details = await useAIJobStore.getState().runAIJob<{ synthesis: string; variants: Array<{ modelName: string; ok: boolean }> }>(
+          {
+            scene: 'diff',
+            title: 'AI 分析版本差异',
+            projectId: currentProject?.id,
+            resultPreview: (value) => value.synthesis,
+          },
+          async ({ setProgress, throwIfCancelled }) => {
+            setProgress(35);
+            const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
+            throwIfCancelled();
+            setProgress(85);
+            return value;
+          },
+        );
+        const sourceLine = details.variants
+          .map(variant => `${variant.modelName}${variant.ok ? '\u5df2\u53c2\u4e0e' : '\u5931\u8d25'}`)
+          .join('?');
+        setDiffAnalysis(`${details.synthesis}
 
-## 版本B：${versionB?.fileName || '未知'}
-\`\`\`
-${contentB.substring(0, 4000)}
-\`\`\`
-
-请分析：
-1. 主要变更内容概述
-2. 新增了哪些内容
-3. 删除了哪些内容
-4. 修改了哪些内容
-5. 这些变更对文档质量的影响评估
-6. 建议和注意事项`;
-
-      const result = await window.electronAPI.callAI({ prompt });
-      setDiffAnalysis(result);
+---
+\u5e76\u884c\u6a21\u578b\u6765\u6e90\uff1a${sourceLine}`);
+      } else {
+        const result = await useAIJobStore.getState().runAIJob<string>(
+          {
+            scene: 'diff',
+            title: 'AI 分析版本差异',
+            projectId: currentProject?.id,
+            resultPreview: (value) => value,
+          },
+          async ({ setProgress, throwIfCancelled }) => {
+            setProgress(35);
+            const value = await window.electronAPI.callAI({ prompt });
+            throwIfCancelled();
+            setProgress(85);
+            return String(value || '');
+          },
+        );
+        setDiffAnalysis(result);
+      }
     } catch (error: any) {
       message.error(`AI 分析失败: ${error.message}`);
     } finally {
@@ -1354,7 +1901,53 @@ ${contentB.substring(0, 4000)}
             <Space wrap>
               <Button size="small" onClick={() => setAiAssistPrompt(aiAssistPromptSuggestion)}>{'\u586b\u5145\u63d0\u793a\u8bcd'}</Button>
               <Button size="small" onClick={() => setAiAssistPrompt('')}>{'\u6e05\u7a7a'}</Button>
+              <Button size="small" type="primary" icon={<RobotOutlined />} loading={isGeneratingRewritePlan} onClick={handleGenerateRewritePlan}>
+                {'\u751f\u6210\u4fee\u6539\u9884\u89c8'}
+              </Button>
             </Space>
+            {aiRewritePreviews.length > 0 && (
+              <Space direction="vertical" size={12} style={{ width: '100%', marginTop: 8 }}>
+                {aiRewritePreviews.map(preview => (
+                  <div key={preview.id} style={{ border: '1px solid #dbeafe', borderRadius: 8, padding: 12, background: '#f8fbff' }}>
+                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                      <Space wrap>
+                        <Text strong>{preview.title}</Text>
+                        {preview.status === 'accepted' ? <Tag color="green">{'\u5df2\u91c7\u7528'}</Tag> : null}
+                      </Space>
+                      <div style={{ border: '1px solid #e5e7eb', borderRadius: 6, padding: 10, background: '#fff' }}>
+                        <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>{'\u5f85\u66ff\u6362\u539f\u6587'}</Text>
+                        <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }} ellipsis={{ rows: 3, expandable: true }}>{preview.original}</Paragraph>
+                      </div>
+                      <Row gutter={[10, 10]}>
+                        {(preview.variants?.length ? preview.variants : [{ id: 'default', modelName: 'AI\u7248\u672c', ok: true, replacement: preview.replacement, reason: preview.reason }]).map(variant => (
+                          <Col key={variant.id} xs={24} md={preview.variants && preview.variants.length > 1 ? 12 : 24}>
+                            <div style={{ height: '100%', border: '1px solid #e5e7eb', borderRadius: 8, padding: 10, background: '#fff' }}>
+                              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                                <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                                  <Tag color={variant.ok ? 'blue' : 'red'}>{variant.modelName}</Tag>
+                                  <Button
+                                    size="small"
+                                    type="primary"
+                                    disabled={!variant.ok || !variant.replacement.trim() || preview.status === 'accepted'}
+                                    loading={applyingRewriteId === `${preview.id}:${variant.id}`}
+                                    onClick={() => handleAcceptRewrite(preview, variant)}
+                                  >
+                                    {'\u91c7\u7528\u6b64\u7248\u672c'}
+                                  </Button>
+                                </Space>
+                                {variant.error ? <Text type="danger">{variant.error}</Text> : null}
+                                <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }} ellipsis={{ rows: 5, expandable: true }}>{variant.replacement}</Paragraph>
+                                {variant.reason ? <Text type="secondary">{variant.reason}</Text> : null}
+                              </Space>
+                            </div>
+                          </Col>
+                        ))}
+                      </Row>
+                    </Space>
+                  </div>
+                ))}
+              </Space>
+            )}
           </Space>
         </Card>
       )}
@@ -1363,41 +1956,72 @@ ${contentB.substring(0, 4000)}
       {/* 文档审查 */}
       <Card style={{ marginBottom: 16 }}>
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          {/* 第一步：选择模板 */}
-          <div>
-            <Text strong style={{ display: 'block', marginBottom: 8 }}>选择审查模板</Text>
-            <Select
-              placeholder={currentStageName ? `选择模板（当前阶段：${currentStageName}）` : '选择模板（按阶段分类）'}
-              style={{ width: '100%' }}
-              value={selectedTemplate || undefined}
-              onChange={(val) => { setSelectedTemplate(val); setSelectedDocId(''); }}
-              options={visibleTemplates.map(t => ({
-                value: t.id,
-                label: `${t.name}（${t.category}）`,
-              }))}
-            />
-          </div>
+          <Row gutter={[12, 12]}>
+            <Col xs={24} md={8}>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>{'\u9009\u62e9\u5ba1\u67e5\u9636\u6bb5'}</Text>
+              <Select
+                placeholder={'先选择要审查的阶段'}
+                style={{ width: '100%' }}
+                value={currentStageName || undefined}
+                onChange={(val) => {
+                  setCurrentStageName(val);
+                  setSelectedTemplate('');
+                  setSelectedDocId('');
+                }}
+                options={reviewerStageOptions.map(option => ({
+                  value: option.value,
+                  label: option.label,
+                }))}
+              />
+            </Col>
+            <Col xs={24} md={16}>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>{'\u9009\u62e9\u5ba1\u67e5\u6a21\u677f\u6216\u7248\u672c'}</Text>
+              <Select
+                placeholder={currentStageName ? '\u9009\u62e9\u5f53\u524d\u9636\u6bb5\u5185\u7684\u6a21\u677f' : '\u8bf7\u5148\u9009\u62e9\u9636\u6bb5'}
+                style={{ width: '100%' }}
+                value={selectedTemplate || undefined}
+                disabled={!currentStageName}
+                notFoundContent={currentStageName ? '\u5f53\u524d\u9636\u6bb5\u6682\u65e0\u6a21\u677f' : '\u8bf7\u5148\u9009\u62e9\u9636\u6bb5'}
+                onChange={(val) => { setSelectedTemplate(val); setSelectedDocId(''); }}
+                options={visibleTemplates.map(t => {
+                  const typeLabel = t.templateType === 'example' ? '\u8303\u6587\u6a21\u677f' : '\u76f4\u63a5\u6a21\u677f';
+                  return {
+                    value: t.id,
+                    label: `${t.name}\uff08${typeLabel} \u00b7 ${formatVersionDate(t.updatedAt || t.createdAt)}\uff09`,
+                  };
+                })}
+              />
+            </Col>
+          </Row>
 
-          {/* 第二步：选择文件 */}
-          {selectedTemplate && (
+          {currentStageName && visibleTemplates.length === 0 && (
+            <Alert
+              showIcon
+              type="info"
+              message={'当前阶段还没有可用的审查模板'}
+              description={'可以先在该阶段导入或创建模板，已导入的阶段文件仍会显示在下方便于核对。'}
+            />
+          )}
+
+          {currentStageName && (
             <div>
               <Text strong style={{ display: 'block', marginBottom: 8 }}>
-                选择审查文件
+                {'\u9009\u62e9\u5f85\u5ba1\u6587\u4ef6'}
                 <Text type="secondary" style={{ fontWeight: 'normal', marginLeft: 8 }}>
-                  当前阶段 {currentStageName || '全部'}，共 {matchedDocs.length} 个相关文件
+                  {`\u5f53\u524d\u9636\u6bb5 ${currentStageName}\uff0c\u5171 ${matchedDocs.length} \u4e2a\u9636\u6bb5\u6587\u4ef6`}
                 </Text>
               </Text>
               {matchedDocs.length === 0 ? (
                 <Empty
-                  description={selectedTemplateKind === 'guide_instruction'
-                    ? '当前模板是指南编制说明模板，不会用于审查申报指南正文。请切换到申报指南正文模板，或导入对应模板后再审查。'
-                    : '该项目下没有匹配的文件'}
+                  description={'当前阶段暂无可审查文件'}
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
                 />
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {matchedDocs.map(doc => {
                     const version = getDocumentVersion(doc);
+                    const docKind = inferReviewerProjectDocKind(doc, version);
+                    const isKindMismatch = Boolean(selectedTemplateKind && docKind && !reviewerKindsCompatible(selectedTemplateKind, docKind));
                     const isSelected = selectedDocId === doc.id;
                     const canSyncVersion = !version && Boolean(doc.sourceFilePath);
                     return (
@@ -1417,13 +2041,17 @@ ${contentB.substring(0, 4000)}
                         }}
                       >
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <Text style={{ display: 'block', fontSize: 13 }} ellipsis={{ tooltip: doc.name }}>{doc.name}</Text>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            {version ? `版本: ${version.fileName}` : canSyncVersion ? '未同步版本，审查时会自动同步' : '暂无版本'}
-                            {doc.analyzedAt ? ` · 分析于 ${new Date(doc.analyzedAt).toLocaleDateString('zh-CN')}` : ''}
+                          <Space size={6} style={{ maxWidth: '100%' }}>
+                            <Text style={{ display: 'block', fontSize: 13, maxWidth: 520 }} ellipsis={{ tooltip: doc.name }}>{doc.name}</Text>
+                            {docKind && <Tag color={isKindMismatch ? 'orange' : 'blue'}>{reviewerKindLabels[docKind]}</Tag>}
+                          </Space>
+                          <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
+                            {version ? `\u7248\u672c: ${version.fileName}` : canSyncVersion ? '\u672a\u540c\u6b65\u7248\u672c\uff0c\u5ba1\u67e5\u65f6\u4f1a\u81ea\u52a8\u540c\u6b65' : '\u6682\u65e0\u7248\u672c'}
+                            {doc.analyzedAt ? ` \u00b7 \u5206\u6790\u4e8e ${new Date(doc.analyzedAt).toLocaleDateString('zh-CN')}` : ''}
+                            {isKindMismatch ? ' \u00b7 \u7c7b\u578b\u4e0e\u5f53\u524d\u6a21\u677f\u4e0d\u4e00\u81f4' : ''}
                           </Text>
                         </div>
-                        <Space size={8}>
+                        <Space size={8} wrap>
                           {canSyncVersion && (
                             <Button
                               size="small"
@@ -1434,7 +2062,7 @@ ${contentB.substring(0, 4000)}
                                 handleSyncDocumentVersion(doc);
                               }}
                             >
-                              同步版本
+                              {'\u540c\u6b65\u7248\u672c'}
                             </Button>
                           )}
                           <Progress percent={doc.overallProgress} size="small" style={{ width: 100, marginBottom: 0 }} />
@@ -1576,121 +2204,289 @@ ${contentB.substring(0, 4000)}
       {/* 版本对比 */}
       <Card
         title={currentStageName ? `版本对比 · ${currentStageName}` : '版本对比'}
-        style={{ marginTop: 16 }}
+        style={{ marginTop: 16, overflow: 'hidden' }}
+        styles={{ body: { overflow: 'hidden' } }}
         extra={
-          <Button
-            type="primary"
-            icon={<RobotOutlined />}
-            loading={isAnalyzingDiff}
-            disabled={!selectedVersionA || !selectedVersionB}
-            onClick={handleAiDiffAnalysis}
-          >
-            AI 分析对比
-          </Button>
+          <Space size={8} wrap>
+            {selectedVersionA && selectedVersionB && (
+              <Button
+                icon={<SwapOutlined />}
+                size="small"
+                onClick={() => { const tmp = selectedVersionA; setSelectedVersionA(selectedVersionB); setSelectedVersionB(tmp); }}
+                title="交换 A/B 版本"
+              />
+            )}
+            <Button
+              type="primary"
+              icon={<RobotOutlined />}
+              loading={isAnalyzingDiff}
+              disabled={!selectedVersionA || !selectedVersionB || Boolean(parsingCompareIds[selectedVersionA] || parsingCompareIds[selectedVersionB])}
+              onClick={handleAiDiffAnalysis}
+            >
+              AI 分析对比
+            </Button>
+          </Space>
         }
       >
-        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <Row gutter={[12, 12]}>
-            <Col span={12}>
-              <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 12, height: '100%', background: '#fff' }}>
-                <Text strong style={{ display: 'block', marginBottom: 8 }}>基准版本</Text>
-                <Select
-                  showSearch
-                  style={{ width: '100%' }}
-                  placeholder="选择基准版本"
-                  value={selectedVersionA || undefined}
-                  optionFilterProp="label"
-                  onChange={setSelectedVersionA}
-                  options={comparableVersions.map(version => ({
-                    value: version.id,
-                    label: `${version.fileName} · ${formatVersionDate(version.createdAt)}`,
-                  }))}
-                />
-                <Text type="secondary" style={{ display: 'block', marginTop: 8 }} ellipsis={{ tooltip: selectedVersionMetaA?.fileName }}>
-                  {selectedVersionMetaA ? `内容 ${selectedVersionMetaA.content.length} 字 · ${selectedVersionMetaA.fileName}` : '未选择'}
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          {/* 版本选择器 */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12, alignItems: 'stretch', width: '100%', minWidth: 0 }}>
+            <div style={{ minWidth: 0, border: '1px solid #e5e7eb', borderRadius: 8, padding: '10px 14px', background: '#fafbfc', overflow: 'hidden' }}>
+              <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>基准 (A)</Text>
+              <Select
+                showSearch
+                size="small"
+                style={{ width: '100%', marginTop: 6, minWidth: 0 }}
+                placeholder="选择基准版本"
+                value={selectedVersionA || undefined}
+                optionFilterProp="label"
+                onChange={setSelectedVersionA}
+                options={comparableVersions.map(version => ({
+                  value: version.id,
+                  label: `${version.fileName} · ${formatVersionDate(version.createdAt)}`,
+                }))}
+              />
+              {selectedVersionMetaA && (
+                <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 11 }} ellipsis={{ tooltip: selectedVersionMetaA.fileName }}>
+                  {selectedVersionMetaA.content.length.toLocaleString()} 字 · {getCompareSourceLabel(selectedVersionMetaA.source)} · {selectedVersionMetaA.fileName}
                 </Text>
-              </div>
-            </Col>
-            <Col span={12}>
-              <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 12, height: '100%', background: '#fff' }}>
-                <Text strong style={{ display: 'block', marginBottom: 8 }}>对比版本</Text>
-                <Select
-                  showSearch
-                  style={{ width: '100%' }}
-                  placeholder="选择对比版本"
-                  value={selectedVersionB || undefined}
-                  optionFilterProp="label"
-                  onChange={setSelectedVersionB}
-                  options={comparableVersions.map(version => ({
-                    value: version.id,
-                    label: `${version.fileName} · ${formatVersionDate(version.createdAt)}`,
-                  }))}
-                />
-                <Text type="secondary" style={{ display: 'block', marginTop: 8 }} ellipsis={{ tooltip: selectedVersionMetaB?.fileName }}>
-                  {selectedVersionMetaB ? `内容 ${selectedVersionMetaB.content.length} 字 · ${selectedVersionMetaB.fileName}` : '未选择'}
+              )}
+            </div>
+            <div style={{ minWidth: 0, border: '1px solid #e5e7eb', borderRadius: 8, padding: '10px 14px', background: '#fafbfc', overflow: 'hidden' }}>
+              <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>对比 (B)</Text>
+              <Select
+                showSearch
+                size="small"
+                style={{ width: '100%', marginTop: 6, minWidth: 0 }}
+                placeholder="选择对比版本"
+                value={selectedVersionB || undefined}
+                optionFilterProp="label"
+                onChange={setSelectedVersionB}
+                options={comparableVersions.map(version => ({
+                  value: version.id,
+                  label: `${version.fileName} · ${formatVersionDate(version.createdAt)}`,
+                }))}
+              />
+              {selectedVersionMetaB && (
+                <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 11 }} ellipsis={{ tooltip: selectedVersionMetaB.fileName }}>
+                  {selectedVersionMetaB.content.length.toLocaleString()} 字 · {getCompareSourceLabel(selectedVersionMetaB.source)} · {selectedVersionMetaB.fileName}
                 </Text>
-              </div>
-            </Col>
-          </Row>
+              )}
+            </div>
+          </div>
 
           {selectedVersionA && selectedVersionB ? (
             <>
-              <Row gutter={12}>
-                <Col span={6}><Statistic title="总行数" value={diffStats.total} /></Col>
-                <Col span={6}><Statistic title="新增" value={diffStats.insert} valueStyle={{ color: '#52c41a' }} prefix="+" /></Col>
-                <Col span={6}><Statistic title="删除" value={diffStats.delete} valueStyle={{ color: '#ff4d4f' }} prefix="-" /></Col>
-                <Col span={6}><Statistic title="未变更" value={diffStats.equal} valueStyle={{ color: '#8c8c8c' }} /></Col>
-              </Row>
+              {/* 统计栏 */}
+              <div style={{ display: 'flex', gap: 16, rowGap: 6, flexWrap: 'wrap', padding: '8px 16px', background: '#f6f8fa', borderRadius: 8, fontSize: 13 }}>
+                <span style={{ color: '#8c8c8c' }}>共 <strong>{diffStats.total}</strong> 行</span>
+                <span style={{ color: '#52c41a' }}>+{diffStats.insert} 新增</span>
+                <span style={{ color: '#ff4d4f' }}>-{diffStats.delete} 删除</span>
+                <span style={{ color: '#8c8c8c' }}>{diffStats.equal} 未变</span>
+                {diffStats.total > 0 && (
+                  <span style={{ marginLeft: 'auto', color: '#8c8c8c', fontSize: 12, whiteSpace: 'nowrap' }}>
+                    变更率 {((diffStats.insert + diffStats.delete) / diffStats.total * 100).toFixed(1)}%
+                  </span>
+                )}
+              </div>
 
+              {/* 格式工具条：格式差异嵌入下方内容行内显示 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, rowGap: 6, flexWrap: 'wrap', padding: '8px 12px', background: '#fff7e6', border: '1px solid #ffe7ba', borderRadius: 8 }}>
+                {!selectedVersionMetaA || !selectedVersionMetaB ? (
+                  <Text type="secondary">请选择两个文档后查看格式差异</Text>
+                ) : !canReadFormat(selectedVersionMetaA) || !canReadFormat(selectedVersionMetaB) ? (
+                  <Text type="secondary">格式对比暂只支持 Word 文档，当前仅显示内容差异</Text>
+                ) : formatCompareById[selectedVersionMetaA.id]?.loading || formatCompareById[selectedVersionMetaB.id]?.loading ? (
+                  <><Spin size="small" /><Text type="secondary">正在提取段落格式...</Text></>
+                ) : formatCompareById[selectedVersionMetaA.id]?.error || formatCompareById[selectedVersionMetaB.id]?.error ? (
+                  <Text type="secondary">格式提取失败：{formatCompareById[selectedVersionMetaA.id]?.error || formatCompareById[selectedVersionMetaB.id]?.error}</Text>
+                ) : (
+                  <>
+                    <Tag color={formatDiffs.length > 0 ? 'orange' : 'green'} style={{ margin: 0 }}>
+                      格式差异 {formatDiffs.length} 处
+                    </Tag>
+                    <Text type="secondary" style={{ fontSize: 12 }}>格式差异已用行首感叹号标注，悬停查看说明，点击即可选择</Text>
+                    {formatDiffs.length > 0 && (
+                      <Button size="small" onClick={() => setSelectedFormatDiffKeys(Object.fromEntries(formatDiffs.map(item => [item.key, true])))}>
+                        全选格式差异
+                      </Button>
+                    )}
+                    <Button
+                      size="small"
+                      disabled={selectedFormatDiffs.length === 0 || !canReadFormat(selectedVersionMetaA) || !selectedVersionMetaB?.filePath}
+                      loading={applyingFormat === 'A'}
+                      onClick={() => handleApplySelectedFormat('A')}
+                    >
+                      套用 A 格式到 B
+                    </Button>
+                    <Button
+                      size="small"
+                      disabled={selectedFormatDiffs.length === 0 || !canReadFormat(selectedVersionMetaB) || !selectedVersionMetaA?.filePath}
+                      loading={applyingFormat === 'B'}
+                      onClick={() => handleApplySelectedFormat('B')}
+                    >
+                      套用 B 格式到 A
+                    </Button>
+                  </>
+                )}
+              </div>
+
+              {formatDiffs.length > 0 && (
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, rowGap: 6, flexWrap: 'wrap', padding: '8px 12px', background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: 8 }}>
+                  <Text strong style={{ fontSize: 12, flex: '0 0 auto' }}>已选择格式：</Text>
+                  {selectedFormatDiffs.length === 0 ? (
+                    <Text type="secondary" style={{ fontSize: 12 }}>点击内容行前的感叹号，选择要套用格式的段落</Text>
+                  ) : (
+                    <Space size={6} wrap style={{ flex: 1, minWidth: 0 }}>
+                      {selectedFormatDiffs.map(item => (
+                        <Tag
+                          key={item.key}
+                          color="orange"
+                          closable
+                          onClose={() => toggleFormatDiff(item.key, false)}
+                          style={{ maxWidth: 520, whiteSpace: 'normal', lineHeight: 1.5, margin: 0 }}
+                        >
+                          {item.title}：{item.summary}
+                        </Tag>
+                      ))}
+                    </Space>
+                  )}
+                </div>
+              )}
+              {/* Diff 视图 */}
               <div style={{
-                fontFamily: 'monospace',
-                fontSize: 13,
-                lineHeight: 1.8,
-                maxHeight: 420,
-                overflow: 'auto',
-                background: '#fafafa',
-                border: '1px solid #edf0f5',
+                maxHeight: 520,
+                overflowY: 'auto',
+                overflowX: 'hidden',
+                background: '#f8fafc',
+                border: '1px solid #d1d5db',
                 borderRadius: 8,
-                padding: 12,
               }}>
-                {diffResult.map(([op, diffText], index) => {
-                  const lines = diffText.split('\n');
-                  return lines.map((line, lineIndex) => {
-                    const key = `${index}-${lineIndex}`;
-                    let bgColor = 'transparent';
-                    let prefix = ' ';
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 34px minmax(0, 1fr)', width: '100%', minWidth: 0 }}>
+                  <div style={{ position: 'sticky', top: 0, zIndex: 3, padding: '8px 12px', background: '#f8fafc', borderBottom: '1px solid #d1d5db', borderRight: '1px solid #d1d5db', color: '#374151', fontWeight: 600 }}>
+                    A 文档
+                  </div>
+                  <div style={{ position: 'sticky', top: 0, zIndex: 3, background: '#f8fafc', borderBottom: '1px solid #d1d5db' }} />
+                  <div style={{ position: 'sticky', top: 0, zIndex: 3, padding: '8px 12px', background: '#f8fafc', borderBottom: '1px solid #d1d5db', borderLeft: '1px solid #d1d5db', color: '#374151', fontWeight: 600 }}>
+                    B 文档
+                  </div>
 
-                    if (op === 1) {
-                      bgColor = '#e6ffec';
-                      prefix = '+';
-                    } else if (op === -1) {
-                      bgColor = '#ffebe9';
-                      prefix = '-';
-                    }
-
-                    return (
-                      <div key={key} style={{ display: 'flex', background: bgColor, borderBottom: '1px solid #f0f0f0' }}>
-                        <span style={{ width: 20, textAlign: 'center', color: op === 1 ? '#52c41a' : op === -1 ? '#ff4d4f' : '#999', userSelect: 'none' }}>
-                          {prefix}
+                  {diffRows.map((row, index) => {
+                    const left = row.left;
+                    const right = row.right;
+                    const formatDiff = row.formatDiff;
+                    const isLast = index === diffRows.length - 1;
+                    const getTextColor = (line?: DiffLine, side?: 'left' | 'right') => {
+                      if (!line) return '#64748b';
+                      if (line.type === 'equal') return '#cbd5e1';
+                      if (line.type === 'delete' || side === 'left') return '#fca5a5';
+                      return '#86efac';
+                    };
+                    const getCellBackground = (line?: DiffLine, side?: 'left' | 'right') => {
+                      if (!line) return '#0f172a';
+                      if (line.type === 'equal') return '#111827';
+                      if (line.type === 'delete' || side === 'left') return '#3a1a1a';
+                      return '#16351f';
+                    };
+                    const renderCell = (line?: DiffLine, side?: 'left' | 'right') => (
+                      <div
+                        style={{
+                          minHeight: 32,
+                          display: 'flex',
+                          alignItems: 'stretch',
+                          minWidth: 0,
+                          fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace",
+                          fontSize: 12.5,
+                          lineHeight: 1.65,
+                          background: getCellBackground(line, side),
+                          borderBottom: isLast ? 'none' : '1px solid rgba(148, 163, 184, 0.16)',
+                          borderRight: side === 'left' ? '1px solid #d1d5db' : undefined,
+                          borderLeft: side === 'right' ? '1px solid #d1d5db' : undefined,
+                        }}
+                      >
+                        <span style={{ width: 42, flexShrink: 0, padding: '5px 6px 5px 0', textAlign: 'right', color: line ? '#64748b' : '#334155', background: 'rgba(255,255,255,0.04)', borderRight: '1px solid rgba(255,255,255,0.08)', userSelect: 'none' }}>
+                          {side === 'left' ? line?.lineA || '' : line?.lineB || ''}
                         </span>
-                        <span style={{ flex: 1, paddingLeft: 8, whiteSpace: 'pre-wrap' }}>{line}</span>
+                        <span style={{ width: 20, flexShrink: 0, padding: '5px 0', textAlign: 'center', color: getTextColor(line, side), fontWeight: 700, userSelect: 'none' }}>
+                          {!line ? '' : line.type === 'insert' ? '+' : line.type === 'delete' ? '-' : ' '}
+                        </span>
+                        <span style={{ flex: 1, minWidth: 0, padding: '5px 10px 5px 4px', color: getTextColor(line, side), whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
+                          {line?.text || ' '}
+                        </span>
                       </div>
                     );
-                  });
-                })}
+
+                    return (
+                      <React.Fragment key={index}>
+                        {renderCell(left, 'left')}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 32, background: '#f8fafc', borderBottom: isLast ? 'none' : '1px solid #e5e7eb' }}>
+                          {formatDiff && (
+                            <Tooltip
+                              placement="top"
+                              title={(
+                                <div style={{ maxWidth: 360 }}>
+                                  <div style={{ fontWeight: 600, marginBottom: 4 }}>{formatDiff.title}</div>
+                                  {formatDiff.fieldChanges.slice(0, 6).map(change => (
+                                    <div key={change.fieldKey} style={{ lineHeight: 1.7 }}>{change.text}</div>
+                                  ))}
+                                  {formatDiff.fieldChanges.length > 6 && <div>还有 {formatDiff.fieldChanges.length - 6} 项格式差异</div>}
+                                  <div style={{ marginTop: 6, opacity: 0.8 }}>点击图标可选择或取消该段格式</div>
+                                </div>
+                              )}
+                            >
+                              <button
+                                type="button"
+                                aria-label={`${formatDiff.title}，点击选择或取消`}
+                                aria-pressed={Boolean(selectedFormatDiffKeys[formatDiff.key])}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleFormatDiff(formatDiff.key, !selectedFormatDiffKeys[formatDiff.key]);
+                                }}
+                                style={{
+                                  width: 19,
+                                  height: 19,
+                                  borderRadius: '50%',
+                                  border: selectedFormatDiffKeySet.has(formatDiff.key) ? '1px solid #d97706' : '1px solid #f59e0b',
+                                  background: selectedFormatDiffKeySet.has(formatDiff.key) ? '#f59e0b' : '#fff7ed',
+                                  color: selectedFormatDiffKeySet.has(formatDiff.key) ? '#111827' : '#d97706',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  padding: 0,
+                                  cursor: 'pointer',
+                                  boxShadow: selectedFormatDiffKeySet.has(formatDiff.key) ? '0 0 0 2px rgba(245, 158, 11, 0.22)' : 'none',
+                                }}
+                              >
+                                <ExclamationCircleOutlined style={{ fontSize: 13 }} />
+                              </button>
+                            </Tooltip>
+                          )}
+                        </div>
+                        {renderCell(right, 'right')}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+                {diffRows.length === 0 && (
+                  <div style={{ padding: 24, textAlign: 'center', color: '#666' }}>两个版本内容完全相同</div>
+                )}
               </div>
             </>
           ) : (
             <Empty
-              description={comparableVersions.length >= 2 ? '请选择两个版本进行对比' : '当前阶段暂无两个可对比版本，可先在上方同步文件为版本'}
+              description={comparableVersions.length >= 2 ? '请选择两个版本进行对比' : '当前阶段暂无两个可对比文档；可先在该项目阶段文件夹中导入或新建文档'}
               image={Empty.PRESENTED_IMAGE_SIMPLE}
             />
           )}
 
+          {/* AI 分析报告 */}
           {diffAnalysis && (
-            <div style={{ border: '1px solid #dbeafe', borderRadius: 8, background: '#f8fbff', padding: 12 }}>
-              <Text strong>AI 分析报告</Text>
-              <Paragraph style={{ whiteSpace: 'pre-wrap', margin: '8px 0 0' }}>{diffAnalysis}</Paragraph>
+            <div style={{ border: '1px solid #dbeafe', borderRadius: 8, background: '#f0f7ff', padding: '12px 16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                <RobotOutlined style={{ color: '#1677ff' }} />
+                <Text strong style={{ color: '#1677ff' }}>AI 分析报告</Text>
+              </div>
+              <Paragraph style={{ whiteSpace: 'pre-wrap', margin: 0, fontSize: 13, lineHeight: 1.8 }}>{diffAnalysis}</Paragraph>
             </div>
           )}
         </Space>

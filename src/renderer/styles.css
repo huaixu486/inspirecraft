@@ -1,4 +1,4 @@
-﻿/* ========================================
+/* ========================================
    ProjectHub Design System
    ======================================== */
 
@@ -134,8 +134,9 @@
 }
 
 @keyframes barGrow {
-  from { opacity: 0.45; background-position: -10px 0; filter: saturate(0.92); }
-  to { opacity: 1; background-position: 0 0; filter: saturate(1); }
+  from { opacity: 0; transform: scaleX(0); }
+  60% { opacity: 1; }
+  to { opacity: 1; transform: scaleX(1); }
 }
 
 @keyframes numberCount {
@@ -401,7 +402,7 @@ body.template-editor-modal-open {
 
 /* Table styles */
 .ant-table-row:hover td {
-  background-color: #f8fbff !important;
+  background-color: #f0f5ff !important;
 }
 
 .app-shell {
@@ -570,6 +571,311 @@ body.template-editor-modal-open {
   background: transparent;
 }
 
+.overview-project-table-wrap {
+  min-width: 0;
+}
+
+.overview-project-table .ant-table-body {
+  position: relative;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.overview-project-row-highlight {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  width: 100%;
+  min-width: 920px;
+  pointer-events: none;
+  border-radius: 8px;
+  transition:
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 120ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+  will-change: transform, opacity;
+}
+
+/* legacy svg ring styles, not used by homepage stage progress — kept for reference */
+.stage-progress-wrap,
+.stage-progress-svg,
+.stage-progress-ring,
+.stage-progress-value { /* no longer used */ }
+
+/* 阶段完成度圆环：双半圆 div + transform:rotate，纯合成层动画 */
+.stage-progress-ring-v2 {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  flex-shrink: 0;
+}
+.stage-progress-ring-v2-graphic {
+  position: absolute;
+  inset: 0;
+  transform: rotate(90deg) translateZ(0);
+  transform-origin: 50% 50%;
+  z-index: 1;
+}
+.stage-progress-ring-v2-track {
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  border: 6px solid #f0f0f0;
+  box-sizing: border-box;
+}
+.stage-progress-ring-v2-mask {
+  position: absolute;
+  top: 4px;
+  width: 36px;
+  height: 72px;
+  overflow: hidden;
+}
+.stage-progress-ring-v2-left  { left: 4px; }
+.stage-progress-ring-v2-right { right: 4px; }
+.stage-progress-ring-v2-fill {
+  position: absolute;
+  top: 0;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  border: 6px solid transparent;
+  box-sizing: border-box;
+  transition: none;
+  will-change: transform;
+}
+.stage-progress-ring-v2-ready .stage-progress-ring-v2-fill {
+  transition:
+    transform 420ms linear,
+    border-color 120ms linear;
+}
+.stage-progress-ring-v2-fill-left {
+  left: 0;
+  transform-origin: 36px center;
+}
+.stage-progress-ring-v2-fill-right {
+  right: 0;
+  transform-origin: -40px center;
+}
+.stage-progress-ring-v2-hole {
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  background: #fff;
+  z-index: 2;
+}
+.stage-progress-ring-v2-value {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.stage-progress-ring-v2-value span {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.stage-progress-canvas-ring {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  flex-shrink: 0;
+  contain: layout paint style;
+}
+
+.stage-progress-canvas-ring-canvas {
+  display: block;
+  width: 80px;
+  height: 80px;
+}
+
+.stage-progress-canvas-ring-value {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.stage-progress-canvas-ring-value span {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.stage-progress-svg-ring {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  flex-shrink: 0;
+  contain: layout paint style;
+}
+
+.stage-progress-svg-ring-graphic {
+  display: block;
+  width: 80px;
+  height: 80px;
+  overflow: visible;
+  transform: rotate(-90deg) translateZ(0);
+  transform-origin: 50% 50%;
+}
+
+.stage-progress-svg-ring-track,
+.stage-progress-svg-ring-bar {
+  fill: none;
+  stroke-width: 6;
+}
+
+.stage-progress-svg-ring-track {
+  stroke: #f0f0f0;
+}
+
+.stage-progress-svg-ring-bar {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  stroke-linecap: round;
+  transition: none;
+  will-change: stroke-dashoffset;
+}
+
+.stage-progress-svg-ring-ready .stage-progress-svg-ring-bar {
+  transition:
+    stroke-dashoffset 420ms linear,
+    stroke 120ms linear;
+}
+
+.stage-progress-svg-ring-value {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.stage-progress-svg-ring-value span {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.stage-progress-pie-ring {
+  --stage-progress-color: #faad14;
+  position: relative;
+  width: 80px;
+  height: 80px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #f0f0f0;
+  contain: layout paint style;
+  transform: translateZ(0);
+}
+
+.stage-progress-pie-ring-slice {
+  position: absolute;
+  inset: 0;
+  clip: rect(0, 80px, 80px, 40px);
+}
+
+.stage-progress-pie-ring-over-half .stage-progress-pie-ring-slice {
+  clip: rect(auto, auto, auto, auto);
+}
+
+.stage-progress-pie-ring-bar,
+.stage-progress-pie-ring-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 6px solid var(--stage-progress-color);
+  box-sizing: border-box;
+  clip: rect(0, 40px, 80px, 0);
+  transform: rotate(0deg) translateZ(0);
+  backface-visibility: hidden;
+}
+
+.stage-progress-pie-ring-bar {
+  transition: none;
+  will-change: transform;
+}
+
+.stage-progress-pie-ring-ready .stage-progress-pie-ring-bar {
+  transition: transform var(--stage-progress-duration, 420ms) linear;
+}
+
+.stage-progress-pie-ring-fill {
+  opacity: 0;
+  transform: rotate(180deg) translateZ(0);
+}
+
+.stage-progress-pie-ring-over-half .stage-progress-pie-ring-fill {
+  opacity: 1;
+}
+
+.stage-progress-pie-ring-hole {
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  background: #fff;
+  z-index: 2;
+}
+
+.stage-progress-pie-ring-value {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.stage-progress-pie-ring-value span {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* === v3/v4 overrides removed — using dual-half-circle transform approach above === */
+
+.overview-project-row-highlight::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: 999px;
+}
+
+.overview-project-row-highlight-preview {
+  background: rgba(22, 119, 255, 0.045);
+  box-shadow: inset 0 0 0 1px rgba(22, 119, 255, 0.06);
+}
+
+.overview-project-row-highlight-preview::before {
+  background: rgba(22, 119, 255, 0.42);
+}
+
+.overview-project-row-highlight-selected {
+  background: rgba(22, 119, 255, 0.085);
+  box-shadow: inset 0 0 0 1px rgba(22, 119, 255, 0.08);
+}
+
+.overview-project-row-highlight-selected::before {
+  background: #1677ff;
+}
+
+.overview-project-table .ant-table table {
+  position: relative;
+  z-index: 1;
+}
+
 .overview-project-table .ant-table-thead > tr > th {
   background: rgba(248, 250, 252, 0.86) !important;
   color: #64748b;
@@ -589,8 +895,23 @@ body.template-editor-modal-open {
   border-bottom: 0 !important;
 }
 
-.overview-project-table .ant-table-row-selected > td {
-  background: rgba(22, 119, 255, 0.06) !important;
+.overview-project-table .ant-table-tbody > tr:hover > td {
+  background: transparent !important;
+}
+
+.overview-project-table .overview-project-row-preview > td,
+.overview-project-table .overview-project-row-selected > td {
+  background: transparent !important;
+}
+
+.overview-project-table .overview-project-row-preview > td:first-child,
+.overview-project-table .overview-project-row-selected > td:first-child {
+  border-radius: 8px 0 0 8px;
+}
+
+.overview-project-table .overview-project-row-preview > td:last-child,
+.overview-project-table .overview-project-row-selected > td:last-child {
+  border-radius: 0 8px 8px 0;
 }
 
 .detail-panel {
@@ -1865,12 +2186,12 @@ body.template-editor-modal-open {
 }
 
 .overview-main {
-  padding: 0;
+  padding: 16px;
   box-sizing: border-box;
 }
 
 .overview-header-polished {
-  padding: 4px 2px 0;
+  padding: 2px 2px 0;
 }
 
 .overview-header-polished > div:first-child > div:first-child {
@@ -1970,7 +2291,7 @@ body.template-editor-modal-open {
     width: 390px !important;
   }
   .overview-main {
-    padding: 0;
+    padding: 14px;
   }
 }
 
@@ -2008,13 +2329,58 @@ body.template-editor-modal-open {
 
 /* --- Project table row transitions --- */
 .overview-project-table .ant-table-tbody > tr {
-  transition: background-color var(--duration-fast) var(--ease-out);
+  height: 58px;
+  transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .overview-project-table .ant-table-tbody > tr > td {
+  height: 58px;
+  max-height: 58px;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  box-sizing: border-box;
+  vertical-align: middle;
   transition:
-    background-color var(--duration-fast) var(--ease-out),
-    padding var(--duration-fast) var(--ease-out);
+    background-color 180ms cubic-bezier(0.2, 0, 0, 1),
+    box-shadow 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.overview-next-plan {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.overview-next-plan-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  line-height: 18px;
+}
+
+.overview-next-plan-title {
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.overview-next-plan-detail {
+  display: block;
+  height: 16px;
+  margin-top: 2px;
+  margin-left: 18px;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.overview-next-plan-empty .overview-next-plan-title {
+  flex: initial;
 }
 
 /* --- Template card hover --- */
@@ -2112,11 +2478,39 @@ body.template-editor-modal-open {
   50% { box-shadow: 0 0 0 4px rgba(22, 119, 255, 0); }
 }
 
-/* --- Detail Panel slide-in enhancement --- */
+
+
+.notification-bell-badge .ant-badge-count {
+  animation: none !important;
+  transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
+}
+
+/* --- Detail Panel slide-in: absolute overlay, GPU-only animation --- */
 .overview-detail-rail {
   transition:
-    width var(--duration-slow) var(--ease-out),
-    opacity var(--duration-normal) var(--ease-out);
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 200ms ease;
+  will-change: transform, opacity;
+  contain: layout paint style;
+}
+.detail-rail-open {
+  transform: translate3d(0, 0, 0);
+  opacity: 1;
+}
+.detail-rail-closed {
+  transform: translate3d(100%, 0, 0);
+  opacity: 0;
+}
+/* 切换项目时只做内容淡入，不重播侧边窗滑入 */
+.detail-rail-switching .detail-panel-content {
+  animation: fadeIn var(--duration-normal) var(--ease-out) both;
+}
+/* AntD Progress type="circle" 平滑过渡（用于审查页等，不影响首页阶段完成度圆环） */
+.ant-progress-circle .ant-progress-circle-path {
+  transition: stroke-dashoffset 0.6s cubic-bezier(0.22, 1, 0.36, 1), stroke 0.3s ease !important;
+}
+.ant-progress-circle .ant-progress-circle-trail {
+  transition: stroke-dashoffset 0.6s cubic-bezier(0.22, 1, 0.36, 1) !important;
 }
 
 /* --- Tab ink bar animation --- */
@@ -2168,10 +2562,23 @@ body.template-editor-modal-open {
 
 /* --- Gantt bar entrance --- */
 .gantt-bar {
-  transform: none;
-  animation: barGrow 180ms ease-out both;
-  contain: layout paint;
-  will-change: opacity, background-position, filter;
+  transform: scaleX(1);
+  transform-origin: left center;
+  animation: none;
+}
+
+.gantt-bars-entering .gantt-bar {
+  opacity: 0;
+  animation: barGrow 500ms cubic-bezier(0.22, 0.68, 0.35, 1) both;
+  will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gantt-bars-entering .gantt-bar {
+    animation: none;
+    opacity: 1;
+    transform: scaleX(1);
+  }
 }
 
 /* --- Now marker pulse --- */
@@ -2206,7 +2613,7 @@ body.template-editor-modal-open {
 }
 
 .page-transition-entering {
-  animation: appPageEnter 120ms cubic-bezier(0.2, 0, 0, 1) both;
+  animation: appPageEnter 80ms cubic-bezier(0.2, 0, 0, 1) both;
 }
 
 .page-transition-pulse {
@@ -2268,3 +2675,44 @@ body.template-editor-modal-open {
     width: 100%;
   }
 }
+
+/* Homepage detail rail corner fix: keep the outer rail and inner panel clipped together. */
+.overview-shell-polished .overview-detail-rail {
+  border-radius: 14px 0 0 14px !important;
+  overflow: hidden !important;
+  clip-path: inset(0 round 14px 0 0 14px);
+}
+
+.overview-shell-polished .overview-detail-rail .detail-panel-polished,
+.overview-shell-polished .overview-detail-rail .detail-panel-tabs-polished,
+.overview-shell-polished .overview-detail-rail .ant-tabs-content-holder {
+  border-radius: inherit !important;
+}
+
+/* Homepage split layout: keep the main pane rounded when the detail rail is open. */
+.overview-shell-polished.overview-shell-with-detail {
+  column-gap: 10px;
+  background: rgba(238, 246, 252, 0.96);
+}
+
+.overview-shell-polished.overview-shell-with-detail .overview-main {
+  border-radius: 0 14px 14px 0 !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  clip-path: inset(0 round 0 14px 14px 0);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 0 0 1px rgba(226, 232, 240, 0.72) inset;
+}
+
+.overview-shell-polished.overview-shell-with-detail .overview-detail-rail {
+  border-left: 0 !important;
+}
+
+.overview-shell-polished.overview-shell-with-detail .overview-main .dashboard-card:last-child,
+.overview-shell-polished.overview-shell-with-detail .overview-main .project-table-card {
+  overflow: hidden;
+}
+
+
+
+

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Button, Card, Progress, List, Tag, Typography, Empty, Space, Statistic, Row, Col, Divider, Select, Input, message } from 'antd';
+import { Button, Card, Progress, List, Tag, Typography, Empty, Space, Statistic, Row, Col, Divider, Select, Input, message, Alert } from 'antd';
 import {
   CheckCircleOutlined,
   ClockCircleOutlined,
@@ -18,6 +18,8 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { buildProjectStageSegments, getAllStages, getProjectProgress, getStageMeta } from '../../utils/timelineStages';
+import { composePrompt } from '../../utils/promptComposer';
+import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
 
 const { Text, Title } = Typography;
 
@@ -44,7 +46,7 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
     loadVersions,
   } = useProjectStore();
   const { projectDocs, loadProjectDocs } = useProjectDocStore();
-  const { customStages } = useSettingsStore();
+  const { customStages, userProfile } = useSettingsStore();
   const { tasks, loadTasks } = useTaskStore();
   const { templates, reviews, loadTemplates, loadReviews } = useTemplateStore();
   const [selectedWritingTemplateId, setSelectedWritingTemplateId] = useState<string>('');
@@ -55,6 +57,67 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
   const [aiRewritePreviews, setAiRewritePreviews] = useState<AiRewritePreview[]>([]);
   const [isGeneratingRewritePlan, setIsGeneratingRewritePlan] = useState(false);
   const [applyingRewriteId, setApplyingRewriteId] = useState('');
+  const [collaborationStatus, setCollaborationStatus] = useState<{ running: boolean; port?: number; urls?: string[]; addresses?: string[] }>({ running: false });
+  const [lanPeers, setLanPeers] = useState<CollaborationPeerInfo[]>([]);
+  const [lanFriends, setLanFriends] = useState<CollaborationPeerInfo[]>([]);
+  const [selectedFriendId, setSelectedFriendId] = useState('');
+  const [sendingTaskId, setSendingTaskId] = useState('');
+
+  const refreshCollaborationStatus = async () => {
+    const result = await window.electronAPI.getCollaborationStatus?.();
+    if (result?.success) {
+      setCollaborationStatus({
+        running: Boolean(result.running),
+        port: result.port,
+        urls: result.urls || [],
+        addresses: result.addresses || [],
+      });
+      setLanPeers(result.peers || []);
+      setLanFriends(result.friends || []);
+    }
+  };
+
+  const handleStartCollaborationReceiver = async () => {
+    const result = await window.electronAPI.startCollaborationReceiver?.();
+    if (!result?.success) {
+      message.error(result?.error || '\u5c40\u57df\u7f51\u63a5\u6536\u670d\u52a1\u542f\u52a8\u5931\u8d25');
+      return;
+    }
+    setCollaborationStatus({ running: true, port: result.port, urls: result.urls || [], addresses: result.addresses || [] });
+    setLanPeers(result.peers || []);
+    setLanFriends(result.friends || []);
+    message.success('\u5df2\u5f00\u542f\u5c40\u57df\u7f51\u4efb\u52a1\u63a5\u6536');
+  };
+
+  const handleStopCollaborationReceiver = async () => {
+    const result = await window.electronAPI.stopCollaborationReceiver?.();
+    if (!result?.success) {
+      message.error(result?.error || '\u5c40\u57df\u7f51\u63a5\u6536\u670d\u52a1\u505c\u6b62\u5931\u8d25');
+      return;
+    }
+    setCollaborationStatus({ running: false });
+  };
+
+  const handleAddCollaborationFriend = async (peer: CollaborationPeerInfo) => {
+    const result = await window.electronAPI.addCollaborationFriend?.(peer);
+    if (!result?.success) {
+      message.error(result?.error || '\u6dfb\u52a0\u597d\u53cb\u5931\u8d25');
+      return;
+    }
+    setLanFriends(result.friends || []);
+    setLanPeers(prev => prev.map(item => item.id === peer.id ? { ...item, added: true } : item));
+    message.success('\u5df2\u6dfb\u52a0\u5c40\u57df\u7f51\u597d\u53cb');
+  };
+
+  const handleRemoveCollaborationFriend = async (friendId: string) => {
+    const result = await window.electronAPI.removeCollaborationFriend?.(friendId);
+    if (!result?.success) {
+      message.error(result?.error || '\u79fb\u9664\u597d\u53cb\u5931\u8d25');
+      return;
+    }
+    setLanFriends(result.friends || []);
+    if (selectedFriendId === friendId) setSelectedFriendId('');
+  };
 
   const parseAiRewritePreviews = (raw: string): AiRewritePreview[] => {
     const text = String(raw || '').trim();
@@ -71,7 +134,7 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
           reason: String(item.reason || item.explanation || '').trim(),
           status: 'pending' as const,
         }))
-        .filter(item => item.original && item.replacement);
+        .filter((item: AiRewritePreview) => item.original && item.replacement);
     } catch {
       return [];
     }
@@ -112,25 +175,29 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
         message.error(parsed.error || '未能读取文档内容');
         return;
       }
-      const prompt = [
-        '你是文档审查和改稿助手。请根据用户的修改要求，从文档内容中找出需要替换的原文，并给出可直接替换的建议修改文本。',
-        '',
-        '要求：',
-        '1. 只返回 JSON 数组，不要输出 Markdown。',
-        '2. 每一项包含 title、original、replacement、reason。',
-        '3. original 必须逐字复制自文档内容中的连续原文片段，不能概括。',
-        '4. replacement 必须是可直接替换 original 的正式正文内容，保持原文语气和文档格式要求。',
-        '5. 没有把握匹配原文时，返回空数组。',
-        '',
-        '修改要求：',
-        instruction,
-        '',
-        '文档内容：',
-        '-----BEGIN DOCUMENT-----',
-        parsed.content.slice(0, 16000),
-        '-----END DOCUMENT-----',
-      ].join('\n');
-      const result = await window.electronAPI.callAI({ prompt });
+      const prompt = composePrompt('rewrite', {
+        sectionTitle: '（全文改稿）',
+        requirement: `修改要求：${instruction}`,
+        example: 'None',
+        stageMemory: 'None',
+        reference: 'None',
+        currentContent: parsed.content.slice(0, 16000),
+      });
+      const result = await useAIJobStore.getState().runAIJob<string>(
+        {
+          scene: 'rewrite',
+          title: '生成修订预览',
+          projectId: currentProject?.id,
+          resultPreview: (value) => value,
+        },
+        async ({ setProgress, throwIfCancelled }) => {
+          setProgress(35);
+          const value = await window.electronAPI.callAI({ prompt });
+          throwIfCancelled();
+          setProgress(85);
+          return String(value || '');
+        },
+      );
       const previews = parseAiRewritePreviews(result);
       if (previews.length === 0) {
         message.warning('AI 未生成可直接替换的原文块，请补充更明确的问题描述后重试');
@@ -236,6 +303,15 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
     loadReviews();
   }, []);
 
+  useEffect(() => {
+    void refreshCollaborationStatus();
+    const offPeers = window.electronAPI.onCollaborationPeersChanged?.((payload) => {
+      setLanPeers(payload.peers || []);
+      setLanFriends(payload.friends || []);
+    });
+    return () => { offPeers?.(); };
+  }, []);
+
 
   const allStages = getAllStages(customStages);
   const stageMeta = getStageMeta(allStages);
@@ -306,6 +382,42 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
     return [...map.values()].sort((a, b) => b.open - a.open || b.high - a.high);
   }, [projectTasks]);
 
+  const handleCopyCollaborationAddress = async () => {
+    const url = collaborationStatus.urls?.[0] || '';
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url.replace(/^http:\/\//, '').replace(/\/tasks$/, ''));
+      message.success('\u5df2\u590d\u5236\u5c40\u57df\u7f51\u5730\u5740');
+    } catch {
+      message.info(url);
+    }
+  };
+
+  const handleSendCollaborationTask = async (task: any) => {
+    if (!currentProject) return;
+    const targetFriendId = selectedFriendId || lanFriends.find(friend => friend.online)?.id || '';
+    if (!targetFriendId) {
+      message.warning('\u8bf7\u5148\u9009\u62e9\u5728\u7ebf\u597d\u53cb');
+      return;
+    }
+    setSendingTaskId(task.id);
+    try {
+      const result = await window.electronAPI.sendCollaborationTask?.({
+        friendId: targetFriendId,
+        task: { ...task, assigneeName: task.assigneeName || '' },
+        projectName: currentProject.name,
+        senderName: userProfile?.nickname || currentProject.name,
+      });
+      if (!result?.success) {
+        message.error(result?.error || '\u4efb\u52a1\u53d1\u9001\u5931\u8d25');
+        return;
+      }
+      message.success('\u4efb\u52a1\u5df2\u53d1\u9001\u5230\u5bf9\u65b9');
+    } finally {
+      setSendingTaskId('');
+    }
+  };
+
   const recentActivities = [
     ...projectTasks.map(task => ({
       id: `task-${task.id}`,
@@ -355,7 +467,7 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
 
           {/* AI协同 */}
           <Card title="AI协同" size="small">
-            <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
               <Select
                 placeholder="选择模板"
                 style={{ width: '100%' }}
@@ -381,16 +493,103 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
                   导入全部
                 </Button>
               </Space>
+              {workflowPromptSuggestion && (
+                <Card size="small" style={{ borderColor: '#91caff', background: '#f8fbff' }}>
+                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                    <Space wrap>
+                      <Tag color="blue">来自工作流</Tag>
+                      {focusedWorkflowTaskId && <Tag>当前问题</Tag>}
+                    </Space>
+                    <Text type="secondary">点击下方输入框后按 Tab，自动填充这个报告问题的提示词。</Text>
+                  </Space>
+                </Card>
+              )}
               <TextArea
                 value={writingContent}
                 onChange={(e) => setWritingContent(e.target.value)}
-                placeholder="在此编写文档内容..."
+                onKeyDown={(event) => {
+                  if (event.key === 'Tab' && workflowPromptSuggestion && !writingContent.trim()) {
+                    event.preventDefault();
+                    setWritingContent(workflowPromptSuggestion);
+                  }
+                }}
+                placeholder={workflowPromptSuggestion ? '点击后按 Tab 自动填充工作流提示词' : '在此填写 AI 修改要求，或导入参考文档后生成修改预览...'}
                 autoSize={{ minRows: 4, maxRows: 12 }}
                 style={{ fontSize: 13 }}
               />
-              <Button type="primary" icon={<FileTextOutlined />} onClick={handleQuickExport} disabled={!writingContent.trim() || !selectedWritingTemplateId}>
-                导出 Word
-              </Button>
+              <Space wrap>
+                {workflowPromptSuggestion && (
+                  <Button size="small" onClick={() => setWritingContent(workflowPromptSuggestion)}>
+                    填充提示词
+                  </Button>
+                )}
+                <Button
+                  size="small"
+                  type="primary"
+                  loading={isGeneratingRewritePlan}
+                  onClick={handleGenerateRewritePlan}
+                  disabled={selectedWritingDocIds.length === 0}
+                >
+                  生成修改预览
+                </Button>
+                <Button size="small" icon={<FileTextOutlined />} onClick={handleQuickExport} disabled={!writingContent.trim() || !selectedWritingTemplateId}>
+                  导出 Word
+                </Button>
+              </Space>
+
+              {aiRewritePreviews.length > 0 && (
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {aiRewritePreviews.map(preview => (
+                    <Card
+                      key={preview.id}
+                      size="small"
+                      title={preview.title}
+                      extra={preview.status === 'accepted' ? <Tag color="green">已接受</Tag> : <Tag color="blue">待确认</Tag>}
+                      style={{ background: '#fbfdff' }}
+                    >
+                      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                        {preview.reason && <Text type="secondary">{preview.reason}</Text>}
+                        <div>
+                          <Text strong style={{ display: 'block', marginBottom: 6 }}>原文内容</Text>
+                          <TextArea
+                            value={preview.original}
+                            autoSize={{ minRows: 3, maxRows: 8 }}
+                            disabled={preview.status === 'accepted'}
+                            onChange={(event) => updateAiRewritePreview(preview.id, { original: event.target.value })}
+                          />
+                        </div>
+                        <div>
+                          <Text strong style={{ display: 'block', marginBottom: 6 }}>建议修改</Text>
+                          <TextArea
+                            value={preview.replacement}
+                            autoSize={{ minRows: 3, maxRows: 10 }}
+                            disabled={preview.status === 'accepted'}
+                            onChange={(event) => updateAiRewritePreview(preview.id, { replacement: event.target.value })}
+                          />
+                        </div>
+                        <Space wrap>
+                          <Button
+                            type="primary"
+                            size="small"
+                            disabled={preview.status === 'accepted'}
+                            loading={applyingRewriteId === preview.id}
+                            onClick={() => handleAcceptRewrite(preview)}
+                          >
+                            接受并替换原文
+                          </Button>
+                          <Button
+                            size="small"
+                            disabled={preview.status === 'accepted'}
+                            onClick={() => setAiRewritePreviews(prev => prev.filter(item => item.id !== preview.id))}
+                          >
+                            忽略
+                          </Button>
+                        </Space>
+                      </Space>
+                    </Card>
+                  ))}
+                </Space>
+              )}
             </Space>
           </Card>
 
@@ -423,30 +622,124 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
           </Col>
 
           <Col span={10}>
-            <Card title="协同负载">
-              {workload.length === 0 ? (
-                <Empty description="暂无任务分配" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-              ) : (
-                <List
-                  dataSource={workload}
-                  renderItem={(row) => (
-                    <List.Item>
-                      <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                        <Space>
-                          <TeamOutlined />
-                          <Text>{row.name}</Text>
-                        </Space>
-                        <Space>
-                          <Tag color={row.high ? 'red' : 'default'}>高 {row.high}</Tag>
-                          <Tag color="blue">待办 {row.open}</Tag>
-                          <Tag color="green">完成 {row.completed}</Tag>
-                        </Space>
-                      </Space>
-                    </List.Item>
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Card title={'\u5c40\u57df\u7f51\u597d\u53cb\u4e0e\u4efb\u52a1\u5206\u6d3e'} size="small" styles={{ body: { padding: 12 } }}>
+                <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                  <Alert
+                    type={collaborationStatus.running ? 'success' : 'info'}
+                    showIcon
+                    message={collaborationStatus.running ? '\u5df2\u5728\u5c40\u57df\u7f51\u4e2d\u5728\u7ebf' : '\u672a\u5f00\u542f\u63a5\u6536'}
+                    description={collaborationStatus.running
+                      ? (collaborationStatus.urls?.[0] || '\u6b63\u5728\u7b49\u5f85\u5c40\u57df\u7f51\u5730\u5740')
+                      : '\u5f00\u542f\u540e\uff0c\u540c\u7f51\u6bb5\u8bbe\u5907\u53ef\u81ea\u52a8\u53d1\u73b0\u8fd9\u53f0\u7535\u8111\u3002'}
+                  />
+                  <Space wrap size={6}>
+                    {collaborationStatus.running ? (
+                      <Button size="small" onClick={handleStopCollaborationReceiver}>{'\u505c\u6b62\u63a5\u6536'}</Button>
+                    ) : (
+                      <Button size="small" type="primary" onClick={handleStartCollaborationReceiver}>{'\u5f00\u542f\u63a5\u6536'}</Button>
+                    )}
+                    <Button size="small" disabled={!collaborationStatus.urls?.length} onClick={handleCopyCollaborationAddress}>{'\u590d\u5236\u672c\u673a\u5730\u5740'}</Button>
+                    <Button size="small" onClick={refreshCollaborationStatus}>{'\u5237\u65b0'}</Button>
+                  </Space>
+                  <div>
+                    <Text strong style={{ fontSize: 12 }}>{'\u597d\u53cb'}</Text>
+                    <Select
+                      size="small"
+                      allowClear
+                      style={{ width: '100%', marginTop: 6 }}
+                      placeholder={'\u9009\u62e9\u5728\u7ebf\u597d\u53cb\u540e\u53d1\u9001\u4efb\u52a1'}
+                      value={selectedFriendId || undefined}
+                      onChange={(value) => setSelectedFriendId(value || '')}
+                      options={lanFriends.map(friend => ({
+                        value: friend.id,
+                        disabled: !friend.online,
+                        label: `${friend.name || friend.host} ${friend.online ? '\u00b7 \u5728\u7ebf' : '\u00b7 \u79bb\u7ebf'}`,
+                      }))}
+                    />
+                  </div>
+                  <List
+                    size="small"
+                    dataSource={lanPeers.filter(peer => !peer.added).slice(0, 4)}
+                    locale={{ emptyText: '\u6682\u672a\u53d1\u73b0\u65b0\u8bbe\u5907' }}
+                    renderItem={(peer) => (
+                      <List.Item
+                        actions={[
+                          <Button key="add" size="small" type="link" onClick={() => handleAddCollaborationFriend(peer)}>{'\u52a0\u597d\u53cb'}</Button>,
+                        ]}
+                      >
+                        <List.Item.Meta
+                          title={<Space><Text>{peer.name || peer.host}</Text><Tag color={peer.online ? 'green' : 'default'}>{peer.online ? '\u5728\u7ebf' : '\u79bb\u7ebf'}</Tag></Space>}
+                          description={<Text type="secondary">{peer.host}:{peer.port}</Text>}
+                        />
+                      </List.Item>
+                    )}
+                  />
+                  {lanFriends.length > 0 && (
+                    <List
+                      size="small"
+                      dataSource={lanFriends.slice(0, 5)}
+                      renderItem={(friend) => (
+                        <List.Item
+                          actions={[
+                            <Button key="remove" size="small" type="link" onClick={() => handleRemoveCollaborationFriend(friend.id)}>{'\u79fb\u9664'}</Button>,
+                          ]}
+                        >
+                          <List.Item.Meta
+                            title={<Space><Text>{friend.name || friend.host}</Text><Tag color={friend.online ? 'green' : 'default'}>{friend.online ? '\u5728\u7ebf' : '\u79bb\u7ebf'}</Tag></Space>}
+                            description={<Text type="secondary">{friend.host}:{friend.port}</Text>}
+                          />
+                        </List.Item>
+                      )}
+                    />
                   )}
-                />
-              )}
-            </Card>
+                  <List
+                    size="small"
+                    dataSource={openTasks.slice(0, 5)}
+                    locale={{ emptyText: '\u6682\u65e0\u53ef\u5206\u6d3e\u4efb\u52a1' }}
+                    renderItem={(task) => (
+                      <List.Item
+                        actions={[
+                          <Button key="send" size="small" type="link" loading={sendingTaskId === task.id} onClick={() => handleSendCollaborationTask(task)}>
+                            {'\u53d1\u7ed9\u597d\u53cb'}
+                          </Button>,
+                        ]}
+                      >
+                        <List.Item.Meta
+                          title={<Text ellipsis={{ tooltip: task.title }}>{task.title}</Text>}
+                          description={<Text type="secondary">{task.stageName || task.source || '\u4efb\u52a1'} {'\u00b7'} {task.priority}</Text>}
+                        />
+                      </List.Item>
+                    )}
+                  />
+                </Space>
+              </Card>
+
+              <Card title={'\u534f\u540c\u8d1f\u8f7d'} size="small" styles={{ body: { padding: 12 } }}>
+                {workload.length === 0 ? (
+                  <Empty description={'\u6682\u65e0\u4efb\u52a1\u5206\u914d'} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                ) : (
+                  <List
+                    dataSource={workload}
+                    renderItem={(row) => (
+                      <List.Item>
+                        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                          <Space>
+                            <TeamOutlined />
+                            <Text>{row.name}</Text>
+                          </Space>
+                          <Space>
+                            <Tag color={row.high ? 'red' : 'default'}>{'\u9ad8'} {row.high}</Tag>
+                            <Tag color="blue">{'\u5f85\u529e'} {row.open}</Tag>
+                            <Tag color="green">{'\u5b8c\u6210'} {row.completed}</Tag>
+                          </Space>
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                )}
+              </Card>
+            </Space>
           </Col>
         </Row>
 
