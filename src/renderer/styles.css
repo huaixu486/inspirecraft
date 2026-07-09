@@ -2224,7 +2224,7 @@ body.template-editor-modal-open {
 .overview-main {
   padding: 16px;
   box-sizing: border-box;
-  transition: padding-right 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: padding-right 60ms ease-out;
 }
 
 .overview-header-polished {

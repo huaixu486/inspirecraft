@@ -22,7 +22,6 @@ import { useProjectDocStore } from './stores/projectDocStore';
 import { useNavigationStore } from './stores/navigationStore';
 import { Project, WorkbenchFocus, WorkbenchPage } from '../shared/types';
 import WorkbenchContextBar from './components/Workbench/WorkbenchContextBar';
-import StartupOverlay, { BootPhase } from './components/Startup/StartupOverlay';
 
 const { Title, Text } = Typography;
 const MemoOverview = React.memo(Overview);
@@ -96,7 +95,6 @@ const App: React.FC = () => {
   const [lanPeers, setLanPeers] = useState<CollaborationPeerInfo[]>([]);
   const [friendRequests, setFriendRequests] = useState<CollaborationFriendRequest[]>([]);
   const [scanningLan, setScanningLan] = useState(false);
-  const [bootPhase, setBootPhase] = useState<BootPhase>('init');
   const [bootDone, setBootDone] = useState(false);
   const lastNonOverviewPageRef = useRef<GlobalPage | null>(null);
   const preSettingsPageRef = useRef<GlobalPage>('overview'); // 打开设置前的页面
@@ -215,7 +213,6 @@ const App: React.FC = () => {
     const startTime = performance.now();
 
     // 并行加载关键数据（只加载渲染首页必需的数据，不阻塞文档索引）
-    setBootPhase('settings');
     Promise.all([
       loadSettings(),
       loadProjects(),
@@ -223,10 +220,10 @@ const App: React.FC = () => {
       if (cancelled) return;
       const elapsed = Math.round(performance.now() - startTime);
       console.log(`[Boot] 关键数据加载完成: ${elapsed}ms`);
-      setBootPhase('ready');
+      setBootDone(true);
     }).catch(err => {
       console.error('[Boot] 加载失败:', err);
-      if (!cancelled) setBootPhase('ready'); // 即使失败也结束遮罩
+      if (!cancelled) setBootDone(true);
     });
 
     // 延迟加载（不影响启动遮罩）
@@ -645,10 +642,6 @@ const App: React.FC = () => {
 
   return (
     <div className="app-shell app-shell-polished" style={{ height: '100vh', overflow: 'hidden', position: 'relative' }}>
-      {/* 启动遮罩 */}
-      {!bootDone && (
-        <StartupOverlay phase={bootPhase} onDone={() => setBootDone(true)} />
-      )}
       <div
         className="app-topbar"
         style={{
