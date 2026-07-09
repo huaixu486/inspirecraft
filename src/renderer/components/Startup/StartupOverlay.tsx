@@ -90,14 +90,15 @@ const StartupOverlay: React.FC<Props> = ({ phase, onDone }) => {
         marginTop: 16, overflow: 'hidden',
       }}>
         <div style={{
-          height: '100%', borderRadius: 2,
+          height: '100%', borderRadius: 2, width: '100%',
           background: 'rgba(255,255,255,0.8)',
-          transition: 'width 0.3s ease',
-          width: phase === 'init' ? '15%'
-            : phase === 'settings' ? '35%'
-            : phase === 'projects' ? '60%'
-            : phase === 'docs' ? '85%'
-            : '100%',
+          transformOrigin: 'left',
+          transition: 'transform 0.3s ease',
+          transform: `scaleX(${phase === 'init' ? 0.15
+            : phase === 'settings' ? 0.35
+            : phase === 'projects' ? 0.6
+            : phase === 'docs' ? 0.85
+            : 1})`,
         }} />
       </div>
     </div>

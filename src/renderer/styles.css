@@ -742,7 +742,6 @@ body.template-editor-modal-open {
   stroke-dashoffset: 100;
   stroke-linecap: round;
   transition: none;
-  will-change: stroke-dashoffset;
 }
 
 .stage-progress-svg-ring-ready .stage-progress-svg-ring-bar {
@@ -1440,11 +1439,11 @@ body.template-editor-modal-open {
 @keyframes templateAiStatusPulse {
   0%, 100% {
     opacity: 0.68;
-    box-shadow: 0 0 0 0 rgba(22, 119, 255, 0.3);
+    transform: scale(1);
   }
   50% {
     opacity: 1;
-    box-shadow: 0 0 0 5px rgba(22, 119, 255, 0);
+    transform: scale(1.5);
   }
 }
 
@@ -2225,7 +2224,6 @@ body.template-editor-modal-open {
 .overview-main {
   padding: 16px;
   box-sizing: border-box;
-  will-change: padding-right;
   transition: padding-right 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -2502,9 +2500,9 @@ body.template-editor-modal-open {
     border-color var(--duration-fast) var(--ease-out);
 }
 
-/* --- Progress bar animation --- */
+/* --- Progress bar animation: 缩短时长减少 reflow 影响 --- */
 .ant-progress-bg {
-  transition: width var(--duration-slow) var(--ease-out) !important;
+  transition: width 200ms var(--ease-out) !important;
 }
 
 /* --- Badge pulse on new items --- */
@@ -2513,8 +2511,8 @@ body.template-editor-modal-open {
 }
 
 @keyframes badgePulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(22, 119, 255, 0.3); }
-  50% { box-shadow: 0 0 0 4px rgba(22, 119, 255, 0); }
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.2); opacity: 0.8; }
 }
 
 
@@ -2552,11 +2550,11 @@ body.template-editor-modal-open {
   transition: stroke-dashoffset 0.6s cubic-bezier(0.22, 1, 0.36, 1) !important;
 }
 
-/* --- Tab ink bar animation --- */
+/* --- Tab ink bar animation: 缩短时长减少 layout thrashing --- */
 .ant-tabs-ink-bar {
   transition:
-    left var(--duration-normal) var(--ease-out),
-    width var(--duration-normal) var(--ease-out) !important;
+    left 150ms var(--ease-out),
+    width 150ms var(--ease-out) !important;
 }
 
 /* --- Tooltip animation override --- */
@@ -2687,8 +2685,8 @@ body.template-editor-modal-open {
 }
 
 @keyframes settingsFabPulse {
-  0%, 100% { box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.15), 0 12px 28px rgba(15, 23, 42, 0.16); }
-  50% { box-shadow: 0 0 0 6px rgba(22, 119, 255, 0.08), 0 12px 28px rgba(15, 23, 42, 0.16); }
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.06); opacity: 0.85; }
 }
 
 /* Template manager performance isolation */

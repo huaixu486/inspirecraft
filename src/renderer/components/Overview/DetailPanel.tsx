@@ -49,36 +49,31 @@ const formatSidePanelKnowledgeItems = (items: Array<StageMemoryEntry | Reference
     .join('\n\n');
 
 
-// 折叠展开动画组件
+// 折叠展开动画组件：用 max-height 代替 height，避免每帧 reflow
 const AnimatedExpand: React.FC<{
   open: boolean;
   children: React.ReactNode;
   borderColor?: string;
 }> = ({ open, children, borderColor = '#f0f0f0' }) => {
   const contentRef = useRef<HTMLDivElement>(null);
-  const [height, setHeight] = useState<number>(open ? 9999 : 0);
+  const [maxH, setMaxH] = useState<number>(open ? 9999 : 0);
   const firstRender = useRef(true);
 
   useEffect(() => {
     if (firstRender.current) {
       firstRender.current = false;
-      setHeight(open ? (contentRef.current?.scrollHeight || 9999) : 0);
+      setMaxH(open ? (contentRef.current?.scrollHeight || 9999) : 0);
       return;
     }
     if (!contentRef.current) return;
-    if (open) {
-      const scrollH = contentRef.current.scrollHeight;
-      setHeight(scrollH);
-    } else {
-      setHeight(0);
-    }
+    setMaxH(open ? contentRef.current.scrollHeight : 0);
   }, [open]);
 
   return (
     <div style={{
-      height,
+      maxHeight: maxH,
       overflow: 'hidden',
-      transition: 'height 0.2s ease-in-out',
+      transition: 'max-height 0.2s ease-in-out',
     }}>
       <div ref={contentRef}>
         {children}
