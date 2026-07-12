@@ -1560,11 +1560,11 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
           {/* \u4e0b\u4e00\u6b65\u884c\u52a8\u4e2d\u5fc3 */}
           <div style={{ marginBottom: 20 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <Title level={5} style={{ fontSize: 14, margin: 0 }}>\u4e0b\u4e00\u6b65\u884c\u52a8</Title>
-              <Tag color="default" style={{ margin: 0, fontSize: 10 }}>{nextActions.length} \u9879</Tag>
+              <Title level={5} style={{ fontSize: 14, margin: 0 }}>下一步行动</Title>
+              <Tag color="default" style={{ margin: 0, fontSize: 10 }}>{nextActions.length} 项</Tag>
             </div>
             {nextActions.length === 0 ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>\u5f53\u524d\u9879\u76ee\u6ca1\u6709\u5f85\u63a8\u8fdb\u4e8b\u9879</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>当前项目没有待推进事项</Text>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {nextActions.map(action => (

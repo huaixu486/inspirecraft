@@ -3418,8 +3418,8 @@ body.template-editor-modal-open {
 /* All project workbenches share the compact header used by file details. */
 .workbench-context-dock {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) auto minmax(160px, 1fr);
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
   align-items: center;
   margin: 10px 12px 0;
   padding: 9px 12px;
@@ -3432,15 +3432,21 @@ body.template-editor-modal-open {
 
 .workbench-context-dock .workbench-context-summary {
   justify-self: start;
+  min-width: 0;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .workbench-context-dock .workbench-context-nav {
   justify-self: center;
+  min-width: 0;
+  white-space: nowrap;
 }
 
-.workbench-context-dock::after {
-  content: '';
-  min-height: 1px;
+.workbench-context-dock .workbench-context-quick-actions {
+  justify-self: end;
+  flex-shrink: 0;
 }
 
 .workbench-context-embedded.workbench-context-nav-only .workbench-context-summary,
@@ -3616,16 +3622,16 @@ body.template-editor-modal-open {
 
 @media (max-width: 1080px) {
   .workbench-context-dock {
-    grid-template-columns: minmax(230px, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
   }
 
   .workbench-context-dock .workbench-context-nav {
-    justify-self: end;
-  }
-
-  .workbench-context-dock::after {
-    display: none;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: start;
+    max-width: 100%;
+    overflow-x: auto;
   }
 }
 
