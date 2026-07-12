@@ -97,6 +97,34 @@ export interface AIConfig {
   multiModelMode?: 'single' | 'parallel';
 }
 
+export type AIUsageSource = 'reported' | 'estimated';
+
+export interface AITokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  source: AIUsageSource;
+}
+
+export interface AIUsageRecord extends AITokenUsage {
+  id: string;
+  createdAt: string;
+  modelId?: string;
+  modelName: string;
+  model: string;
+  provider: AIProvider;
+  requestId?: string;
+}
+
+export interface AIUsageStatistics {
+  total: AITokenUsage;
+  hourly: AITokenUsage;
+  daily: AITokenUsage;
+  monthly: AITokenUsage;
+  byModel: Array<AITokenUsage & { modelId?: string; modelName: string; model: string; provider: AIProvider }>;
+  recent: AIUsageRecord[];
+}
+
 // ==================== 模板相关类型 ====================
 
 export type TemplateOutputFileType = 'docx' | 'doc' | 'pptx' | 'xlsx' | 'pdf' | 'txt' | 'md' | 'rtf';
@@ -454,6 +482,7 @@ export interface AIJob {
   finishedAt?: string;
   canRetry?: boolean;
   resultPreview?: string;
+  tokenUsage?: AITokenUsage;
   error?: string;
   createdAt: string;
   updatedAt: string;

@@ -152,6 +152,7 @@ const AIJobCenter: React.FC = () => {
                         <Space size={8} style={{ marginTop: 2 }}>
                           <Text type="secondary" style={{ fontSize: 10 }}>{formatTime(job.createdAt)}</Text>
                           {duration && <Text type="secondary" style={{ fontSize: 10 }}>耗时 {duration}</Text>}
+                          {job.tokenUsage && <Text type="secondary" style={{ fontSize: 10 }}>Token {job.tokenUsage.totalTokens.toLocaleString()}（入 {job.tokenUsage.inputTokens.toLocaleString()} / 出 {job.tokenUsage.outputTokens.toLocaleString()}）{job.tokenUsage.source === 'estimated' ? ' 估算' : ''}</Text>}
                           {job.retryOf && <Text type="secondary" style={{ fontSize: 10 }}>重试</Text>}
                         </Space>
                       </div>

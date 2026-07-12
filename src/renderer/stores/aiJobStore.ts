@@ -12,6 +12,7 @@ export const isAIJobCancelledError = (error: unknown): error is AIJobCancelledEr
   error instanceof AIJobCancelledError || (error instanceof Error && error.name === 'AIJobCancelledError');
 
 type AIJobRunHelpers = {
+  jobId: string;
   signal: AbortSignal;
   setProgress: (progress: number) => void;
   isCancelled: () => boolean;
@@ -201,9 +202,13 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
     try {
       get().updateJob(id, { status: 'running', progress: 10, startedAt: nowIso() });
       throwIfCancelled();
-      const result = await executor({ signal: controller.signal, setProgress, isCancelled, throwIfCancelled });
+      const result = await executor({ jobId: id, signal: controller.signal, setProgress, isCancelled, throwIfCancelled });
       throwIfCancelled();
       const resultPreview = options.resultPreview?.(result) || defaultPreview(result);
+      const resultUsage = (result as { usage?: AIJob['tokenUsage'] } | null)?.usage;
+      const tokenUsage = resultUsage || (typeof window !== 'undefined'
+        ? await window.electronAPI?.getAIUsageForRequest?.(id).catch(() => undefined)
+        : undefined);
       get().updateJob(id, {
         status: 'completed',
         progress: 100,
@@ -211,6 +216,7 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
         error: undefined,
         finishedAt: nowIso(),
         canRetry: false,
+        tokenUsage: tokenUsage && tokenUsage.totalTokens > 0 ? tokenUsage : undefined,
       });
       return result;
     } catch (error: any) {

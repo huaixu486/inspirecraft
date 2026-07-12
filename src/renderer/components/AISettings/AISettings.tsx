@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Typography, Tabs, message } from 'antd';
 import {
-  SettingOutlined, RobotOutlined, FileTextOutlined, AppstoreOutlined, BranchesOutlined,
+  SettingOutlined, RobotOutlined, FileTextOutlined, AppstoreOutlined, BranchesOutlined, BarChartOutlined,
 } from '@ant-design/icons';
 import { AIConfig } from '../../../shared/types';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -12,6 +12,7 @@ import AIModelSettings from './AIModelSettings';
 import PromptSettings from './PromptSettings';
 import SkillSettings from './SkillSettings';
 import CompositionSettings from './CompositionSettings';
+import AIUsageSettings from './AIUsageSettings';
 
 const { Title } = Typography;
 
@@ -59,6 +60,11 @@ const AISettings: React.FC = () => {
       key: 'composition',
       label: <span><BranchesOutlined /> 合成规则</span>,
       children: <CompositionSettings />,
+    },
+    {
+      key: 'usage',
+      label: <span><BarChartOutlined /> Token 统计</span>,
+      children: <AIUsageSettings />,
     },
   ];
 

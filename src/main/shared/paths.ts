@@ -9,6 +9,7 @@ export const versionsFile = path.join(dataDir, 'versions.json');
 export const templatesFile = path.join(dataDir, 'templates.json');
 export const reviewsFile = path.join(dataDir, 'reviews.json');
 export const aiConfigFile = path.join(dataDir, 'ai-config.json');
+export const aiUsageFile = path.join(dataDir, 'ai-usage.json');
 export const tasksFile = path.join(dataDir, 'tasks.json');
 export const settingsFile = path.join(dataDir, 'settings.json');
 export const projectDocsFile = path.join(dataDir, 'project-documents.json');

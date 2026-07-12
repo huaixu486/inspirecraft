@@ -29,6 +29,7 @@ import {
   callParallelAIDetails,
   callAIModel,
 } from './services/aiService';
+import { getAIUsageRecords, getAIUsageStatistics, runWithAIUsageContext, sumAIUsage } from './services/aiUsageService';
 import { composePromptMain } from './shared/promptComposer';
 import * as mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
@@ -3972,19 +3973,27 @@ ipcMain.handle('ai:saveConfig', async (_event: any, config: AIConfig) => {
 });
 
 // AI 调用
-ipcMain.handle('ai:call', async (_event: any, prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: AIConfig }) => {
+ipcMain.handle('ai:call', async (_event: any, prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: AIConfig; usageRequestId?: string }) => {
   try {
     if (typeof prompt === 'string') return await callConfiguredAI(prompt);
-    if (prompt.config) {
-      return await callAIWithConfig(prompt.config, prompt.prompt, prompt.modelId, prompt.modelIds, prompt.mode);
-    }
-    return prompt.mode === 'parallel'
-      ? await callParallelAI(prompt.prompt, prompt.modelIds)
-      : await callDefaultAI(prompt.prompt, prompt.modelId);
+    const execute = async () => {
+      if (prompt.config) {
+        return callAIWithConfig(prompt.config, prompt.prompt, prompt.modelId, prompt.modelIds, prompt.mode);
+      }
+      return prompt.mode === 'parallel'
+        ? callParallelAI(prompt.prompt, prompt.modelIds)
+        : callDefaultAI(prompt.prompt, prompt.modelId);
+    };
+    return prompt.usageRequestId
+      ? await runWithAIUsageContext(prompt.usageRequestId, execute)
+      : await execute();
   } catch (error: any) {
     throw new Error(`AI 调用失败: ${error.message}`);
   }
 });
+
+ipcMain.handle('ai:usageStatistics', async () => getAIUsageStatistics());
+ipcMain.handle('ai:usageForRequest', async (_event: any, requestId: string) => sumAIUsage(getAIUsageRecords(requestId)));
 
 
 ipcMain.handle('ai:callParallelDetails', async (_event: any, params: { prompt: string; modelId?: string; modelIds?: string[]; config?: AIConfig }) => {
@@ -4649,7 +4658,9 @@ ipcMain.handle('task:executeAI', async (_event: any, params: { taskId: string; c
   });
 
   try {
-    const result = await callConfiguredAI(prompt);
+    const usageRequestId = `task:${params.taskId}:${Date.now()}`;
+    const result = await runWithAIUsageContext(usageRequestId, () => callConfiguredAI(prompt));
+    const usage = sumAIUsage(getAIUsageRecords(usageRequestId));
 
     // 更新任务状态
     const tasks = loadTasksFromDisk();
@@ -4660,7 +4671,7 @@ ipcMain.handle('task:executeAI', async (_event: any, params: { taskId: string; c
       saveTasksToDisk(tasks);
     }
 
-    return { success: true, result };
+    return { success: true, result, usage };
   } catch (error: any) {
     return { success: false, error: error.message };
   }

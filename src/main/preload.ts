@@ -62,8 +62,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // AI操作
   loadAIConfig: () => ipcRenderer.invoke('ai:loadConfig'),
   saveAIConfig: (config: any) => ipcRenderer.invoke('ai:saveConfig', config),
-  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any }) => ipcRenderer.invoke('ai:call', prompt),
+  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any; usageRequestId?: string }) => ipcRenderer.invoke('ai:call', prompt),
   callAIParallelDetails: (params: { prompt: string; modelId?: string; modelIds?: string[]; config?: any }) => ipcRenderer.invoke('ai:callParallelDetails', params),
+  getAIUsageStatistics: () => ipcRenderer.invoke('ai:usageStatistics'),
+  getAIUsageForRequest: (requestId: string) => ipcRenderer.invoke('ai:usageForRequest', requestId),
   generateSummary: (content: string) => ipcRenderer.invoke('ai:generateSummary', content),
   reviewSuggestion: (params: any) => ipcRenderer.invoke('ai:reviewSuggestion', params),
 

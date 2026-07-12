@@ -1989,7 +1989,11 @@ ${documentContent.slice(0, 9000)}`;
     try {
       const result = await executeAITask(task.id, content, task.description || task.title);
       if (result.success) {
-        message.success('AI 任务执行完成');
+        const usage = result.usage;
+        const suffix = usage
+          ? `，本次消耗 ${usage.totalTokens.toLocaleString()} token（输入 ${usage.inputTokens.toLocaleString()} / 输出 ${usage.outputTokens.toLocaleString()}）${usage.source === 'estimated' ? '，估算' : ''}`
+          : '';
+        message.success(`AI 任务执行完成${suffix}`);
       } else {
         message.error(`执行失败: ${result.error}`);
       }

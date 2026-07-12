@@ -79,8 +79,10 @@ interface ElectronAPI {
   // AI操作
   loadAIConfig: () => Promise<any>;
   saveAIConfig: (config: any) => Promise<void>;
-  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any }) => Promise<string>;
+  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any; usageRequestId?: string }) => Promise<string>;
   callAIParallelDetails: (params: { prompt: string; modelId?: string; modelIds?: string[]; config?: any }) => Promise<{ mode: 'single' | 'parallel'; synthesis: string; synthesisModelId?: string; synthesisModelName?: string; variants: Array<{ modelId: string; modelName: string; ok: boolean; output: string; error?: string }> }>;
+  getAIUsageStatistics: () => Promise<import('../shared/types').AIUsageStatistics>;
+  getAIUsageForRequest: (requestId: string) => Promise<import('../shared/types').AITokenUsage>;
   generateSummary: (content: string) => Promise<{ success: boolean; summary?: string; error?: string }>;
   reviewSuggestion: (params: any) => Promise<{ success: boolean; suggestions?: string; error?: string }>;
 
@@ -106,7 +108,7 @@ interface ElectronAPI {
   saveTask: (task: any) => Promise<void>;
   loadTasks: () => Promise<any[]>;
   deleteTask: (taskId: string) => Promise<void>;
-  executeAITask: (params: { taskId: string; content: string; instruction: string }) => Promise<{ success: boolean; result?: string; error?: string }>;
+  executeAITask: (params: { taskId: string; content: string; instruction: string }) => Promise<{ success: boolean; result?: string; usage?: import('../shared/types').AITokenUsage; error?: string }>;
 
 
   // LAN collaboration

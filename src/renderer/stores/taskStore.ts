@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { TaskItem } from '../../shared/types';
+import { AITokenUsage, TaskItem } from '../../shared/types';
 import { isAIJobCancelledError, useAIJobStore } from './aiJobStore';
 
 const taskTimeMs = (value?: string) => {
@@ -47,7 +47,7 @@ interface TaskState {
   deleteTask: (id: string) => Promise<void>;
 
   // AI 执行
-  executeAITask: (taskId: string, content: string, instruction: string) => Promise<{ success: boolean; result?: string; error?: string }>;
+  executeAITask: (taskId: string, content: string, instruction: string) => Promise<{ success: boolean; result?: string; usage?: AITokenUsage; error?: string }>;
 }
 
 export const useTaskStore = create<TaskState>((set, get) => ({
@@ -111,7 +111,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     try {
       await get().updateTask(taskId, { status: 'in_progress' });
 
-      const result = await useAIJobStore.getState().runAIJob<{ success: boolean; result?: string; error?: string }>(
+      const result = await useAIJobStore.getState().runAIJob<{ success: boolean; result?: string; usage?: AITokenUsage; error?: string }>(
         {
           scene: 'taskExecute',
           title: `\u6267\u884c\u4efb\u52a1\uff1a${prevTask?.title || taskId}`,

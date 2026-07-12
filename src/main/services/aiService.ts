@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import { net } from 'electron';
 import { AIConfig, AIModelConfig } from '../types';
 import { aiConfigFile, aiLogFile, logsDir } from '../shared/paths';
+import { recordAIUsage, TokenUsage } from './aiUsageService';
 
 // ─── AI 日志 ────────────────────────────────────────────
 
@@ -285,6 +286,33 @@ function extractAIText(result: any): string {
   return '';
 }
 
+function estimateTokens(value: string): number {
+  // This is only a transparent fallback for providers that do not return a
+  // usage object. Chinese text and Latin text are both close enough to this
+  // coarse estimate for usage trends, but are never labelled as exact.
+  return value.trim() ? Math.max(1, Math.ceil(Array.from(value).length / 3)) : 0;
+}
+
+function extractTokenUsage(result: any, prompt: string, output: string): TokenUsage {
+  const usage = result?.usage || result?.data?.usage || result?.result?.usage;
+  const inputTokens = Number(usage?.input_tokens ?? usage?.prompt_tokens ?? usage?.inputTokens ?? usage?.promptTokens ?? 0)
+    + Number(usage?.cache_creation_input_tokens ?? usage?.cache_read_input_tokens ?? 0);
+  const outputTokens = Number(usage?.output_tokens ?? usage?.completion_tokens ?? usage?.outputTokens ?? usage?.completionTokens ?? 0);
+  const totalTokens = Number(usage?.total_tokens ?? usage?.totalTokens ?? 0);
+  const hasReportedUsage = Number.isFinite(inputTokens) && Number.isFinite(outputTokens) && (inputTokens > 0 || outputTokens > 0 || totalTokens > 0);
+  if (hasReportedUsage) {
+    return {
+      inputTokens: Math.max(0, Math.round(inputTokens)),
+      outputTokens: Math.max(0, Math.round(outputTokens)),
+      totalTokens: Math.max(0, Math.round(totalTokens)) || Math.max(0, Math.round(inputTokens)) + Math.max(0, Math.round(outputTokens)),
+      source: 'reported',
+    };
+  }
+  const estimatedInput = estimateTokens(prompt);
+  const estimatedOutput = estimateTokens(output);
+  return { inputTokens: estimatedInput, outputTokens: estimatedOutput, totalTokens: estimatedInput + estimatedOutput, source: 'estimated' };
+}
+
 function getAIContentBlocks(result: any): any[] {
   if (!result || typeof result !== 'object') return [];
   if (Array.isArray(result.content)) return result.content;
@@ -352,6 +380,7 @@ async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<str
 
   let result = await makeRequest(url, options, buildBody(4096));
   let text = extractAIText(result);
+  recordAIUsage(config, extractTokenUsage(result, prompt, text));
   if (text) return text;
 
   if (isThinkingOnlyMaxTokensResponse(result)) {
@@ -359,6 +388,7 @@ async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<str
     const retryPrompt = `请不要输出思考过程。请直接完成下面任务，并只输出最终结果。\n\n${prompt}`;
     result = await makeRequest(url, options, buildBody(8192, retryPrompt));
     text = extractAIText(result);
+    recordAIUsage(config, extractTokenUsage(result, retryPrompt, text));
     if (text) return text;
   }
 
@@ -384,6 +414,7 @@ async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<str
   appendAiLog('OpenAI result parsed', { preview: compactResponse(result, 500) });
   console.log(`[AI] OpenAI result:`, JSON.stringify(result).substring(0, 500));
   const text = extractAIText(result);
+  recordAIUsage(config, extractTokenUsage(result, prompt, text));
   if (text) return text;
   throw buildNoReadableAITextError('OpenAI', url, result);
 }
