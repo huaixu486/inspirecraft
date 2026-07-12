@@ -1,6 +1,6 @@
 import { Project, ProjectDocument, StageConfig } from '../../shared/types';
 import { detectTimelineStage } from './timelineStages';
-import { composePrompt } from './promptComposer';
+import { composePromptAsync } from './promptComposer';
 import { isAIJobCancelledError, useAIJobStore } from '../stores/aiJobStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useProjectDocStore } from '../stores/projectDocStore';
@@ -88,7 +88,7 @@ const normalizeAiSummary = (value: string) =>
     .trim()
     .slice(0, 80);
 
-const buildAutoDescriptionPrompt = (project: Project, docs: ProjectDocument[], allStages: StageConfig[]) => {
+const buildAutoDescriptionPrompt = async (project: Project, docs: ProjectDocument[], allStages: StageConfig[]) => {
   const projectDocs = docs.filter(doc => doc.projectId === project.id);
   const docNames = projectDocs
     .map(doc => cleanFileName(doc.name || doc.sourceFilePath || ''))
@@ -98,7 +98,10 @@ const buildAutoDescriptionPrompt = (project: Project, docs: ProjectDocument[], a
     .map(doc => detectTimelineStage(allStages, doc.name, doc.sourceFilePath))
     .filter(stage => stage && stage !== '其他'))).slice(0, 5);
 
-  return composePrompt('description', {
+  // The automatic scanner can run before the renderer has loaded prompt
+  // templates.  Use the async composer so a valid description template is
+  // loaded before an AI request is allowed to leave the application.
+  return composePromptAsync('description', {
     projectName: project.name,
     stages: stages.join('、') || '暂无',
     pendingFiles: '',
@@ -122,7 +125,12 @@ export const maybeGenerateAutoProjectDescription = async (
   const now = new Date();
   const nowIso = now.toISOString();
   try {
-    const prompt = buildAutoDescriptionPrompt(project, docs, allStages);
+    const prompt = await buildAutoDescriptionPrompt(project, docs, allStages);
+    if (!prompt.trim()) {
+      // Never spend tokens on a blank prompt: providers will answer it like a
+      // general chat request, which is not a project description.
+      throw new Error('项目概述提示词未就绪，已取消本次 AI 请求');
+    }
     const response = await useAIJobStore.getState().runAIJob(
       {
         scene: 'description',
