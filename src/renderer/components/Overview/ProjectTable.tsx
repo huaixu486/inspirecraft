@@ -220,11 +220,25 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => 
 
       const files = result.files;
       const latestModified = files.reduce((max, f) => f.modifiedAt > max ? f.modifiedAt : max, '');
+      const lastActivityAt = project.autoDescriptionLastFileActivityAt;
+
+      // 首次升级到该功能时，项目中原有的旧文件不是“新操作”。
+      // 只建立活动基线，绝不因启动扫描立即消耗 AI 或触发三天前的文件。
+      if (!lastActivityAt) {
+        await updateProject(project.id, {
+          autoDescriptionLastFileActivityAt: latestModified || new Date().toISOString(),
+          autoDescriptionLastScannedAt: new Date().toISOString(),
+          autoDescriptionPendingSince: undefined,
+          autoDescriptionNextUpdateAt: undefined,
+          autoDescriptionPendingFileNames: [],
+        });
+        return;
+      }
 
       // 有新活动：重置三天计时
-      if (latestModified && latestModified > (project.autoDescriptionLastFileActivityAt || '')) {
+      if (latestModified && latestModified > lastActivityAt) {
         const activityFileNames = files
-          .filter(f => f.modifiedAt > (project.autoDescriptionLastFileActivityAt || ''))
+          .filter(f => f.modifiedAt > lastActivityAt)
           .slice(0, 10)
           .map(f => f.path.split(/[/\\]/).pop() || '');
         await markAutoDescriptionFileActivity(project, updateProject, {

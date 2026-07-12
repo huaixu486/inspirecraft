@@ -65,6 +65,8 @@ export const shouldGenerateAutoProjectDescription = (
   if (isManualProjectDescription(project)) return false;
   if (project.autoDescriptionGeneratedAt) return false;
   if (project.description?.trim()) return false;
+  // 没有活动基线时，不能把历史文件误判为用户刚刚的操作。
+  if (!project.autoDescriptionLastFileActivityAt) return false;
   if (!project.autoDescriptionPendingSince) return false;
   if (fileCount !== undefined && fileCount < 2) return false;
 

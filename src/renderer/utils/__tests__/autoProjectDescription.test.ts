@@ -16,6 +16,7 @@ const createProject = (overrides: Partial<Project> = {}): Project => ({
   progress: 0,
   createdAt: iso(-10 * 24 * 60 * 60 * 1000),
   updatedAt: iso(-10 * 24 * 60 * 60 * 1000),
+  autoDescriptionLastFileActivityAt: iso(-4 * 24 * 60 * 60 * 1000),
   autoDescriptionPendingSince: iso(-4 * 24 * 60 * 60 * 1000),
   autoDescriptionNextUpdateAt: iso(-24 * 60 * 60 * 1000),
   ...overrides,
@@ -26,6 +27,9 @@ test('auto description requires a quiet due project with at least two files', ()
   assert.equal(shouldGenerateAutoProjectDescription(createProject(), 1), false);
   assert.equal(shouldGenerateAutoProjectDescription(createProject({
     autoDescriptionNextUpdateAt: iso(60 * 60 * 1000),
+  }), 2), false);
+  assert.equal(shouldGenerateAutoProjectDescription(createProject({
+    autoDescriptionLastFileActivityAt: undefined,
   }), 2), false);
 });
 
