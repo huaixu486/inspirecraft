@@ -119,6 +119,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           taskId,
           inputHash: `${taskId}:${content.length}:${instruction.length}`,
           resultPreview: (value) => value.success ? value.result : value.error,
+          // 重试必须重新运行完整的任务流程，确保结果会写回任务状态。
+          retry: async () => {
+            await get().executeAITask(taskId, content, instruction);
+          },
         },
         async ({ setProgress, throwIfCancelled }) => {
           setProgress(35);

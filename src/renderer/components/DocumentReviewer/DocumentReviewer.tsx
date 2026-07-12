@@ -316,7 +316,7 @@ const splitAiSuggestionText = (value = ''): AiSuggestionBlock[] => {
 };
 
 
-const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../../shared/types').WorkbenchFocus }> = ({ onBack, focus }) => {
+const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../../shared/types').WorkbenchFocus; hideHeader?: boolean }> = ({ onBack, focus, hideHeader = false }) => {
   const {
     currentProject,
     currentStageName,
@@ -1870,13 +1870,13 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
 
   return (
     <div>
-      <div style={{ marginBottom: 16 }}>
+      {!hideHeader && <div style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
           <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
           <Title level={4} style={{ margin: 0 }}>文档审查</Title>
         </div>
         <Text type="secondary" style={{ fontSize: 13, lineHeight: 1.5 }}>对比模板要求审查文档，查看AI建议和版本差异</Text>
-      </div>
+      </div>}
 
       {aiAssistPromptSuggestion && (
         <Card

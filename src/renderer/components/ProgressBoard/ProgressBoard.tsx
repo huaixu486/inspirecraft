@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Button, Card, Progress, List, Tag, Typography, Empty, Space, Statistic, Row, Col, Divider, Select, Input, message, Alert } from 'antd';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Card, Progress, List, Tag, Typography, Empty, Space, Divider, Select, Input, message, Alert } from 'antd';
 import {
   CheckCircleOutlined,
   ClockCircleOutlined,
@@ -25,6 +25,7 @@ const { Text, Title } = Typography;
 
 interface ProgressBoardProps {
   onBack?: () => void;
+  hideHeader?: boolean;
 }
 
 type AiRewritePreview = {
@@ -36,7 +37,7 @@ type AiRewritePreview = {
   status?: 'pending' | 'accepted';
 };
 
-const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
+const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack, hideHeader = false }) => {
   const {
     currentProject,
     versions,
@@ -62,6 +63,7 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
   const [lanFriends, setLanFriends] = useState<CollaborationPeerInfo[]>([]);
   const [selectedFriendId, setSelectedFriendId] = useState('');
   const [sendingTaskId, setSendingTaskId] = useState('');
+  const writingStudioRef = useRef<HTMLDivElement>(null);
 
   const refreshCollaborationStatus = async () => {
     const result = await window.electronAPI.getCollaborationStatus?.();
@@ -80,19 +82,19 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
   const handleStartCollaborationReceiver = async () => {
     const result = await window.electronAPI.startCollaborationReceiver?.();
     if (!result?.success) {
-      message.error(result?.error || '\u5c40\u57df\u7f51\u63a5\u6536\u670d\u52a1\u542f\u52a8\u5931\u8d25');
+      message.error(result?.error || '局域网接收服务启动失败');
       return;
     }
     setCollaborationStatus({ running: true, port: result.port, urls: result.urls || [], addresses: result.addresses || [] });
     setLanPeers(result.peers || []);
     setLanFriends(result.friends || []);
-    message.success('\u5df2\u5f00\u542f\u5c40\u57df\u7f51\u4efb\u52a1\u63a5\u6536');
+    message.success('已开启局域网任务接收');
   };
 
   const handleStopCollaborationReceiver = async () => {
     const result = await window.electronAPI.stopCollaborationReceiver?.();
     if (!result?.success) {
-      message.error(result?.error || '\u5c40\u57df\u7f51\u63a5\u6536\u670d\u52a1\u505c\u6b62\u5931\u8d25');
+      message.error(result?.error || '局域网接收服务停止失败');
       return;
     }
     setCollaborationStatus({ running: false });
@@ -101,18 +103,18 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
   const handleAddCollaborationFriend = async (peer: CollaborationPeerInfo) => {
     const result = await window.electronAPI.addCollaborationFriend?.(peer);
     if (!result?.success) {
-      message.error(result?.error || '\u6dfb\u52a0\u597d\u53cb\u5931\u8d25');
+      message.error(result?.error || '添加好友失败');
       return;
     }
     setLanFriends(result.friends || []);
     setLanPeers(prev => prev.map(item => item.id === peer.id ? { ...item, added: true } : item));
-    message.success('\u5df2\u6dfb\u52a0\u5c40\u57df\u7f51\u597d\u53cb');
+    message.success('已添加局域网好友');
   };
 
   const handleRemoveCollaborationFriend = async (friendId: string) => {
     const result = await window.electronAPI.removeCollaborationFriend?.(friendId);
     if (!result?.success) {
-      message.error(result?.error || '\u79fb\u9664\u597d\u53cb\u5931\u8d25');
+      message.error(result?.error || '移除好友失败');
       return;
     }
     setLanFriends(result.friends || []);
@@ -329,7 +331,7 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
   const latestReview = [...projectReviews].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
 
   useEffect(() => {
-    if (!pendingWorkflowFocus || pendingWorkflowFocus.target !== 'team') return;
+    if (!pendingWorkflowFocus || !['team', 'writing'].includes(pendingWorkflowFocus.target)) return;
     if (!currentProject || pendingWorkflowFocus.projectId !== currentProject.id) return;
 
     if (pendingWorkflowFocus.stageName) {
@@ -349,6 +351,9 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
     setWritingContent('');
     setAiRewritePreviews([]);
     setPendingWorkflowFocus(null);
+    window.requestAnimationFrame(() => {
+      writingStudioRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   }, [
     currentProject?.id,
     pendingWorkflowFocus,
@@ -387,7 +392,7 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
     if (!url) return;
     try {
       await navigator.clipboard.writeText(url.replace(/^http:\/\//, '').replace(/\/tasks$/, ''));
-      message.success('\u5df2\u590d\u5236\u5c40\u57df\u7f51\u5730\u5740');
+      message.success('已复制局域网地址');
     } catch {
       message.info(url);
     }
@@ -397,7 +402,7 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
     if (!currentProject) return;
     const targetFriendId = selectedFriendId || lanFriends.find(friend => friend.online)?.id || '';
     if (!targetFriendId) {
-      message.warning('\u8bf7\u5148\u9009\u62e9\u5728\u7ebf\u597d\u53cb');
+      message.warning('请先选择在线好友');
       return;
     }
     setSendingTaskId(task.id);
@@ -409,10 +414,10 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
         senderName: userProfile?.nickname || currentProject.name,
       });
       if (!result?.success) {
-        message.error(result?.error || '\u4efb\u52a1\u53d1\u9001\u5931\u8d25');
+        message.error(result?.error || '任务发送失败');
         return;
       }
-      message.success('\u4efb\u52a1\u5df2\u53d1\u9001\u5230\u5bf9\u65b9');
+      message.success('任务已发送到对方');
     } finally {
       setSendingTaskId('');
     }
@@ -445,64 +450,88 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
   }
 
   return (
-    <div>
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
-          <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
-          <Title level={4} style={{ margin: 0 }}>{currentProject.name} - 团队协同</Title>
+    <div className="team-workbench-page">
+      {!hideHeader && (
+        <div className="team-page-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
+            <Title level={4} style={{ margin: 0 }}>{currentProject.name}</Title>
+            <Tag color="blue" style={{ marginLeft: 4 }}>团队协同</Tag>
+          </div>
+          <Text type="secondary" style={{ fontSize: 13 }}>阶段、审查和任务汇总，方便判断下一步该谁推进什么。</Text>
         </div>
-        <Text type="secondary" style={{ fontSize: 13, lineHeight: 1.5 }}>阶段、审查和任务会在这里汇总，方便判断下一步该谁推进什么。</Text>
+      )}
+
+      {/* 统计卡片 */}
+      <div className="team-stats-row">
+        {[
+          { label: '阶段进度', value: projectProgress, suffix: '%', color: '#1677ff' },
+          { label: '待处理任务', value: openTasks.length, color: '#faad14' },
+          { label: '高优先级', value: highPriorityTasks.length, color: highPriorityTasks.length ? '#ff4d4f' : '#52c41a' },
+          { label: '最近审查', value: latestReview ? latestReview.score : 0, suffix: latestReview ? '分' : '', color: '#722ed1' },
+        ].map((stat, i) => (
+          <div key={i} className="team-stat-card">
+            <div className="team-stat-value" style={{ color: stat.color }}>{stat.value}<span className="team-stat-suffix">{stat.suffix || ''}</span></div>
+            <div className="team-stat-label">{stat.label}</div>
+          </div>
+        ))}
       </div>
 
-      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <Card>
-            <Row gutter={16}>
-              <Col span={6}><Statistic title="阶段进度" value={projectProgress} suffix="%" /></Col>
-              <Col span={6}><Statistic title="待处理任务" value={openTasks.length} /></Col>
-              <Col span={6}><Statistic title="高优先级" value={highPriorityTasks.length} valueStyle={{ color: highPriorityTasks.length ? '#ff4d4f' : undefined }} /></Col>
-              <Col span={6}><Statistic title="最近审查" value={latestReview ? latestReview.score : 0} suffix={latestReview ? '分' : ''} /></Col>
-            </Row>
-            <Progress percent={projectProgress} style={{ marginTop: 12, marginBottom: 0 }} />
-          </Card>
-
-          {/* AI协同 */}
-          <Card title="AI协同" size="small">
+      {/* 主体两栏布局 */}
+      <div className="team-main-grid">
+        {/* 左栏 */}
+        <div className="team-main-left">
+          <div ref={writingStudioRef} className="team-ai-studio-anchor">
+            <Card
+              title={<Space size={8}><EditOutlined style={{ color: '#1677ff' }} /><span>AI 修订写作</span></Space>}
+              extra={<Space size={4}><Tag color="blue" style={{ margin: 0 }}>报告修订</Tag><Tag color="purple" style={{ margin: 0 }}>审查问题</Tag></Space>}
+              size="small"
+              className="team-ai-studio-card"
+            >
             <Space direction="vertical" size={8} style={{ width: '100%' }}>
-              <Select
-                placeholder="选择模板"
-                style={{ width: '100%' }}
-                value={selectedWritingTemplateId || undefined}
-                onChange={setSelectedWritingTemplateId}
-                options={templates.map(t => ({ value: t.id, label: t.name }))}
-              />
-              <Select
-                mode="multiple"
-                placeholder="导入文稿参考（可多选）"
-                style={{ width: '100%' }}
-                value={selectedWritingDocIds}
-                onChange={setSelectedWritingDocIds}
-                options={projectDocsList.map(d => ({ value: d.id, label: d.name }))}
-                maxTagCount={2}
-                maxTagTextLength={12}
-              />
-              <Space size={4}>
-                <Button size="small" onClick={() => handleBatchImportDocs(selectedWritingDocIds)} disabled={selectedWritingDocIds.length === 0}>
-                  导入选中
-                </Button>
-                <Button size="small" onClick={handleImportAllDocs} disabled={projectDocsList.length === 0}>
-                  导入全部
-                </Button>
-              </Space>
-              {workflowPromptSuggestion && (
-                <Card size="small" style={{ borderColor: '#91caff', background: '#f8fbff' }}>
-                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                    <Space wrap>
-                      <Tag color="blue">来自工作流</Tag>
-                      {focusedWorkflowTaskId && <Tag>当前问题</Tag>}
-                    </Space>
-                    <Text type="secondary">点击下方输入框后按 Tab，自动填充这个报告问题的提示词。</Text>
+              <Text type="secondary" className="team-ai-studio-description">
+                选择需要处理的报告或审查文档，填写修改要求后生成可确认的修订预览；从问题任务进入时会自动带入目标文档和提示词。
+              </Text>
+              <div className="team-ai-studio-controls">
+                <div>
+                  <Text type="secondary" className="team-ai-studio-label">写作模板</Text>
+                  <Select
+                    placeholder="选择模板"
+                    style={{ width: '100%' }}
+                    value={selectedWritingTemplateId || undefined}
+                    onChange={setSelectedWritingTemplateId}
+                    options={templates.map(t => ({ value: t.id, label: t.name }))}
+                  />
+                </div>
+                <div>
+                  <Text type="secondary" className="team-ai-studio-label">参考文档</Text>
+                  <Select
+                    mode="multiple"
+                    placeholder="多选参考文档"
+                    style={{ width: '100%' }}
+                    value={selectedWritingDocIds}
+                    onChange={setSelectedWritingDocIds}
+                    options={projectDocsList.map(d => ({ value: d.id, label: d.name }))}
+                    maxTagCount={2}
+                    maxTagTextLength={12}
+                  />
+                </div>
+                <div className="team-ai-studio-imports">
+                  <Text type="secondary" className="team-ai-studio-label">导入</Text>
+                  <Space size={6} wrap>
+                    <Button size="small" onClick={() => handleBatchImportDocs(selectedWritingDocIds)} disabled={selectedWritingDocIds.length === 0}>导入选中</Button>
+                    <Button size="small" onClick={handleImportAllDocs} disabled={projectDocsList.length === 0}>全部</Button>
                   </Space>
-                </Card>
+                </div>
+              </div>
+              {workflowPromptSuggestion && (
+                <Alert
+                  type="info"
+                  showIcon
+                  message={<Space wrap><Tag color="blue">来自工作流</Tag>{focusedWorkflowTaskId && <Tag>当前问题</Tag>}</Space>}
+                  description="点击输入框后按 Tab，自动填充提示词。"
+                  style={{ fontSize: 12 }}
+                />
               )}
               <TextArea
                 value={writingContent}
@@ -513,23 +542,15 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
                     setWritingContent(workflowPromptSuggestion);
                   }
                 }}
-                placeholder={workflowPromptSuggestion ? '点击后按 Tab 自动填充工作流提示词' : '在此填写 AI 修改要求，或导入参考文档后生成修改预览...'}
-                autoSize={{ minRows: 4, maxRows: 12 }}
+                placeholder={workflowPromptSuggestion ? '按 Tab 填充提示词' : '填写 AI 修改要求，或导入参考文档后生成修改预览...'}
+                autoSize={{ minRows: 3, maxRows: 8 }}
                 style={{ fontSize: 13 }}
               />
               <Space wrap>
                 {workflowPromptSuggestion && (
-                  <Button size="small" onClick={() => setWritingContent(workflowPromptSuggestion)}>
-                    填充提示词
-                  </Button>
+                  <Button size="small" onClick={() => setWritingContent(workflowPromptSuggestion)}>填充提示词</Button>
                 )}
-                <Button
-                  size="small"
-                  type="primary"
-                  loading={isGeneratingRewritePlan}
-                  onClick={handleGenerateRewritePlan}
-                  disabled={selectedWritingDocIds.length === 0}
-                >
+                <Button size="small" type="primary" loading={isGeneratingRewritePlan} onClick={handleGenerateRewritePlan} disabled={selectedWritingDocIds.length === 0}>
                   生成修改预览
                 </Button>
                 <Button size="small" icon={<FileTextOutlined />} onClick={handleQuickExport} disabled={!writingContent.trim() || !selectedWritingTemplateId}>
@@ -540,50 +561,20 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
               {aiRewritePreviews.length > 0 && (
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   {aiRewritePreviews.map(preview => (
-                    <Card
-                      key={preview.id}
-                      size="small"
-                      title={preview.title}
-                      extra={preview.status === 'accepted' ? <Tag color="green">已接受</Tag> : <Tag color="blue">待确认</Tag>}
-                      style={{ background: '#fbfdff' }}
-                    >
+                    <Card key={preview.id} size="small" title={preview.title} extra={preview.status === 'accepted' ? <Tag color="green">已接受</Tag> : <Tag color="blue">待确认</Tag>} style={{ background: '#fbfdff' }}>
                       <Space direction="vertical" size={10} style={{ width: '100%' }}>
                         {preview.reason && <Text type="secondary">{preview.reason}</Text>}
                         <div>
                           <Text strong style={{ display: 'block', marginBottom: 6 }}>原文内容</Text>
-                          <TextArea
-                            value={preview.original}
-                            autoSize={{ minRows: 3, maxRows: 8 }}
-                            disabled={preview.status === 'accepted'}
-                            onChange={(event) => updateAiRewritePreview(preview.id, { original: event.target.value })}
-                          />
+                          <TextArea value={preview.original} autoSize={{ minRows: 3, maxRows: 8 }} disabled={preview.status === 'accepted'} onChange={(event) => updateAiRewritePreview(preview.id, { original: event.target.value })} />
                         </div>
                         <div>
                           <Text strong style={{ display: 'block', marginBottom: 6 }}>建议修改</Text>
-                          <TextArea
-                            value={preview.replacement}
-                            autoSize={{ minRows: 3, maxRows: 10 }}
-                            disabled={preview.status === 'accepted'}
-                            onChange={(event) => updateAiRewritePreview(preview.id, { replacement: event.target.value })}
-                          />
+                          <TextArea value={preview.replacement} autoSize={{ minRows: 3, maxRows: 10 }} disabled={preview.status === 'accepted'} onChange={(event) => updateAiRewritePreview(preview.id, { replacement: event.target.value })} />
                         </div>
                         <Space wrap>
-                          <Button
-                            type="primary"
-                            size="small"
-                            disabled={preview.status === 'accepted'}
-                            loading={applyingRewriteId === preview.id}
-                            onClick={() => handleAcceptRewrite(preview)}
-                          >
-                            接受并替换原文
-                          </Button>
-                          <Button
-                            size="small"
-                            disabled={preview.status === 'accepted'}
-                            onClick={() => setAiRewritePreviews(prev => prev.filter(item => item.id !== preview.id))}
-                          >
-                            忽略
-                          </Button>
+                          <Button type="primary" size="small" disabled={preview.status === 'accepted'} loading={applyingRewriteId === preview.id} onClick={() => handleAcceptRewrite(preview)}>接受并替换</Button>
+                          <Button size="small" disabled={preview.status === 'accepted'} onClick={() => setAiRewritePreviews(prev => prev.filter(item => item.id !== preview.id))}>忽略</Button>
                         </Space>
                       </Space>
                     </Card>
@@ -591,214 +582,186 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack }) => {
                 </Space>
               )}
             </Space>
+            </Card>
+          </div>
+
+          <Card title="阶段推进" size="small" className="team-stage-card">
+            {stageRows.length === 0 ? (
+              <Empty description="暂无阶段数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : (
+              <List
+                dataSource={stageRows}
+                renderItem={({ segment, progress, overdue, taskCount }) => (
+                  <List.Item>
+                    <div style={{ width: '100%' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 2, background: stageMeta[segment.stage]?.color || '#1677ff' }} />
+                        <Text strong>{segment.label}</Text>
+                        {segment.completedAt && <Tag color="green">已完成</Tag>}
+                        {overdue && <Tag color="red">逾期</Tag>}
+                        {taskCount > 0 && <Tag color="blue">{taskCount} 个待办</Tag>}
+                        {segment.deadline && <Text type="secondary" style={{ marginLeft: 'auto' }}>截止 {dayjs(segment.deadline).format('MM-DD')}</Text>}
+                      </div>
+                      <Progress percent={progress} size="small" strokeColor={overdue ? '#ff4d4f' : stageMeta[segment.stage]?.color} />
+                    </div>
+                  </List.Item>
+                )}
+              />
+            )}
           </Card>
 
-          <Row gutter={16}>
-          <Col span={14}>
-            <Card title="阶段推进">
-              {stageRows.length === 0 ? (
-                <Empty description="暂无阶段数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-              ) : (
+          <Card title="风险与待办" size="small">
+            <List
+              dataSource={openTasks.slice(0, 6)}
+              locale={{ emptyText: '暂无待办任务' }}
+              renderItem={(task) => (
+                <List.Item>
+                  <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                    <Space wrap>
+                      {task.priority === 'high'
+                        ? <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />
+                        : <ClockCircleOutlined style={{ color: '#faad14' }} />}
+                      <Text strong>{task.title}</Text>
+                      <Tag>{task.source === 'review' ? '审查' : task.source === 'report' ? '报告' : '任务'}</Tag>
+                      {task.assigneeName && <Tag color="blue">{task.assigneeName}</Tag>}
+                    </Space>
+                    {task.description && <Text type="secondary" ellipsis>{task.description}</Text>}
+                  </Space>
+                </List.Item>
+              )}
+            />
+            <Divider style={{ margin: '12px 0' }} />
+            <Space>
+              <Tag color="red">审查待办 {reviewTasks.length}</Tag>
+              <Tag color="green">已完成 {completedTasks.length}</Tag>
+            </Space>
+          </Card>
+        </div>
+
+        {/* 右栏 */}
+        <div className="team-main-right">
+          <Card title="局域网协同" size="small" styles={{ body: { padding: 12 } }}>
+            <Space direction="vertical" size={10} style={{ width: '100%' }}>
+              <Alert
+                type={collaborationStatus.running ? 'success' : 'info'}
+                showIcon
+                message={collaborationStatus.running ? '已在局域网中在线' : '未开启接收'}
+                description={collaborationStatus.running
+                  ? (collaborationStatus.urls?.[0] || '正在等待局域网地址')
+                  : '开启后，同网段设备可自动发现这台电脑。'}
+              />
+              <Space wrap size={6}>
+                {collaborationStatus.running ? (
+                  <Button size="small" onClick={handleStopCollaborationReceiver}>停止接收</Button>
+                ) : (
+                  <Button size="small" type="primary" onClick={handleStartCollaborationReceiver}>开启接收</Button>
+                )}
+                <Button size="small" disabled={!collaborationStatus.urls?.length} onClick={handleCopyCollaborationAddress}>复制地址</Button>
+                <Button size="small" onClick={refreshCollaborationStatus}>刷新</Button>
+              </Space>
+              <div>
+                <Text strong style={{ fontSize: 12 }}>好友</Text>
+                <Select
+                  size="small"
+                  allowClear
+                  style={{ width: '100%', marginTop: 6 }}
+                  placeholder="选择在线好友后发送任务"
+                  value={selectedFriendId || undefined}
+                  onChange={(value) => setSelectedFriendId(value || '')}
+                  options={lanFriends.map(friend => ({
+                    value: friend.id,
+                    disabled: !friend.online,
+                    label: `${friend.name || friend.host} ${friend.online ? '· 在线' : '· 离线'}`,
+                  }))}
+                />
+              </div>
+              <List
+                size="small"
+                dataSource={lanPeers.filter(peer => !peer.added).slice(0, 4)}
+                locale={{ emptyText: '暂未发现新设备' }}
+                renderItem={(peer) => (
+                  <List.Item actions={[<Button key="add" size="small" type="link" onClick={() => handleAddCollaborationFriend(peer)}>加好友</Button>]}>
+                    <List.Item.Meta
+                      title={<Space><Text>{peer.name || peer.host}</Text><Tag color={peer.online ? 'green' : 'default'}>{peer.online ? '在线' : '离线'}</Tag></Space>}
+                      description={<Text type="secondary">{peer.host}:{peer.port}</Text>}
+                    />
+                  </List.Item>
+                )}
+              />
+              {lanFriends.length > 0 && (
                 <List
-                  dataSource={stageRows}
-                  renderItem={({ segment, progress, overdue, taskCount }) => (
-                    <List.Item>
-                      <div style={{ width: '100%' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                          <span style={{ width: 8, height: 8, borderRadius: 2, background: stageMeta[segment.stage]?.color || '#1677ff' }} />
-                          <Text strong>{segment.label}</Text>
-                          {segment.completedAt && <Tag color="green">已完成</Tag>}
-                          {overdue && <Tag color="red">逾期</Tag>}
-                          {taskCount > 0 && <Tag color="blue">{taskCount} 个待办</Tag>}
-                          {segment.deadline && <Text type="secondary" style={{ marginLeft: 'auto' }}>截止 {dayjs(segment.deadline).format('MM-DD')}</Text>}
-                        </div>
-                        <Progress percent={progress} size="small" strokeColor={overdue ? '#ff4d4f' : stageMeta[segment.stage]?.color} />
-                      </div>
+                  size="small"
+                  dataSource={lanFriends.slice(0, 5)}
+                  renderItem={(friend) => (
+                    <List.Item actions={[<Button key="remove" size="small" type="link" onClick={() => handleRemoveCollaborationFriend(friend.id)}>移除</Button>]}>
+                      <List.Item.Meta
+                        title={<Space><Text>{friend.name || friend.host}</Text><Tag color={friend.online ? 'green' : 'default'}>{friend.online ? '在线' : '离线'}</Tag></Space>}
+                        description={<Text type="secondary">{friend.host}:{friend.port}</Text>}
+                      />
                     </List.Item>
                   )}
                 />
               )}
-            </Card>
-          </Col>
-
-          <Col span={10}>
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <Card title={'\u5c40\u57df\u7f51\u597d\u53cb\u4e0e\u4efb\u52a1\u5206\u6d3e'} size="small" styles={{ body: { padding: 12 } }}>
-                <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                  <Alert
-                    type={collaborationStatus.running ? 'success' : 'info'}
-                    showIcon
-                    message={collaborationStatus.running ? '\u5df2\u5728\u5c40\u57df\u7f51\u4e2d\u5728\u7ebf' : '\u672a\u5f00\u542f\u63a5\u6536'}
-                    description={collaborationStatus.running
-                      ? (collaborationStatus.urls?.[0] || '\u6b63\u5728\u7b49\u5f85\u5c40\u57df\u7f51\u5730\u5740')
-                      : '\u5f00\u542f\u540e\uff0c\u540c\u7f51\u6bb5\u8bbe\u5907\u53ef\u81ea\u52a8\u53d1\u73b0\u8fd9\u53f0\u7535\u8111\u3002'}
-                  />
-                  <Space wrap size={6}>
-                    {collaborationStatus.running ? (
-                      <Button size="small" onClick={handleStopCollaborationReceiver}>{'\u505c\u6b62\u63a5\u6536'}</Button>
-                    ) : (
-                      <Button size="small" type="primary" onClick={handleStartCollaborationReceiver}>{'\u5f00\u542f\u63a5\u6536'}</Button>
-                    )}
-                    <Button size="small" disabled={!collaborationStatus.urls?.length} onClick={handleCopyCollaborationAddress}>{'\u590d\u5236\u672c\u673a\u5730\u5740'}</Button>
-                    <Button size="small" onClick={refreshCollaborationStatus}>{'\u5237\u65b0'}</Button>
-                  </Space>
-                  <div>
-                    <Text strong style={{ fontSize: 12 }}>{'\u597d\u53cb'}</Text>
-                    <Select
-                      size="small"
-                      allowClear
-                      style={{ width: '100%', marginTop: 6 }}
-                      placeholder={'\u9009\u62e9\u5728\u7ebf\u597d\u53cb\u540e\u53d1\u9001\u4efb\u52a1'}
-                      value={selectedFriendId || undefined}
-                      onChange={(value) => setSelectedFriendId(value || '')}
-                      options={lanFriends.map(friend => ({
-                        value: friend.id,
-                        disabled: !friend.online,
-                        label: `${friend.name || friend.host} ${friend.online ? '\u00b7 \u5728\u7ebf' : '\u00b7 \u79bb\u7ebf'}`,
-                      }))}
-                    />
-                  </div>
-                  <List
-                    size="small"
-                    dataSource={lanPeers.filter(peer => !peer.added).slice(0, 4)}
-                    locale={{ emptyText: '\u6682\u672a\u53d1\u73b0\u65b0\u8bbe\u5907' }}
-                    renderItem={(peer) => (
-                      <List.Item
-                        actions={[
-                          <Button key="add" size="small" type="link" onClick={() => handleAddCollaborationFriend(peer)}>{'\u52a0\u597d\u53cb'}</Button>,
-                        ]}
-                      >
-                        <List.Item.Meta
-                          title={<Space><Text>{peer.name || peer.host}</Text><Tag color={peer.online ? 'green' : 'default'}>{peer.online ? '\u5728\u7ebf' : '\u79bb\u7ebf'}</Tag></Space>}
-                          description={<Text type="secondary">{peer.host}:{peer.port}</Text>}
-                        />
-                      </List.Item>
-                    )}
-                  />
-                  {lanFriends.length > 0 && (
-                    <List
-                      size="small"
-                      dataSource={lanFriends.slice(0, 5)}
-                      renderItem={(friend) => (
-                        <List.Item
-                          actions={[
-                            <Button key="remove" size="small" type="link" onClick={() => handleRemoveCollaborationFriend(friend.id)}>{'\u79fb\u9664'}</Button>,
-                          ]}
-                        >
-                          <List.Item.Meta
-                            title={<Space><Text>{friend.name || friend.host}</Text><Tag color={friend.online ? 'green' : 'default'}>{friend.online ? '\u5728\u7ebf' : '\u79bb\u7ebf'}</Tag></Space>}
-                            description={<Text type="secondary">{friend.host}:{friend.port}</Text>}
-                          />
-                        </List.Item>
-                      )}
-                    />
-                  )}
-                  <List
-                    size="small"
-                    dataSource={openTasks.slice(0, 5)}
-                    locale={{ emptyText: '\u6682\u65e0\u53ef\u5206\u6d3e\u4efb\u52a1' }}
-                    renderItem={(task) => (
-                      <List.Item
-                        actions={[
-                          <Button key="send" size="small" type="link" loading={sendingTaskId === task.id} onClick={() => handleSendCollaborationTask(task)}>
-                            {'\u53d1\u7ed9\u597d\u53cb'}
-                          </Button>,
-                        ]}
-                      >
-                        <List.Item.Meta
-                          title={<Text ellipsis={{ tooltip: task.title }}>{task.title}</Text>}
-                          description={<Text type="secondary">{task.stageName || task.source || '\u4efb\u52a1'} {'\u00b7'} {task.priority}</Text>}
-                        />
-                      </List.Item>
-                    )}
-                  />
-                </Space>
-              </Card>
-
-              <Card title={'\u534f\u540c\u8d1f\u8f7d'} size="small" styles={{ body: { padding: 12 } }}>
-                {workload.length === 0 ? (
-                  <Empty description={'\u6682\u65e0\u4efb\u52a1\u5206\u914d'} image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                ) : (
-                  <List
-                    dataSource={workload}
-                    renderItem={(row) => (
-                      <List.Item>
-                        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                          <Space>
-                            <TeamOutlined />
-                            <Text>{row.name}</Text>
-                          </Space>
-                          <Space>
-                            <Tag color={row.high ? 'red' : 'default'}>{'\u9ad8'} {row.high}</Tag>
-                            <Tag color="blue">{'\u5f85\u529e'} {row.open}</Tag>
-                            <Tag color="green">{'\u5b8c\u6210'} {row.completed}</Tag>
-                          </Space>
-                        </Space>
-                      </List.Item>
-                    )}
-                  />
-                )}
-              </Card>
-            </Space>
-          </Col>
-        </Row>
-
-        <Row gutter={16}>
-          <Col span={12}>
-            <Card title="风险与待办">
               <List
-                dataSource={openTasks.slice(0, 8)}
-                locale={{ emptyText: '暂无待办任务' }}
+                size="small"
+                dataSource={openTasks.slice(0, 5)}
+                locale={{ emptyText: '暂无可分派任务' }}
                 renderItem={(task) => (
-                  <List.Item>
-                    <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                      <Space wrap>
-                        {task.priority === 'high'
-                          ? <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />
-                          : <ClockCircleOutlined style={{ color: '#faad14' }} />}
-                        <Text strong>{task.title}</Text>
-                        <Tag>{task.source === 'review' ? '审查' : task.source === 'report' ? '报告' : '任务'}</Tag>
-                        {task.assigneeName && <Tag color="blue">{task.assigneeName}</Tag>}
-                      </Space>
-                      {task.description && <Text type="secondary" ellipsis>{task.description}</Text>}
-                    </Space>
+                  <List.Item actions={[<Button key="send" size="small" type="link" loading={sendingTaskId === task.id} onClick={() => handleSendCollaborationTask(task)}>发给好友</Button>]}>
+                    <List.Item.Meta
+                      title={<Text ellipsis={{ tooltip: task.title }}>{task.title}</Text>}
+                      description={<Text type="secondary">{task.stageName || task.source || '任务'} · {task.priority}</Text>}
+                    />
                   </List.Item>
                 )}
               />
-              <Divider style={{ margin: '12px 0' }} />
-              <Space>
-                <Tag color="red">审查待办 {reviewTasks.length}</Tag>
-                <Tag color="green">已完成任务 {completedTasks.length}</Tag>
-              </Space>
-            </Card>
-          </Col>
+            </Space>
+          </Card>
 
-          <Col span={12}>
-            <Card title="最近动态">
+          <Card title="协同负载" size="small" styles={{ body: { padding: 12 } }}>
+            {workload.length === 0 ? (
+              <Empty description="暂无任务分配" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : (
               <List
-                dataSource={recentActivities}
-                locale={{ emptyText: '暂无动态' }}
-                renderItem={(item) => (
+                dataSource={workload}
+                renderItem={(row) => (
                   <List.Item>
-                    <Space>
-                      {item.status === 'completed'
-                        ? <CheckCircleOutlined style={{ color: '#52c41a' }} />
-                        : <FileTextOutlined style={{ color: '#1677ff' }} />}
-                      <div>
-                        <Text>{item.title}</Text>
-                        <br />
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          {item.type} · {dayjs(item.time).format('MM-DD HH:mm')}
-                        </Text>
-                      </div>
+                    <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                      <Space><TeamOutlined /><Text>{row.name}</Text></Space>
+                      <Space>
+                        <Tag color={row.high ? 'red' : 'default'}>高 {row.high}</Tag>
+                        <Tag color="blue">待办 {row.open}</Tag>
+                        <Tag color="green">完成 {row.completed}</Tag>
+                      </Space>
                     </Space>
                   </List.Item>
                 )}
               />
-            </Card>
-          </Col>
-        </Row>
-      </Space>
+            )}
+          </Card>
+
+          <Card title="最近动态" size="small" styles={{ body: { padding: 12 } }}>
+            <List
+              dataSource={recentActivities}
+              locale={{ emptyText: '暂无动态' }}
+              renderItem={(item) => (
+                <List.Item>
+                  <Space>
+                    {item.status === 'completed'
+                      ? <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                      : <FileTextOutlined style={{ color: '#1677ff' }} />}
+                    <div>
+                      <Text style={{ fontSize: 13 }}>{item.title}</Text>
+                      <br />
+                      <Text type="secondary" style={{ fontSize: 11 }}>{item.type} · {dayjs(item.time).format('MM-DD HH:mm')}</Text>
+                    </div>
+                  </Space>
+                </List.Item>
+              )}
+            />
+          </Card>
+        </div>
+      </div>
     </div>
   );
 };

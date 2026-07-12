@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   importFiles: (params: { folderPath: string; filePaths: string[] }) => ipcRenderer.invoke('file:importFiles', params),
   duplicateFiles: (params: { sourcePaths: string[]; targetFolder: string }) => ipcRenderer.invoke('file:duplicate', params),
   moveFiles: (params: { sourcePaths: string[]; targetFolder: string }) => ipcRenderer.invoke('file:move', params),
-  deleteFile: (filePath: string) => ipcRenderer.invoke('file:delete', filePath),
+  deleteFile: (filePath: string, options?: { permanent?: boolean }) => ipcRenderer.invoke('file:delete', filePath, options),
   createFolder: (params: { folderPath: string; folderName: string }) => ipcRenderer.invoke('file:createFolder', params),
   readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
   readDir: (dirPath: string) => ipcRenderer.invoke('file:readDir', dirPath),
@@ -136,8 +136,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('project:createFolder', params),
   getWorkspaceSize: (workspacePath: string) => ipcRenderer.invoke('workspace:getSize', workspacePath),
   listWorkspaceFolders: (dirPath: string) => ipcRenderer.invoke('workspace:listFolders', dirPath),
+  listWorkspaceMigrationProjects: (params: { sourceWorkspacePath: string }) =>
+    ipcRenderer.invoke('workspace:listMigrationProjects', params),
+  migrateWorkspaceProjects: (params: { sourceWorkspacePath: string; targetWorkspacePath: string; projectIds: string[] }) =>
+    ipcRenderer.invoke('workspace:migrateProjects', params),
   moveFolder: (params: { src: string; dest: string }) => ipcRenderer.invoke('workspace:moveFolder', params),
-  deleteFolder: (folderPath: string) => ipcRenderer.invoke('workspace:deleteFolder', folderPath),
+  deleteFolder: (folderPath: string, options?: { permanent?: boolean }) => ipcRenderer.invoke('workspace:deleteFolder', folderPath, options),
+  listRecycleBin: (params: { workspacePath: string }) => ipcRenderer.invoke('workspace:listRecycleBin', params),
+  restoreRecycleBinItem: (params: { workspacePath: string; id: string }) => ipcRenderer.invoke('workspace:restoreRecycleBinItem', params),
+  permanentlyDeleteRecycleBinItem: (params: { workspacePath: string; id: string }) => ipcRenderer.invoke('workspace:permanentlyDeleteRecycleBinItem', params),
+  emptyRecycleBin: (params: { workspacePath: string }) => ipcRenderer.invoke('workspace:emptyRecycleBin', params),
+  cleanupRecycleBin: (params: { workspacePath: string }) => ipcRenderer.invoke('workspace:cleanupRecycleBin', params),
+  scanProjectFiles: (folderPath: string) => ipcRenderer.invoke('workspace:scanProjectFiles', folderPath),
 
   // 项目文档操作
   saveProjectDoc: (doc: any) => ipcRenderer.invoke('projectDoc:save', doc),

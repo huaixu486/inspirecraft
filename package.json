@@ -13,8 +13,13 @@
     "build": "npm run typecheck && npm run build:main && npm run build:renderer",
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
+    "test": "npm run test:pathguard && npm run test:ai-jobs && npm run test:auto-description && npm run test:navigation && npm run test:tasks",
     "test:pathguard": "npx tsx src/main/shared/__tests__/pathGuard.test.ts",
-    "verify": "npm run typecheck && npm run build:renderer && echo ✅ All checks passed"
+    "test:ai-jobs": "npx tsx --test src/renderer/stores/__tests__/aiJobStore.test.ts",
+    "test:auto-description": "npx tsx --test src/renderer/utils/__tests__/autoProjectDescription.test.ts",
+    "test:navigation": "npx tsx --test src/renderer/stores/__tests__/navigationStore.test.ts",
+    "test:tasks": "npx tsx --test src/renderer/stores/__tests__/taskStore.test.ts",
+    "verify": "npm run test && npm run typecheck && npm run build && echo ✅ All checks passed"
   },
   "dependencies": {
     "antd": "^5.22.0",

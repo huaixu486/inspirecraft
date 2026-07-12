@@ -6,7 +6,9 @@ import {
   CheckCircleOutlined, ClockCircleOutlined, CloseOutlined,
   FolderOutlined, FileOutlined, ExclamationCircleOutlined,
   PlusOutlined, DeleteOutlined, ReloadOutlined, ExperimentOutlined,
-  RightOutlined, DownOutlined,
+  RightOutlined, DownOutlined, UserOutlined,
+  WarningOutlined, FileTextOutlined, CalendarOutlined,
+  BookOutlined, EditOutlined, DiffOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useProjectStore, WorkflowWorkbenchTarget } from '../../stores/projectStore';
@@ -25,13 +27,33 @@ import {
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { isManualProjectDescription, maybeGenerateAutoProjectDescription } from '../../utils/autoProjectDescription';
+import { isManualProjectDescription, maybeGenerateAutoProjectDescription, shouldGenerateAutoProjectDescription, convertToManualDescription, resetAutoDescriptionLock } from '../../utils/autoProjectDescription';
 import { composePrompt } from '../../utils/promptComposer';
 import { useAIJobStore } from '../../stores/aiJobStore';
 import { deriveProjectNextActions, ProjectNextAction } from '../../utils/projectNextActions';
 import { buildLifecyclePatch, getProjectDocumentLifecycleColor, getProjectDocumentLifecycleLabel, reopenLifecycleStatus } from '../../utils/documentLifecycle';
 
 const { Title, Text, Paragraph } = Typography;
+
+const ACTION_KIND_ICON: Record<string, React.ReactNode> = {
+  task: <CheckCircleOutlined style={{ color: '#1677ff' }} />,
+  review: <WarningOutlined style={{ color: '#ff4d4f' }} />,
+  document: <FileTextOutlined style={{ color: '#722ed1' }} />,
+  stage: <CalendarOutlined style={{ color: '#13c2c2' }} />,
+  diff: <DiffOutlined style={{ color: '#faad14' }} />,
+  memory: <BookOutlined style={{ color: '#52c41a' }} />,
+  description: <EditOutlined style={{ color: '#8c8c8c' }} />,
+};
+
+const ACTION_KIND_TARGET_PAGE: Record<string, string> = {
+  task: 'plan',
+  review: 'review',
+  document: 'report',
+  stage: 'plan',
+  diff: 'review',
+  memory: 'report',
+  description: 'files',
+};
 
 const normalizeSidePanelKnowledgeStage = (value?: string) => String(value || '').trim().replace(/\s+/g, ' ') || 'unknown';
 
@@ -87,6 +109,7 @@ export type ProjectDetailPage = 'files' | 'plan' | 'team' | 'templates' | 'repor
 interface DetailPanelProps {
   project: Project | null;
   isOpen: boolean;
+  isOpening?: boolean;
   isSwitching: boolean;
   initialTab?: string;
   onOpenDetail?: (page: ProjectDetailPage) => void;
@@ -486,8 +509,9 @@ const DetailPanelSkeleton = () => (
   </div>
 );
 
-const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching, initialTab = 'overview', onOpenDetail, onClose }) => {
+const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = false, isSwitching, initialTab = 'overview', onOpenDetail, onClose }) => {
   const projects = useProjectStore(s => s.projects);
+  const setCurrentProject = useProjectStore(s => s.setCurrentProject);
   const currentProject = project; // 内部使用 currentProject 保持兼容
   const versions = useProjectStore(s => s.versions);
   const setCurrentStageName = useProjectStore(s => s.setCurrentStageName);
@@ -525,9 +549,23 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
   // 延迟收起边框状态，让边框在动画结束后再渐隐
   const [stageBorderVisible, setStageBorderVisible] = useState<Record<string, boolean>>({});
   const [activeTab, setActiveTab] = useState(initialTab);
+  // 快捷计划内联编辑器状态
+  const [quickPlanEditing, setQuickPlanEditing] = useState(false);
+  const [quickPlanTitle, setQuickPlanTitle] = useState('');
+  const [quickPlanDesc, setQuickPlanDesc] = useState('');
+  const [quickPlanType, setQuickPlanType] = useState<'ai' | 'manual'>('manual');
+  const quickPlanTitleRef = useRef<HTMLInputElement>(null);
+
+  // 项目描述编辑状态
+  const [descEditing, setDescEditing] = useState(false);
+  const [descEditText, setDescEditText] = useState('');
+  const descEditRef = useRef<any>(null);
   // 报告Tab：已读报告 & 展开的阶段
   const [readReportIds, setReadReportIds] = useState<Set<string>>(new Set());
   const [expandedReportStage, setExpandedReportStage] = useState<string | null>(null);
+  const knowledgeLoadStartedRef = useRef(false);
+  const knowledgeLoadTimerRef = useRef<number>(0);
+  const knowledgeLoadIdleRef = useRef<number>(0);
 
   // 团队Tab：AI协同
   const [selectedWritingTemplateId, setSelectedWritingTemplateId] = useState<string>('');
@@ -536,10 +574,10 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
 
   useEffect(() => {
     if (currentProject) {
-      setActiveTab(initialTab || 'overview');
-      void loadKnowledge();
+      const nextTab = initialTab || 'overview';
+      setActiveTab(prev => prev === nextTab ? prev : nextTab);
     }
-  }, [currentProject?.id, initialTab, loadKnowledge]);
+  }, [currentProject?.id, initialTab]);
 
   const getDlStatus = (deadline?: string, completedAt?: string) =>
     (!deadline || completedAt) ? 'normal' as const : checkDeadlineStatus(deadline, Date.now());
@@ -547,13 +585,56 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
   const [contentReady, setContentReady] = useState(false);
   useEffect(() => {
     if (!currentProject) { setContentReady(false); return; }
-    // 延迟 2 帧，让侧边窗滑入动画先启动，减少首帧压力
-    let raf2 = 0;
-    const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => setContentReady(true));
-    });
-    return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); };
-  }, [currentProject?.id]);
+    if (isSwitching) {
+      setContentReady(true);
+      return;
+    }
+    if (!isOpening) {
+      setContentReady(true);
+      return;
+    }
+    setContentReady(false);
+    const timer = window.setTimeout(() => {
+      setContentReady(true);
+    }, 180);
+    return () => { window.clearTimeout(timer); };
+  }, [currentProject?.id, isOpening, isSwitching]);
+
+  useEffect(() => {
+    if (!currentProject || knowledgeLoadStartedRef.current || isOpening || !contentReady) return;
+
+    const idleApi = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const runLoad = () => {
+      knowledgeLoadIdleRef.current = 0;
+      knowledgeLoadStartedRef.current = true;
+      void loadKnowledge();
+    };
+
+    knowledgeLoadTimerRef.current = window.setTimeout(() => {
+      knowledgeLoadTimerRef.current = 0;
+      if (idleApi.requestIdleCallback) {
+        knowledgeLoadIdleRef.current = idleApi.requestIdleCallback(runLoad, { timeout: 1200 });
+      } else {
+        runLoad();
+      }
+    }, 120);
+
+    return () => {
+      if (knowledgeLoadTimerRef.current) {
+        window.clearTimeout(knowledgeLoadTimerRef.current);
+        knowledgeLoadTimerRef.current = 0;
+        knowledgeLoadStartedRef.current = false;
+      }
+      if (knowledgeLoadIdleRef.current && idleApi.cancelIdleCallback) {
+        idleApi.cancelIdleCallback(knowledgeLoadIdleRef.current);
+        knowledgeLoadIdleRef.current = 0;
+        knowledgeLoadStartedRef.current = false;
+      }
+    };
+  }, [currentProject?.id, contentReady, isOpening, loadKnowledge]);
 
   // 所有 hooks 必须在 early return 之前调用，否则 contentReady 变化时会违反 hooks 规则
   const projectVersions = useMemo(
@@ -565,14 +646,21 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
     [currentProject?.id, projectDocs]
   );
 
-  // 自动项目描述延后到打开动画结束后，避免干扰首帧
+  // 自动项目描述：兜底触发（主要由 ProjectTable 后台调度，这里仅作补充）
   useEffect(() => {
     if (!currentProject) return;
-    const timer = window.setTimeout(() => {
-      void maybeGenerateAutoProjectDescription(currentProject, projectDocs, allStages, updateProject);
-    }, 1000);
+    if (!shouldGenerateAutoProjectDescription(currentProject)) return;
+    const timer = window.setTimeout(async () => {
+      try {
+        const statsResult = await window.electronAPI.getTreeStats(currentProject.folderPath);
+        const fileCount = statsResult?.stats?.fileCount ?? 0;
+        if (fileCount >= 2) {
+          void maybeGenerateAutoProjectDescription(currentProject, projectDocs, allStages, updateProject, fileCount);
+        }
+      } catch {}
+    }, 1500);
     return () => clearTimeout(timer);
-  }, [currentProject?.id, currentProject?.autoDescriptionNextUpdateAt, currentProject?.autoDescriptionPendingSince, projectDocs, allStages, updateProject]);
+  }, [currentProject?.id, currentProject?.autoDescriptionNextUpdateAt, currentProject?.autoDescriptionPendingSince, currentProject?.autoDescriptionGeneratedAt, currentProject?.autoDescriptionGenerationAttempted, projectDocs, allStages, updateProject]);
 
   // 报告Tab：已分析的文档按阶段分组（非首屏，延后到 contentReady）
   const analyzedDocsByStage = useMemo(() => {
@@ -616,7 +704,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
     });
   }, [currentProject?.id, contentReady, tasks, projectDocs, versions, templates, reviews, stageMemories, allStages]);
 
-  if (!currentProject) return <DetailPanelSkeleton />;
+  if (!currentProject || !contentReady) return <DetailPanelSkeleton />;
   const totalAnalyzed = projectDocsList.filter(doc => doc.analyzedAt).length;
   const totalUnread = totalAnalyzed - analyzedDocsByStage.reduce((sum, g) => sum + g.docs.filter(d => readReportIds.has(d.id)).length, 0);
 
@@ -630,10 +718,8 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
   const completedStagePercent = Math.round((completedStageCount / systemStageCount) * 100);
   const activeStagePercent = Math.round((activeStageCount / systemStageCount) * 100);
 
-  const isReportRelatedTask = (task: TaskItem) =>
-    task.source === 'report' || task.source === 'review' || Boolean(task.workflowId || task.workflowName);
   const recentPlanTasks = tasks
-    .filter(task => task.projectId === currentProject.id && isReportRelatedTask(task))
+    .filter(task => task.projectId === currentProject.id)
     .sort((a, b) => {
       const statusScore = (item: TaskItem) => item.status === 'completed' ? 1 : 0;
       if (statusScore(a) !== statusScore(b)) return statusScore(a) - statusScore(b);
@@ -1318,7 +1404,57 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
 
 
   const openDetail = (page: ProjectDetailPage) => {
+    // 侧边窗使用独立的预览项目；在切出总览前必须同步到全局工作台上下文。
+    if (!currentProject) {
+      message.warning('请先选择一个项目');
+      return;
+    }
+    setCurrentProject(currentProject);
     onOpenDetail?.(page);
+  };
+
+  const handleOpenQuickPlanEditor = () => {
+    const manualPlanCount = tasks.filter(task => task.projectId === currentProject.id && task.source === 'manual').length;
+    setQuickPlanTitle(`未命名计划 ${manualPlanCount + 1}`);
+    setQuickPlanDesc('');
+    setQuickPlanType('manual');
+    setQuickPlanEditing(true);
+    // 下一帧聚焦标题输入框
+    requestAnimationFrame(() => {
+      quickPlanTitleRef.current?.focus();
+      quickPlanTitleRef.current?.select();
+    });
+  };
+
+  const handleConfirmQuickPlan = async () => {
+    const title = quickPlanTitle.trim();
+    if (!title) {
+      message.warning('请输入计划标题');
+      return;
+    }
+    await addTask({
+      id: `quick-plan-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      projectId: currentProject.id,
+      title,
+      description: quickPlanDesc.trim() || (quickPlanType === 'ai' ? 'AI 自动执行任务' : '需要人工处理的计划'),
+      type: quickPlanType,
+      status: 'pending',
+      priority: 'medium',
+      source: 'manual',
+      createdAt: new Date().toISOString(),
+    });
+    setQuickPlanEditing(false);
+    message.success(quickPlanType === 'ai' ? '已创建 AI 任务' : '已创建人工计划');
+  };
+
+  const handleCancelQuickPlan = () => {
+    setQuickPlanEditing(false);
+  };
+
+  const handleToggleTaskType = async (task: TaskItem) => {
+    const nextType: TaskItem['type'] = task.type === 'ai' ? 'manual' : 'ai';
+    await updateTask(task.id, { type: nextType });
+    message.success(nextType === 'ai' ? '已归类为 AI 任务' : '已归类为人工任务');
   };
 
   const summaryCardStyle: React.CSSProperties = {
@@ -1345,14 +1481,136 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
       children: (
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-            <Title level={5} style={{ fontSize: 14, margin: 0 }}>{'\u9879\u76ee\u63cf\u8ff0'}</Title>
+            <Title level={5} style={{ fontSize: 14, margin: 0 }}>{'项目描述'}</Title>
             {currentProject.descriptionSource === 'auto' && currentProject.description && (
               <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>AI简述</Tag>
             )}
+            {isManualProjectDescription(currentProject) && (
+              <Tag color="green" style={{ margin: 0, fontSize: 11 }}>手动</Tag>
+            )}
+            {!descEditing && (
+              <Button type="text" size="small" icon={<EditOutlined />}
+                onClick={() => { setDescEditing(true); setDescEditText(currentProject.description || ''); setTimeout(() => descEditRef.current?.focus(), 100); }}
+                style={{ marginLeft: 'auto', color: '#8c8c8c', fontSize: 11 }}
+                title={currentProject.description ? '编辑描述' : '添加描述'}
+              />
+            )}
           </div>
-          <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 20 }}>
-            {currentProject.description || (currentProject.autoDescriptionPendingSince && !isManualProjectDescription(currentProject) ? '已记录新增文件，将在更新周期到期后自动生成简述' : '\u6682\u65e0\u63cf\u8ff0')}
-          </Paragraph>
+
+          {descEditing ? (
+            <div style={{ marginBottom: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <Input.TextArea
+                ref={descEditRef}
+                value={descEditText}
+                onChange={e => setDescEditText(e.target.value)}
+                placeholder="输入项目描述…"
+                autoSize={{ minRows: 2, maxRows: 6 }}
+                style={{ fontSize: 12 }}
+              />
+              <div style={{ display: 'flex', gap: 6 }}>
+                <Button size="small" type="primary" onClick={async () => {
+                  const text = descEditText.trim();
+                  if (text) {
+                    await convertToManualDescription(currentProject, updateProject, text);
+                    message.success('已保存为手动描述');
+                  } else {
+                    await updateProject(currentProject.id, { description: '', descriptionSource: undefined });
+                    message.success('已清空描述');
+                  }
+                  setDescEditing(false);
+                }}>保存</Button>
+                <Button size="small" onClick={() => setDescEditing(false)}>取消</Button>
+                {currentProject.description && (
+                  <Popconfirm title="确定清空描述？" onConfirm={async () => {
+                    await updateProject(currentProject.id, { description: '', descriptionSource: undefined });
+                    setDescEditing(false);
+                    message.success('已清空描述');
+                  }}>
+                    <Button size="small" danger>清空</Button>
+                  </Popconfirm>
+                )}
+              </div>
+            </div>
+          ) : (
+            <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 20 }}>
+              {currentProject.description
+                || (currentProject.autoDescriptionGeneratedAt && !currentProject.description
+                  ? 'AI 简述已生成过，如需重新生成请手动操作'
+                  : currentProject.autoDescriptionGenerationAttempted && !currentProject.description
+                    ? 'AI 简述生成失败或结果为空'
+                    : currentProject.autoDescriptionPendingSince && !isManualProjectDescription(currentProject)
+                      ? '已检测到文件更新，三天无更新后自动生成'
+                      : '暂无描述')}
+            </Paragraph>
+          )}
+
+          {(currentProject.autoDescriptionGeneratedAt || currentProject.autoDescriptionGenerationAttempted) && !descEditing && (
+            <div style={{ marginBottom: 16 }}>
+              <Button size="small" type="link" style={{ fontSize: 11, padding: 0, color: '#8c8c8c' }}
+                onClick={async () => {
+                  await resetAutoDescriptionLock(currentProject, updateProject);
+                  message.success('已恢复自动生成资格，将在下次扫描后重新生成');
+                }}
+              >
+                恢复自动生成资格
+              </Button>
+            </div>
+          )}
+
+          {/* \u4e0b\u4e00\u6b65\u884c\u52a8\u4e2d\u5fc3 */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <Title level={5} style={{ fontSize: 14, margin: 0 }}>\u4e0b\u4e00\u6b65\u884c\u52a8</Title>
+              <Tag color="default" style={{ margin: 0, fontSize: 10 }}>{nextActions.length} \u9879</Tag>
+            </div>
+            {nextActions.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>\u5f53\u524d\u9879\u76ee\u6ca1\u6709\u5f85\u63a8\u8fdb\u4e8b\u9879</Text>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {nextActions.map(action => (
+                  <div
+                    key={action.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      const targetPage = (ACTION_KIND_TARGET_PAGE[action.kind] || action.target) as any;
+                      navigateWorkbench({
+                        projectId: currentProject.id,
+                        target: targetPage,
+                        stageName: action.stageName,
+                        docId: action.docId,
+                        taskId: action.taskId,
+                        reviewId: action.reviewId,
+                        source: 'overview',
+                      });
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        (e.currentTarget as HTMLElement).click();
+                      }
+                    }}
+                    style={{
+                      display: 'flex', alignItems: 'flex-start', gap: 8,
+                      padding: '8px 10px', borderRadius: 8,
+                      border: `1px solid ${action.severity === 'high' ? '#ffccc7' : action.severity === 'medium' ? '#ffe58f' : '#f0f0f0'}`,
+                      background: action.severity === 'high' ? '#fff1f0' : action.severity === 'medium' ? '#fffbe6' : '#fafafa',
+                      cursor: 'pointer', transition: 'background 150ms',
+                    }}
+                  >
+                    <span style={{ marginTop: 2, flexShrink: 0, fontSize: 14 }}>
+                      {ACTION_KIND_ICON[action.kind] || <RightOutlined style={{ color: '#8c8c8c' }} />}
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <Text strong style={{ fontSize: 12, display: 'block' }}>{action.title}</Text>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block', lineHeight: 1.4 }}>{action.detail}</Text>
+                    </div>
+                    <RightOutlined style={{ color: '#bbb', fontSize: 10, marginTop: 4, flexShrink: 0 }} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
@@ -1396,9 +1654,77 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
             </div>
           </div>
 
-          <Title level={5} style={{ fontSize: 14, marginBottom: 10 }}>{'\u4e0b\u4e00\u6b65\u8ba1\u5212'}</Title>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <Title level={5} style={{ fontSize: 14, margin: 0 }}>{'\u4e0b\u4e00\u6b65\u8ba1\u5212'}</Title>
+            {!quickPlanEditing && (
+              <Button
+                type="text"
+                size="small"
+                shape="circle"
+                icon={<PlusOutlined />}
+                title="新增计划"
+                onClick={handleOpenQuickPlanEditor}
+                style={{ color: '#1677ff', background: '#edf7ff' }}
+              />
+            )}
+          </div>
+
+          {/* 内联编辑器 */}
+          {quickPlanEditing && (
+            <div style={{
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: '1px solid #b7d4ff',
+              background: '#f0f7ff',
+              marginBottom: 10,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+            }}>
+              <Input
+                ref={quickPlanTitleRef as any}
+                value={quickPlanTitle}
+                onChange={e => setQuickPlanTitle(e.target.value)}
+                placeholder="计划标题"
+                size="small"
+                style={{ fontSize: 13 }}
+                onPressEnter={() => { void handleConfirmQuickPlan(); }}
+              />
+              <TextArea
+                value={quickPlanDesc}
+                onChange={e => setQuickPlanDesc(e.target.value)}
+                placeholder="计划描述（可选）"
+                autoSize={{ minRows: 2, maxRows: 4 }}
+                size="small"
+                style={{ fontSize: 12 }}
+              />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Button
+                  type="text"
+                  size="small"
+                  shape="circle"
+                  icon={quickPlanType === 'ai' ? <ExperimentOutlined /> : <UserOutlined />}
+                  onClick={() => setQuickPlanType(quickPlanType === 'ai' ? 'manual' : 'ai')}
+                  title={quickPlanType === 'ai' ? '当前为 AI 任务，点击切换为人工任务' : '当前为人工任务，点击切换为 AI 任务'}
+                  aria-label={quickPlanType === 'ai' ? '切换为人工任务' : '切换为 AI 任务'}
+                  style={{
+                    width: 28,
+                    minWidth: 28,
+                    height: 28,
+                    color: quickPlanType === 'ai' ? '#1677ff' : '#d46b08',
+                    background: quickPlanType === 'ai' ? '#e6f4ff' : '#fff7e6',
+                  }}
+                />
+                <Space size={6}>
+                  <Button size="small" onClick={handleCancelQuickPlan}>{'取消'}</Button>
+                  <Button size="small" type="primary" onClick={() => { void handleConfirmQuickPlan(); }}>{'确认'}</Button>
+                </Space>
+              </div>
+            </div>
+          )}
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-            {recentPlanTasks.length === 0 ? (
+            {recentPlanTasks.length === 0 && !quickPlanEditing ? (
               <div style={{ padding: '18px 12px', textAlign: 'center' }}>
                 <ClockCircleOutlined style={{ fontSize: 22, color: '#bfbfbf', marginBottom: 8 }} />
                 <div><Text type="secondary" style={{ fontSize: 12 }}>{'\u6682\u672a\u751f\u6210\u8ba1\u5212'}</Text></div>
@@ -1440,6 +1766,17 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
                     />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Button
+                          type="text"
+                          size="small"
+                          title={task.type === 'ai' ? '当前为 AI 任务，点击切换为人工任务' : '当前为人工任务，点击切换为 AI 任务'}
+                          icon={task.type === 'ai' ? <ExperimentOutlined /> : <UserOutlined />}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleToggleTaskType(task);
+                          }}
+                          style={{ padding: 0, width: 18, minWidth: 18, height: 18, color: task.type === 'ai' ? '#1677ff' : '#d46b08' }}
+                        />
                         <span style={{ width: 6, height: 6, borderRadius: 2, background: color, flexShrink: 0 }} />
                         <Text strong={!checked} delete={checked} style={{ fontSize: 12, minWidth: 0 }} ellipsis={{ tooltip: task.title }}>{task.title}</Text>
                       </div>
@@ -2185,7 +2522,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isSwitching,
   ];
 
   return (
-    <div className="detail-panel detail-panel-polished" style={{ padding: '16px 18px', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div className="detail-panel detail-panel-polished detail-panel-ready" style={{ padding: '16px 18px', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Header */}
       <div className="detail-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

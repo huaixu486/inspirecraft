@@ -24,6 +24,8 @@ interface SyncResult {
   created: number;
   updated: number;
   createdFileNames: string[];
+  updatedFileNames: string[];
+  latestActivityAt: string;
 }
 
 const normalizePath = (value: string) => value.toLowerCase().replace(/\\/g, '/');
@@ -89,15 +91,17 @@ export const syncProjectStageFiles = async (
   project: Project,
   deps: SyncDeps,
 ): Promise<SyncResult> => {
-  if (!project.folderPath) return { matched: 0, created: 0, updated: 0, createdFileNames: [] };
+  if (!project.folderPath) return { matched: 0, created: 0, updated: 0, createdFileNames: [], updatedFileNames: [], latestActivityAt: '' };
 
   const result = await window.electronAPI.scanStageFiles(project.folderPath);
-  if (!result.success) return { matched: 0, created: 0, updated: 0, createdFileNames: [] };
+  if (!result.success) return { matched: 0, created: 0, updated: 0, createdFileNames: [], updatedFileNames: [], latestActivityAt: '' };
 
   const files = result.files.filter(f => hasStageKeyword(deps.allStages, f));
   let created = 0;
   let updated = 0;
   const createdFileNames: string[] = [];
+  const updatedFileNames: string[] = [];
+  let latestActivityAt = '';
 
   for (const file of files) {
     const stage = detectTimelineStage(deps.allStages, file.name, file.path);
@@ -127,6 +131,8 @@ export const syncProjectStageFiles = async (
           ...buildLifecyclePatch(existing.lifecycleStatus === 'imported' ? 'identified' : inferProjectDocumentLifecycle(existing)),
         });
         updated += 1;
+        updatedFileNames.push(file.name);
+        if (file.modifiedAt && file.modifiedAt > latestActivityAt) latestActivityAt = file.modifiedAt;
       }
       if (matchedTemplate?.id && existing.templateId !== matchedTemplate.id) {
         await deps.updateProjectDoc(existing.id, { templateId: matchedTemplate.id });
@@ -148,7 +154,16 @@ export const syncProjectStageFiles = async (
     });
     created += 1;
     createdFileNames.push(file.name);
+    const activityAt = file.modifiedAt || file.createdAt || new Date().toISOString();
+    if (activityAt > latestActivityAt) latestActivityAt = activityAt;
   }
 
-  return { matched: files.length, created, updated, createdFileNames };
+  return {
+    matched: files.length,
+    created,
+    updated,
+    createdFileNames,
+    updatedFileNames,
+    latestActivityAt: latestActivityAt || new Date().toISOString(),
+  };
 };

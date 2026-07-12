@@ -61,7 +61,7 @@ const statusColors: Record<TaskItem['status'], string> = {
   completed: 'success',
 };
 
-const PlanManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
+const PlanManager: React.FC<{ onBack?: () => void; hideHeader?: boolean }> = ({ onBack, hideHeader = false }) => {
   const { projects, currentProject, currentStageName, versions, setCurrentProject, setCurrentStageName } = useProjectStore();
   const { projectDocs, updateProjectDoc } = useProjectDocStore();
   const { templates } = useTemplateStore();
@@ -317,7 +317,7 @@ const PlanManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
 
   return (
     <div>
-      <div style={{ marginBottom: 20 }}>
+      {!hideHeader && <div style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
           <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
           <Title level={4} style={{ margin: 0 }}>计划管理</Title>
@@ -325,7 +325,7 @@ const PlanManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
         <Text type="secondary" style={{ fontSize: 13, lineHeight: 1.5 }}>
           按项目推进阶段计划，并集中查看报告页生成的 AI/人工工作流。
         </Text>
-      </div>
+      </div>}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 12, marginBottom: 16 }}>
         {renderMetric('总阶段数', totalStages, '#1677ff')}

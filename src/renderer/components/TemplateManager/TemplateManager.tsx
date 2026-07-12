@@ -1873,7 +1873,7 @@ const getAiExtractWaitingStatus = (seconds: number) => {
   return '请求已发送，等待 AI 返回';
 };
 
-const TemplateManager: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
+const TemplateManager: React.FC<{ onBack?: () => void; hideHeader?: boolean }> = ({ onBack, hideHeader = false }) => {
   const templates = useTemplateStore(state => state.templates);
   const loadTemplates = useTemplateStore(state => state.loadTemplates);
   const addTemplate = useTemplateStore(state => state.addTemplate);
@@ -3150,11 +3150,13 @@ ${content.slice(0, 22000)}`;
       <section className="template-section">
       <div className="template-section-header" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {onBack && <Button type="text" icon={<LeftOutlined />} onClick={onBack} />}
-          <div>
-            <Title level={4} style={{ margin: 0 }}>模板管理</Title>
-            <Text type="secondary" style={{ fontSize: 13 }}>维护写作模板结构，可从 Word、PPT、Excel、PDF、文本等文档中提取章节</Text>
-          </div>
+          {!hideHeader && <>
+            {onBack && <Button type="text" icon={<LeftOutlined />} onClick={onBack} />}
+            <div>
+              <Title level={4} style={{ margin: 0 }}>模板管理</Title>
+              <Text type="secondary" style={{ fontSize: 13 }}>维护写作模板结构，可从 Word、PPT、Excel、PDF、文本等文档中提取章节</Text>
+            </div>
+          </>}
         </div>
         <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
           创建模板

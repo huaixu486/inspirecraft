@@ -1,5 +1,5 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal, flushSync } from 'react-dom';
 import { Card, Table, Tag, Progress, Typography, Space, Button, Dropdown, Modal, Form, Input, message, Tooltip } from 'antd';
 import {
   FolderOutlined, CalendarOutlined, WarningOutlined, ExclamationCircleOutlined,
@@ -13,7 +13,7 @@ import { useKnowledgeStore } from '../../stores/knowledgeStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
-import { markAutoDescriptionFileActivity } from '../../utils/autoProjectDescription';
+import { markAutoDescriptionFileActivity, maybeGenerateAutoProjectDescription, shouldGenerateAutoProjectDescription, isManualProjectDescription } from '../../utils/autoProjectDescription';
 import { buildProjectStageSegments, getAllStages, getStageMeta, detectTimelineStage, getGlobalStageProgress, checkDeadlineStatus } from '../../utils/timelineStages';
 import { deriveProjectNextActions, ProjectNextAction } from '../../utils/projectNextActions';
 import type { ProjectDocument, TaskItem } from '../../../shared/types';
@@ -21,15 +21,17 @@ import type { StageConfig } from '../../utils/timelineStages';
 import { Project } from '../../../shared/types';
 
 const { Text } = Typography;
-const PROJECT_TABLE_SCROLL_X = 920;
+const PROJECT_TABLE_SCROLL_X = 1180;
 const PROJECT_TABLE_SCROLL_Y = 'max(280px, calc(100vh - 520px))';
 const PROJECT_TABLE_ROW_HEIGHT = 58;
+const PROJECT_TABLE_SINGLE_CLICK_DELAY_MS = 120;
 
 interface Props {
   onEnterProject: (project: Project, initialTab?: string) => void;
+  onPreviewProject?: (project: Project) => void;
 }
 
-const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
+const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => {
   const projects = useProjectStore(s => s.projects);
   const versions = useProjectStore(s => s.versions);
   const addProject = useProjectStore(s => s.addProject);
@@ -53,7 +55,6 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
   const stageMeta = useMemo(() => getStageMeta(allStages), [allStages]);
 
   const [searchKeyword, setSearchKeyword] = useState('');
-  const rowClickTimerRef = useRef<NodeJS.Timeout | null>(null);
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const [tableBodyElement, setTableBodyElement] = useState<HTMLElement | null>(null);
   const [rowHighlight, setRowHighlight] = useState({
@@ -63,12 +64,22 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
     variant: 'selected' as 'preview' | 'selected',
   });
   const [highlightedProjectId, setHighlightedProjectId] = useState<string | null>(null);
+  const singleClickTimerRef = useRef<number>(0);
   const activeHighlightId = highlightedProjectId || currentProjectId || null;
   const activeHighlightVariant: 'preview' | 'selected' = highlightedProjectId ? 'preview' : 'selected';
 
-  useEffect(() => () => {
-    if (rowClickTimerRef.current) clearTimeout(rowClickTimerRef.current);
-  }, []);
+  const showRowHighlight = (row: HTMLElement | null, variant: 'preview' | 'selected') => {
+    const body = tableBodyElement || tableWrapRef.current?.querySelector<HTMLElement>('.ant-table-body') || null;
+    if (!row || !body) return;
+    const bodyRect = body.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    setRowHighlight({
+      top: rowRect.top - bodyRect.top + body.scrollTop,
+      height: PROJECT_TABLE_ROW_HEIGHT,
+      visible: true,
+      variant,
+    });
+  };
 
   useEffect(() => {
     if (highlightedProjectId && highlightedProjectId === currentProjectId) {
@@ -76,21 +87,39 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
     }
   }, [currentProjectId, highlightedProjectId]);
 
-  const openProjectFromRow = (project: Project, initialTab?: string) => {
-    if (rowClickTimerRef.current) {
-      clearTimeout(rowClickTimerRef.current);
-      rowClickTimerRef.current = null;
+  useEffect(() => {
+    return () => {
+      if (singleClickTimerRef.current) {
+        window.clearTimeout(singleClickTimerRef.current);
+        singleClickTimerRef.current = 0;
+      }
+    };
+  }, []);
+
+  const cancelPendingSingleClickOpen = () => {
+    if (singleClickTimerRef.current) {
+      window.clearTimeout(singleClickTimerRef.current);
+      singleClickTimerRef.current = 0;
     }
+  };
+
+  const openProjectFromRow = (project: Project, initialTab?: string, row?: HTMLElement | null) => {
+    cancelPendingSingleClickOpen();
     if (initialTab === 'files') {
       onEnterProject(project, 'files');
       return;
     }
-    setHighlightedProjectId(project.id);
-    // 80ms 后再通过 store 打开侧边窗（用于区分单击/双击）
-    rowClickTimerRef.current = setTimeout(() => {
-      rowClickTimerRef.current = null;
-      onEnterProject(project);
-    }, 80);
+
+    // 等待系统判定单击：若随后收到 dblclick，此回调会被取消，
+    // 因此双击只进入文件页，不会先闪出项目侧边窗。
+    singleClickTimerRef.current = window.setTimeout(() => {
+      singleClickTimerRef.current = 0;
+      flushSync(() => {
+        showRowHighlight(row || null, 'preview');
+        setHighlightedProjectId(project.id);
+        onPreviewProject?.(project);
+      });
+    }, PROJECT_TABLE_SINGLE_CLICK_DELAY_MS);
   };
 
   // --- 索引：按 projectId 分组，避免每行 filter ---
@@ -176,50 +205,78 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
   const getSummary = (project: Project): ProjectSummary =>
     projectSummaryMap.get(project.id) || { stage: '其他', stageColor: '#8c8c8c', stageLabel: '其他', progress: 0, nextAction: null };
 
-  // 自动扫描：逐个间隔执行，不一次性扫全部，避免占用资源
-  const autoScanProjectIdsRef = useRef<Set<string>>(new Set());
+  // 后台扫描：阶段文件同步 + 项目文件活动检测 + AI 生成
   const autoScanCancelledRef = useRef(false);
+  const autoScanBusyRef = useRef(false);
 
-  useEffect(() => {
-    if (!projects.length || !allStages.length) return;
+  // 轻量扫描：检测项目文件活动（不读内容，只看修改时间）
+  const scanProjectFileActivity = useCallback(async (project: Project) => {
+    if (!project.folderPath) return;
+    if (isManualProjectDescription(project)) return;
+    if (project.autoDescriptionGeneratedAt) return;
+    try {
+      const result = await window.electronAPI.scanProjectFiles(project.folderPath);
+      if (!result.success || !result.files?.length) return;
+
+      const files = result.files;
+      const latestModified = files.reduce((max, f) => f.modifiedAt > max ? f.modifiedAt : max, '');
+
+      // 有新活动：重置三天计时
+      if (latestModified && latestModified > (project.autoDescriptionLastFileActivityAt || '')) {
+        const activityFileNames = files
+          .filter(f => f.modifiedAt > (project.autoDescriptionLastFileActivityAt || ''))
+          .slice(0, 10)
+          .map(f => f.path.split(/[/\\]/).pop() || '');
+        await markAutoDescriptionFileActivity(project, updateProject, {
+          activityAt: latestModified,
+          fileNames: activityFileNames,
+        });
+      }
+    } catch (error) {
+      console.warn('Project file activity scan failed:', error);
+    }
+  }, [updateProject]);
+
+  // 阶段文件同步 + 活动检测（主扫描）
+  const scanOne = useCallback(async (project: Project): Promise<boolean> => {
+    if (!project.folderPath || autoScanCancelledRef.current) return false;
+    try {
+      const latestDocs = useProjectDocStore.getState().projectDocs;
+      const result = await syncProjectStageFiles(project, {
+        allStages,
+        projectDocs: latestDocs,
+        templates,
+        addProjectDoc,
+        updateProjectDoc,
+      });
+      // 额外扫描项目文件活动（覆盖非阶段文件的修改）
+      await scanProjectFileActivity(project);
+      return result.created > 0 || result.updated > 0;
+    } catch (error) {
+      console.warn('Auto stage scan failed:', error);
+      return false;
+    }
+  }, [allStages, templates, addProjectDoc, updateProjectDoc, updateProject, scanProjectFileActivity]);
+
+  // 执行一轮完整扫描（所有项目）+ AI 生成
+  const runFullScan = useCallback(async () => {
+    if (autoScanBusyRef.current) return;
+    autoScanBusyRef.current = true;
+    autoScanCancelledRef.current = false;
     const idleApi = window as Window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+      requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
       cancelIdleCallback?: (handle: number) => void;
     };
     let idleHandles: number[] = [];
-    autoScanCancelledRef.current = false;
 
-    const scanOne = async (project: Project): Promise<boolean> => {
-      if (!project.folderPath || autoScanCancelledRef.current) return false;
-      try {
-        const latestDocs = useProjectDocStore.getState().projectDocs;
-        const result = await syncProjectStageFiles(project, {
-          allStages,
-          projectDocs: latestDocs,
-          templates,
-          addProjectDoc,
-          updateProjectDoc,
-        });
-        if (result.created > 0) {
-          await markAutoDescriptionFileActivity(project, updateProject, result.createdFileNames);
-        }
-        return result.created > 0 || result.updated > 0;
-      } catch (error) {
-        console.warn('Auto stage scan failed:', error);
-        return false;
-      }
-    };
+    try {
+      const currentProjects = useProjectStore.getState().projects;
+      let anyChanged = false;
 
-    // 逐个项目扫描，每个间隔执行，不阻塞主线程
-    let anyChanged = false;
-    const scanSequentially = async () => {
-      for (const project of projects) {
+      for (const project of currentProjects) {
         if (autoScanCancelledRef.current) break;
-        if (autoScanProjectIdsRef.current.has(project.id)) continue;
-        autoScanProjectIdsRef.current.add(project.id);
         const changed = await scanOne(project);
         if (changed) anyChanged = true;
-        // 每扫完一个项目，等浏览器空闲再扫下一个
         await new Promise<void>(resolve => {
           if (typeof idleApi.requestIdleCallback === 'function') {
             const h = idleApi.requestIdleCallback(() => resolve(), { timeout: 3000 });
@@ -230,26 +287,60 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
           }
         });
       }
-      // 全部扫完后只在有变更时才刷新
+
       if (!autoScanCancelledRef.current && anyChanged) {
         void useProjectStore.getState().loadProjects({ silent: true });
       }
-    };
 
-    // 延迟启动扫描，让首页先完成渲染
-    const startTimer = window.setTimeout(() => {
-      if (!autoScanCancelledRef.current) void scanSequentially();
-    }, 3000);
-    idleHandles.push(startTimer);
-
-    return () => {
-      autoScanCancelledRef.current = true;
+      // AI 生成
+      if (!autoScanCancelledRef.current) {
+        const latestProjects = useProjectStore.getState().projects;
+        const latestDocs = useProjectDocStore.getState().projectDocs;
+        for (const project of latestProjects) {
+          if (autoScanCancelledRef.current) break;
+          if (!shouldGenerateAutoProjectDescription(project)) continue;
+          try {
+            const statsResult = await window.electronAPI.getTreeStats(project.folderPath);
+            const fileCount = statsResult?.stats?.fileCount ?? 0;
+            if (fileCount < 2) continue;
+            await maybeGenerateAutoProjectDescription(project, latestDocs, allStages, updateProject, fileCount);
+          } catch {}
+        }
+      }
+    } finally {
       idleHandles.forEach(h => {
         if (typeof idleApi.cancelIdleCallback === 'function') idleApi.cancelIdleCallback(h);
         else window.clearTimeout(h);
       });
+      autoScanBusyRef.current = false;
+    }
+  }, [allStages, templates, addProjectDoc, updateProjectDoc, updateProject, scanOne]);
+
+  // 启动后延迟扫描一次 + 每 15 分钟周期扫描
+  useEffect(() => {
+    if (!projects.length || !allStages.length) return;
+    autoScanCancelledRef.current = false;
+
+    const startTimer = window.setTimeout(() => {
+      if (!autoScanCancelledRef.current) void runFullScan();
+    }, 3000);
+
+    const periodicTimer = window.setInterval(() => {
+      if (!autoScanCancelledRef.current) void runFullScan();
+    }, 15 * 60 * 1000);
+
+    const handleFocus = () => {
+      if (!autoScanCancelledRef.current && !autoScanBusyRef.current) void runFullScan();
     };
-  }, [projects, allStages, templates, addProjectDoc, updateProjectDoc, updateProject]);
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      autoScanCancelledRef.current = true;
+      window.clearTimeout(startTimer);
+      window.clearInterval(periodicTimer);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [projects.length, allStages.length, runFullScan]);
 
   const isPlanRelatedTask = (task: TaskItem) =>
     task.source === 'report' ||
@@ -386,32 +477,38 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       return;
     }
 
-    const frameId = requestAnimationFrame(() => {
-      const row = body.querySelector<HTMLTableRowElement>(
-        activeHighlightVariant === 'preview'
-          ? '.overview-project-row-preview'
-          : '.overview-project-row-selected',
-      );
-      if (!row) {
-        setRowHighlight(prev => prev.visible ? { ...prev, visible: false } : prev);
-        return;
-      }
+    const row = body.querySelector<HTMLTableRowElement>(
+      activeHighlightVariant === 'preview'
+        ? '.overview-project-row-preview'
+        : '.overview-project-row-selected',
+    );
+    if (!row) {
+      setRowHighlight(prev => prev.visible ? { ...prev, visible: false } : prev);
+      return;
+    }
 
-      const bodyRect = body.getBoundingClientRect();
-      const rowRect = row.getBoundingClientRect();
-      setRowHighlight({
-        top: rowRect.top - bodyRect.top + body.scrollTop,
-        height: PROJECT_TABLE_ROW_HEIGHT,
-        visible: true,
-        variant: activeHighlightVariant,
-      });
+    const bodyRect = body.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    setRowHighlight({
+      top: rowRect.top - bodyRect.top + body.scrollTop,
+      height: PROJECT_TABLE_ROW_HEIGHT,
+      visible: true,
+      variant: activeHighlightVariant,
     });
-
-    return () => cancelAnimationFrame(frameId);
   }, [activeHighlightId, activeHighlightVariant, tableBodyElement, visibleProjects.length, searchKeyword]);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [form] = Form.useForm();
+
+  // 消费命令面板触发的一次性 overview 动作
+  const overviewAction = useNavigationStore(s => s.overviewAction);
+  const consumeOverviewAction = useNavigationStore(s => s.consumeOverviewAction);
+  useEffect(() => {
+    if (overviewAction === 'create-project') {
+      consumeOverviewAction();
+      setCreateModalOpen(true);
+    }
+  }, [overviewAction, consumeOverviewAction]);
 
   const handleCreate = async () => {
     try {
@@ -476,7 +573,8 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
     };
     await addProject(newProject);
     const syncResult = await syncProjectStageFiles(newProject, { allStages, projectDocs, templates, addProjectDoc, updateProjectDoc });
-    if (syncResult.created > 0) await markAutoDescriptionFileActivity(newProject, updateProject, syncResult.createdFileNames);
+    const activityFiles = [...syncResult.createdFileNames, ...syncResult.updatedFileNames];
+    if (activityFiles.length > 0) await markAutoDescriptionFileActivity(newProject, updateProject, { activityAt: syncResult.latestActivityAt, fileNames: activityFiles });
     message.success(`已导入项目：${folderName}`);
   };
 
@@ -500,7 +598,8 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       };
       await addProject(newProject);
       const syncResult = await syncProjectStageFiles(newProject, { allStages, projectDocs, templates, addProjectDoc, updateProjectDoc });
-      if (syncResult.created > 0) await markAutoDescriptionFileActivity(newProject, updateProject, syncResult.createdFileNames);
+      const activityFiles2 = [...syncResult.createdFileNames, ...syncResult.updatedFileNames];
+      if (activityFiles2.length > 0) await markAutoDescriptionFileActivity(newProject, updateProject, { activityAt: syncResult.latestActivityAt, fileNames: activityFiles2 });
       message.success(`已导入项目：${folderName}`);
     } else {
       message.error(result.error || '导入失败');
@@ -596,6 +695,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
     {
       title: '下一步计划',
       key: 'nextPlan',
+      width: 370,
       render: (_: any, record: Project) => {
         const nextPlan = getSummary(record).nextAction;
         if (!nextPlan) {
@@ -659,6 +759,15 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
       style={{}}
       extra={
         <Space size={4}>
+          <Input
+            allowClear
+            size="small"
+            prefix={<SearchOutlined />}
+            placeholder="搜索项目名称、描述或文件夹路径"
+            value={searchKeyword}
+            onChange={event => setSearchKeyword(event.target.value)}
+            style={{ width: 280 }}
+          />
           <Button type="primary" size="small" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>
             新建项目
           </Button>
@@ -679,16 +788,6 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
         </Space>
       }
     >
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-        <Input
-          allowClear
-          prefix={<SearchOutlined />}
-          placeholder="搜索项目名称、描述或文件夹路径"
-          value={searchKeyword}
-          onChange={event => setSearchKeyword(event.target.value)}
-          style={{ width: 280 }}
-        />
-      </div>
       <div ref={tableWrapRef} className="overview-project-table-wrap">
       <Table
         className="overview-project-table"
@@ -709,11 +808,19 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject }) => {
           ),
         }}
         onRow={(record) => ({
+          onMouseDown: (e) => {
+            if (e.detail > 1) {
+              cancelPendingSingleClickOpen();
+            }
+          },
           onClick: (e) => {
             if (e.detail > 1) return;
-            openProjectFromRow(record);
+            openProjectFromRow(record, undefined, e.currentTarget as HTMLElement);
           },
-          onDoubleClick: () => openProjectFromRow(record, 'files'),
+          onDoubleClick: (e) => {
+            cancelPendingSingleClickOpen();
+            openProjectFromRow(record, 'files', e.currentTarget as HTMLElement);
+          },
           style: { cursor: 'pointer' },
         })}
         rowClassName={(record) =>

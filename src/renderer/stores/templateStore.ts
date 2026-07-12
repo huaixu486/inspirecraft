@@ -87,6 +87,10 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
           title: '执行文档审核',
           inputHash: `${versionId}:${templateId}`,
           resultPreview: (value) => value?.summary || (value?.issues ? `发现 ${value.issues.length} 个问题` : undefined),
+          // 通过 store 的完整操作重试，确保成功后仍会写入 reviews 列表。
+          retry: async () => {
+            await get().executeReview(versionId, templateId, config);
+          },
         },
         async ({ setProgress, throwIfCancelled }) => {
           setProgress(35);

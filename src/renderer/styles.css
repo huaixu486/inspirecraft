@@ -208,10 +208,16 @@
 
 /* Global styles for ProjectHub */
 
+:root {
+  --app-scrollbar-size: 10px;
+  --app-scrollbar-thumb: rgba(100, 116, 139, 0.52);
+  --app-scrollbar-thumb-hover: rgba(24, 144, 255, 0.5);
+}
+
 /* 滚动条：预留空间 + 胶囊样式 + 渐显渐隐动画 */
 *::-webkit-scrollbar {
-  width: 10px !important;
-  height: 10px !important;
+  width: var(--app-scrollbar-size) !important;
+  height: var(--app-scrollbar-size) !important;
   background: transparent !important;
 }
 
@@ -225,17 +231,17 @@
 *::-webkit-scrollbar-thumb {
   -webkit-appearance: none !important;
   appearance: none !important;
-  background: transparent !important;
   background-color: transparent !important;
-  background-clip: content-box !important;
+  background-clip: padding-box !important;
   border: 3px solid transparent !important;
   border-radius: 9999px !important;
   box-shadow: none !important;
   min-height: 36px !important;
+  min-width: 36px !important;
 }
 
 *::-webkit-scrollbar-thumb:window-inactive {
-  background: transparent !important;
+  background-color: transparent !important;
 }
 
 *::-webkit-scrollbar-corner {
@@ -249,26 +255,7 @@
 }
 
 /* 滚动中：胶囊样式渐显 */
-.scrolling::-webkit-scrollbar-thumb {
-  background: transparent !important;
-  background-color: transparent !important;
-}
-
-.scrolling::-webkit-scrollbar-thumb:hover {
-  background: transparent !important;
-  background-color: transparent !important;
-}
-
 /* Firefox 滚动条 */
-* {
-  scrollbar-width: auto !important;
-  scrollbar-color: auto !important;
-}
-
-.scrolling {
-  scrollbar-color: auto !important;
-}
-
 *::-webkit-scrollbar-button {
   display: none !important;
   -webkit-appearance: none !important;
@@ -281,62 +268,42 @@
   border: 0 !important;
 }
 
-*::-webkit-scrollbar-button:single-button,
-*::-webkit-scrollbar-button:start,
-*::-webkit-scrollbar-button:end,
-*::-webkit-scrollbar-button:increment,
-*::-webkit-scrollbar-button:decrement,
-*::-webkit-scrollbar-button:vertical,
-*::-webkit-scrollbar-button:horizontal,
-*::-webkit-scrollbar-button:vertical:start:decrement,
-*::-webkit-scrollbar-button:vertical:end:increment,
-*::-webkit-scrollbar-button:horizontal:start:decrement,
-*::-webkit-scrollbar-button:horizontal:end:increment {
-  display: none !important;
-  -webkit-appearance: none !important;
-  appearance: none !important;
-  width: 0 !important;
-  height: 0 !important;
-  min-width: 0 !important;
-  min-height: 0 !important;
-  background: transparent !important;
-  border: 0 !important;
+.scrolling::-webkit-scrollbar,
+.scrollbar-visible::-webkit-scrollbar,
+.scrollbar-hovered::-webkit-scrollbar {
+  width: var(--app-scrollbar-size) !important;
+  height: var(--app-scrollbar-size) !important;
 }
 
-.scrolling::-webkit-scrollbar {
-  width: 10px !important;
-  height: 10px !important;
-}
-
-.scrolling::-webkit-scrollbar-track {
+.scrolling::-webkit-scrollbar-track,
+.scrollbar-visible::-webkit-scrollbar-track,
+.scrollbar-hovered::-webkit-scrollbar-track {
   background: transparent !important;
   background-color: transparent !important;
   border: 0 !important;
   box-shadow: none !important;
 }
 
-.scrolling::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.52) !important;
-  background-color: rgba(100, 116, 139, 0.52) !important;
-  background-clip: content-box !important;
+.scrolling::-webkit-scrollbar-thumb,
+.scrollbar-visible::-webkit-scrollbar-thumb,
+.scrollbar-hovered::-webkit-scrollbar-thumb {
+  background-color: var(--app-scrollbar-thumb) !important;
+  background-clip: padding-box !important;
   border: 3px solid transparent !important;
   border-radius: 9999px !important;
   box-shadow: none !important;
   min-height: 36px !important;
+  min-width: 36px !important;
 }
 
-.scrolling::-webkit-scrollbar-thumb:hover {
-  background: rgba(24, 144, 255, 0.5) !important;
-  background-color: rgba(24, 144, 255, 0.5) !important;
-  background-clip: content-box !important;
+.scrolling::-webkit-scrollbar-thumb:hover,
+.scrollbar-visible::-webkit-scrollbar-thumb:hover,
+.scrollbar-hovered::-webkit-scrollbar-thumb:hover {
+  background-color: var(--app-scrollbar-thumb-hover) !important;
+  background-clip: padding-box !important;
   border: 3px solid transparent !important;
   border-radius: 9999px !important;
   box-shadow: none !important;
-}
-
-.scrolling {
-  scrollbar-width: auto !important;
-  scrollbar-color: auto !important;
 }
 
 /* 禁止横向滚动 */
@@ -479,7 +446,7 @@ body.template-editor-modal-open {
 }
 
 .overview-detail-rail {
-  box-shadow: -8px 0 24px rgba(15, 23, 42, 0.08);
+  box-shadow: none;
   border-left: 1px solid rgba(203, 213, 225, 0.8);
   backdrop-filter: none;
 }
@@ -518,6 +485,12 @@ body.template-editor-modal-open {
   border-color: rgba(22, 119, 255, 0.22);
 }
 
+.gantt-card {
+  min-height: 391px;
+  max-height: 391px;
+  overflow: hidden;
+}
+
 .gantt-card .ant-card-body {
   padding: 0;
 }
@@ -531,8 +504,36 @@ body.template-editor-modal-open {
 }
 
 .gantt-card .gantt-scroll-area {
+  height: 315px;
+  overflow-y: hidden;
   border-top: 1px solid rgba(226, 232, 240, 0.72);
 }
+
+.gantt-compact-trigger {
+  cursor: pointer;
+}
+
+.gantt-compact-trigger:focus-visible {
+  outline: 2px solid #69b1ff;
+  outline-offset: 3px;
+}
+
+/* 甘特图全屏弹窗 */
+.gantt-timeline-modal .ant-modal-content {
+  overflow: hidden;
+  border-radius: 16px;
+}
+
+.gantt-timeline-modal .ant-modal-body {
+  height: min(700px, calc(100vh - 190px));
+  padding: 0 18px 18px;
+}
+
+.gantt-timeline-modal .gantt-scroll-area {
+  height: min(620px, calc(100vh - 270px)) !important;
+  overflow-y: auto;
+}
+
 
 .gantt-project-cell,
 .gantt-stage-cell {
@@ -576,10 +577,63 @@ body.template-editor-modal-open {
   min-width: 0;
 }
 
-.overview-project-table .ant-table-body {
+.ant-table-wrapper .ant-table-body {
   position: relative;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  scrollbar-color: auto !important;
+  scrollbar-width: auto !important;
+}
+
+.ant-table-wrapper .ant-table-body::-webkit-scrollbar {
+  width: var(--app-scrollbar-size) !important;
+  height: var(--app-scrollbar-size) !important;
+  background: transparent !important;
+}
+
+.ant-table-wrapper .ant-table-body::-webkit-scrollbar-track {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+.ant-table-wrapper .ant-table-body::-webkit-scrollbar-thumb {
+  background-color: transparent !important;
+  background-clip: padding-box !important;
+  border: 3px solid transparent !important;
+  border-radius: 9999px !important;
+  box-shadow: none !important;
+  min-height: 36px !important;
+  min-width: 36px !important;
+}
+
+.ant-table-wrapper .ant-table-body.scrolling::-webkit-scrollbar-thumb,
+.ant-table-wrapper .ant-table-body.scrollbar-visible::-webkit-scrollbar-thumb,
+.ant-table-wrapper .ant-table-body.scrollbar-hovered::-webkit-scrollbar-thumb {
+  background-color: var(--app-scrollbar-thumb) !important;
+}
+
+.ant-table-wrapper .ant-table-body.scrolling::-webkit-scrollbar-thumb:hover,
+.ant-table-wrapper .ant-table-body.scrollbar-visible::-webkit-scrollbar-thumb:hover,
+.ant-table-wrapper .ant-table-body.scrollbar-hovered::-webkit-scrollbar-thumb:hover {
+  background-color: var(--app-scrollbar-thumb-hover) !important;
+}
+
+.ant-table-wrapper .ant-table-sticky-scroll {
+  height: var(--app-scrollbar-size) !important;
+  background: transparent !important;
+}
+
+.ant-table-wrapper .ant-table-sticky-scroll-bar {
+  height: 4px !important;
+  top: 3px !important;
+  border-radius: 9999px !important;
+  background: var(--app-scrollbar-thumb) !important;
+}
+
+.ant-table-wrapper .ant-table-sticky-scroll-bar:hover,
+.ant-table-wrapper .ant-table-sticky-scroll-bar-active {
+  background: var(--app-scrollbar-thumb-hover) !important;
 }
 
 .overview-project-row-highlight {
@@ -588,14 +642,14 @@ body.template-editor-modal-open {
   top: 0;
   z-index: 0;
   width: 100%;
-  min-width: 920px;
+  min-width: 1180px;
   pointer-events: none;
   border-radius: 8px;
   transition:
-    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 120ms ease,
-    background-color 160ms ease,
-    box-shadow 160ms ease;
+    transform 100ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 80ms ease,
+    background-color 100ms ease,
+    box-shadow 100ms ease;
   will-change: transform, opacity;
 }
 
@@ -1980,54 +2034,7 @@ body.template-editor-modal-open {
 
 .detail-panel-tabs .ant-tabs-tabpane {
   padding-right: 10px;
-  scrollbar-width: auto !important;
-  scrollbar-color: auto !important;
   scrollbar-gutter: stable;
-}
-
-.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar {
-  width: 10px !important;
-  height: 10px !important;
-  background: transparent !important;
-}
-
-.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar-track {
-  background: transparent !important;
-  background-color: transparent !important;
-  border: 0 !important;
-  box-shadow: none !important;
-}
-
-.detail-panel-tabs .ant-tabs-tabpane::-webkit-scrollbar-thumb {
-  background: transparent !important;
-  background-color: transparent !important;
-  background-clip: content-box !important;
-  border: 3px solid transparent !important;
-  border-radius: 9999px !important;
-  box-shadow: none !important;
-  min-height: 36px !important;
-}
-
-.detail-panel-tabs .ant-tabs-tabpane.scrolling {
-  scrollbar-color: auto !important;
-}
-
-.detail-panel-tabs .ant-tabs-tabpane.scrolling::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.52) !important;
-  background-color: rgba(100, 116, 139, 0.52) !important;
-  background-clip: content-box !important;
-  border: 3px solid transparent !important;
-  border-radius: 9999px !important;
-  box-shadow: none !important;
-}
-
-.detail-panel-tabs .ant-tabs-tabpane.scrolling::-webkit-scrollbar-thumb:hover {
-  background: rgba(24, 144, 255, 0.5) !important;
-  background-color: rgba(24, 144, 255, 0.5) !important;
-  background-clip: content-box !important;
-  border: 3px solid transparent !important;
-  border-radius: 9999px !important;
-  box-shadow: none !important;
 }
 
 /* List item styles */
@@ -2183,6 +2190,18 @@ body.template-editor-modal-open {
     #eef4f8;
 }
 
+.overview-shell-polished {
+  --overview-detail-width: 420px;
+  --overview-detail-motion-duration: 420ms;
+  --overview-detail-close-duration: 420ms;
+  --overview-detail-rail-open-delay: 48ms;
+  /* ease-out 曲线：起手快（掩盖 reflow 启动延迟）、收尾缓（自然减速），
+     与侧边窗 translate3d 使用同一曲线，保证视觉同步且节奏感更舒适。 */
+  --overview-detail-motion-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --overview-detail-close-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --overview-detail-content-ease: cubic-bezier(0.18, 0.76, 0.2, 1);
+}
+
 .app-topbar {
   border-bottom: 1px solid rgba(203, 213, 225, 0.72);
   background: rgba(255, 255, 255, 0.82);
@@ -2198,6 +2217,8 @@ body.template-editor-modal-open {
 }
 
 .app-settings-fab {
+  width: 42px !important;
+  height: 42px !important;
   border-radius: 12px !important;
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16) !important;
   background: rgba(255, 255, 255, 0.92) !important;
@@ -2216,15 +2237,70 @@ body.template-editor-modal-open {
   box-sizing: border-box;
   border: 0;
   border-radius: 12px;
-  background: rgba(248, 251, 253, 0.82);
+  background: #f8fbfd;
   box-shadow: none;
   overflow: hidden;
+  isolation: isolate;
+}
+
+/* 侧边窗尚未覆盖的区域始终使用实体表面，避免过渡层露出 body 的渐变底色。 */
+.overview-shell-polished::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: #f8fbfd;
+  pointer-events: none;
 }
 
 .overview-main {
   padding: 16px;
   box-sizing: border-box;
-  transition: padding-right 60ms ease-out;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  /* width 是布局属性，每帧会触发 layout；但配合 contain: layout 将重排
+     范围限制在 .overview-main 子树内，且过渡期间已禁用子组件重型动画
+     （dashboard-card / gantt-bar / progress-ring 等），单帧 layout 开销极小。
+     同一时长与侧边窗 translate3d 保持一致，保证视觉同步。 */
+  transition: width var(--overview-detail-motion-duration) var(--overview-detail-motion-ease);
+  contain: layout paint style;
+  z-index: 1;
+  background: #f8fbfd;
+}
+
+.overview-shell-polished.overview-main-pushed .overview-main {
+  width: calc(100% - var(--overview-detail-width));
+}
+
+/* 关闭：用 close-duration */
+.overview-main-closing .overview-main {
+  transition: width var(--overview-detail-close-duration) var(--overview-detail-close-ease);
+}
+
+.overview-main-inner {
+  width: 100%;
+  min-width: 0;
+}
+
+.overview-motion-veil {
+  display: none;
+}
+
+.overview-shell-detail-transitioning .overview-main-inner {
+  pointer-events: none;
+}
+
+.overview-shell-detail-transitioning .dashboard-card,
+.overview-shell-detail-transitioning .stat-card {
+  transition: none !important;
+}
+
+.overview-shell-detail-transitioning .ant-progress-bg,
+.overview-shell-detail-transitioning .gantt-bar,
+.overview-shell-detail-transitioning .stage-progress-canvas-ring-canvas {
+  animation: none !important;
+  transition: none !important;
 }
 
 .overview-header-polished {
@@ -2238,11 +2314,19 @@ body.template-editor-modal-open {
 
 .overview-detail-rail {
   border-left: 1px solid rgba(203, 213, 225, 0.76);
-  border-radius: 12px 0 0 12px;
+  border-radius: 0 12px 12px 0;
   overflow: hidden;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(243, 248, 252, 0.82));
-  box-shadow: -16px 0 34px rgba(15, 23, 42, 0.045);
+    linear-gradient(180deg, #ffffff, #f3f8fc);
+  box-shadow: none;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  isolation: isolate;
+}
+
+.overview-detail-rail > .detail-panel {
+  width: var(--overview-detail-width);
+  min-width: var(--overview-detail-width);
 }
 
 .dashboard-card.ant-card,
@@ -2269,10 +2353,10 @@ body.template-editor-modal-open {
 .detail-panel-polished {
   margin: 0 !important;
   height: 100% !important;
-  border-radius: 12px 0 0 12px !important;
+  border-radius: 0 12px 12px 0 !important;
   border: 0 !important;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(249, 251, 253, 0.96)) !important;
+    linear-gradient(180deg, #ffffff, #f9fbfd) !important;
   box-shadow: none !important;
 }
 
@@ -2320,12 +2404,19 @@ body.template-editor-modal-open {
 
 .project-table-card.ant-card {
   overflow: hidden;
+  box-shadow: none !important;
+  transition:
+    border-color var(--duration-fast) var(--ease-out) !important;
+}
+
+.project-table-card.ant-card:hover {
+  transform: none !important;
+  box-shadow: none !important;
 }
 
 @media (max-width: 1280px) {
-  .overview-detail-rail {
-    flex-basis: 390px !important;
-    width: 390px !important;
+  .overview-shell-polished {
+    --overview-detail-width: 390px;
   }
   .overview-main {
     padding: 14px;
@@ -2365,12 +2456,12 @@ body.template-editor-modal-open {
 }
 
 /* --- Project table row transitions --- */
-.overview-project-table .ant-table-tbody > tr {
+.overview-project-table .ant-table-tbody > tr:not(.ant-table-measure-row) {
   height: 58px;
-  transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1);
+  transition: background-color 100ms cubic-bezier(0.2, 0, 0, 1);
 }
 
-.overview-project-table .ant-table-tbody > tr > td {
+.overview-project-table .ant-table-tbody > tr:not(.ant-table-measure-row) > td {
   height: 58px;
   max-height: 58px;
   padding-top: 0 !important;
@@ -2378,8 +2469,23 @@ body.template-editor-modal-open {
   box-sizing: border-box;
   vertical-align: middle;
   transition:
-    background-color 180ms cubic-bezier(0.2, 0, 0, 1),
-    box-shadow 180ms cubic-bezier(0.2, 0, 0, 1);
+    background-color 100ms cubic-bezier(0.2, 0, 0, 1),
+    box-shadow 100ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Ant Design adds a hidden row to measure column widths.  It must not inherit
+   the fixed project-row height, otherwise it becomes a visible blank strip. */
+.overview-project-table .ant-table-tbody > tr.ant-table-measure-row {
+  height: 0 !important;
+  visibility: collapse;
+}
+
+.overview-project-table .ant-table-tbody > tr.ant-table-measure-row > td {
+  height: 0 !important;
+  max-height: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  line-height: 0 !important;
 }
 
 .overview-next-plan {
@@ -2444,6 +2550,95 @@ body.template-editor-modal-open {
   transform: scale(0.95);
 }
 
+/* --- 左下角浮动工具栏 --- */
+.app-fab-dock {
+  position: fixed;
+  left: 0;
+  bottom: 12px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px 10px 10px;
+  /* 只露出右侧一小条，提示这里有按钮 */
+  transform: translateX(calc(-100% + 14px));
+  transition: transform 260ms cubic-bezier(0.22, 0.61, 0.36, 1),
+              box-shadow 260ms ease;
+  border-radius: 0 14px 14px 0;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.app-fab-dock::after {
+  content: '';
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 24px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.08);
+  transition: opacity 200ms;
+}
+
+.app-fab-dock-expanded,
+.app-fab-dock-active {
+  transform: translateX(0);
+  box-shadow: 2px 0 12px rgba(0, 0, 0, 0.06);
+}
+
+.app-fab-dock-expanded::after,
+.app-fab-dock-active::after {
+  opacity: 0;
+}
+
+/* --- 水膜展开遮罩动画 --- */
+.global-reveal-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1000;
+  background: #f8fbfd;
+  clip-path: circle(0 at var(--reveal-x) var(--reveal-y));
+  opacity: 0;
+}
+
+/* 阶段一：圆圈扩张，同步渐显（420ms） */
+.global-reveal-layer.is-opening {
+  animation: globalRevealOpen 420ms cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+/* 阶段二：圆圈已满屏，遮罩保持不透明 */
+.global-reveal-layer.is-open {
+  opacity: 1;
+  clip-path: circle(150vmax at var(--reveal-x) var(--reveal-y));
+}
+
+/* 阶段三：新页面已在遮罩下方，遮罩渐隐露出（300ms） */
+.global-reveal-layer.is-fading {
+  opacity: 1;
+  clip-path: circle(150vmax at var(--reveal-x) var(--reveal-y));
+  animation: globalRevealFadeOut 300ms cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+@keyframes globalRevealOpen {
+  from {
+    clip-path: circle(0 at var(--reveal-x) var(--reveal-y));
+    opacity: 0;
+  }
+  to {
+    clip-path: circle(150vmax at var(--reveal-x) var(--reveal-y));
+    opacity: 1;
+  }
+}
+
+@keyframes globalRevealFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
 /* --- Topbar logo hover --- */
 .app-topbar-logo {
   position: relative;
@@ -2505,8 +2700,8 @@ body.template-editor-modal-open {
   transition: width 200ms var(--ease-out) !important;
 }
 
-/* --- Badge pulse on new items --- */
-.ant-badge-count {
+/* --- Badge pulse: 仅通知徽章脉冲，撤销等普通 badge 不脉冲 --- */
+.notification-bell-badge .ant-badge-count {
   animation: badgePulse 2s ease-in-out infinite;
 }
 
@@ -2522,25 +2717,127 @@ body.template-editor-modal-open {
   transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
 }
 
-/* --- Detail Panel slide-in: absolute overlay, GPU-only animation --- */
+/* --- Detail Panel push layout (transform-based, zero reflow) --- */
 .overview-detail-rail {
-  transition:
-    transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 200ms ease;
-  will-change: transform, opacity;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: var(--overview-detail-width);
+  max-width: var(--overview-detail-width);
+  transform: translate3d(100%, 0, 0);
+  transition: transform var(--overview-detail-motion-duration) var(--overview-detail-motion-ease);
+  will-change: transform;
   contain: layout paint style;
+  backface-visibility: hidden;
 }
+
+/* 把最重的两个区域限制为独立绘制边界，避免它们的失效区域扩散到整张主页。 */
+.overview-shell-detail-transitioning .gantt-card,
+.overview-shell-detail-transitioning .project-table-card {
+  contain: layout paint;
+}
+
+.overview-detail-rail::before {
+  display: none;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 12px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  background: linear-gradient(90deg, rgba(22, 119, 255, 0.07), rgba(22, 119, 255, 0));
+  transform: translate3d(-6px, 0, 0);
+  transition:
+    opacity 180ms ease,
+    transform 300ms var(--overview-detail-motion-ease);
+  will-change: opacity, transform;
+}
+
+.detail-rail-opening::before,
+.detail-rail-closing::before {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+.detail-rail-mounted {
+  visibility: visible;
+}
+
 .detail-rail-open {
   transform: translate3d(0, 0, 0);
+}
+
+/* Open the main-area resize immediately, then let the rail follow one visual beat later.
+   This makes the page reaction feel more immediate without changing the linear motion itself. */
+.detail-rail-opening {
+  transition-delay: var(--overview-detail-rail-open-delay);
+}
+
+.detail-rail-closing {
+  transition: transform var(--overview-detail-close-duration) var(--overview-detail-close-ease);
+}
+
+/* 详情内容始终跟随 rail 移动。不要在开合时再对整块内容做 opacity/transform
+   动画，否则会与 rail 的合成层动画叠加并导致整块面板持续重绘。 */
+.detail-rail-opening > .detail-panel,
+.detail-rail-closing > .detail-panel,
+.detail-rail-closed > .detail-panel {
   opacity: 1;
+  transform: none;
+  animation: none;
 }
-.detail-rail-closed {
-  transform: translate3d(100%, 0, 0);
-  opacity: 0;
+
+.detail-rail-closing > .detail-panel,
+.detail-rail-closed > .detail-panel {
+  pointer-events: none;
 }
+
+.detail-rail-switching > .detail-panel {
+  animation: none !important;
+  opacity: 1;
+  transform: none;
+}
+
+.detail-panel-ready {
+  animation: none;
+}
+
+@keyframes detailPanelContentIn {
+  0% {
+    opacity: 0.24;
+    transform: translate3d(10px, 0, 0);
+  }
+  45% {
+    opacity: 0.78;
+    transform: translate3d(4px, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes detailPanelContentOut {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+  46% {
+    opacity: 0.62;
+    transform: translate3d(4px, 0, 0);
+  }
+  100% {
+    opacity: 0.18;
+    transform: translate3d(9px, 0, 0);
+  }
+}
+
 /* 切换项目时只做内容淡入，不重播侧边窗滑入 */
 .detail-rail-switching .detail-panel-content {
-  animation: fadeIn var(--duration-normal) var(--ease-out) both;
+  animation: none !important;
 }
 /* AntD Progress type="circle" 平滑过渡（用于审查页等，不影响首页阶段完成度圆环） */
 .ant-progress-circle .ant-progress-circle-path {
@@ -2604,10 +2901,29 @@ body.template-editor-modal-open {
   animation: none;
 }
 
+/* Horizontal panning is compositor-only. React commits the new date range once on pointer-up. */
+.gantt-panning .gantt-time-layer {
+  transform: translate3d(var(--gantt-pan-x, 0px), 0, 0);
+  will-change: transform;
+}
+
+.gantt-time-layer {
+  transform: translate3d(0, 0, 0);
+}
+
 .gantt-bars-entering .gantt-bar {
   opacity: 0;
   animation: barGrow 500ms cubic-bezier(0.22, 0.68, 0.35, 1) both;
   will-change: transform, opacity;
+}
+
+.gantt-motion-locked .gantt-bar,
+.gantt-motion-locked .gantt-now-marker {
+  animation: none !important;
+  transition: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+  will-change: auto !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2715,9 +3031,8 @@ body.template-editor-modal-open {
 
 /* Homepage detail rail corner fix: keep the outer rail and inner panel clipped together. */
 .overview-shell-polished .overview-detail-rail {
-  border-radius: 14px 0 0 14px !important;
+  border-radius: 0 14px 14px 0 !important;
   overflow: hidden !important;
-  clip-path: inset(0 round 14px 0 0 14px);
 }
 
 .overview-shell-polished .overview-detail-rail .detail-panel-polished,
@@ -2726,26 +3041,1053 @@ body.template-editor-modal-open {
   border-radius: inherit !important;
 }
 
-/* Homepage split layout: keep the main pane rounded when the detail rail is open. */
+/* Homepage split layout: the rail's left edge is the divider. */
 .overview-shell-polished.overview-shell-with-detail {
-  column-gap: 10px;
+  column-gap: 0;
 }
 
 .overview-shell-polished.overview-shell-with-detail .overview-main {
-  border-radius: 0 14px 14px 0 !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 0 0 1px rgba(226, 232, 240, 0.72) inset;
+  background: #f8fbfd;
+  box-shadow: none;
 }
 
 .overview-shell-polished.overview-shell-with-detail .overview-detail-rail {
   border-left: 1px solid rgba(203, 213, 225, 0.8);
 }
 
+.overview-shell-polished.overview-shell-detail-transitioning .overview-detail-rail {
+  border-left-color: rgba(203, 213, 225, 0.8);
+  box-shadow: none;
+}
+
 .overview-shell-polished.overview-shell-with-detail .overview-main .dashboard-card:last-child,
 .overview-shell-polished.overview-shell-with-detail .overview-main .project-table-card {
   overflow: hidden;
+}
+
+/* Project file explorer statistics */
+.file-explorer-stats {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 20px;
+  padding: 12px 14px;
+  border: 1px solid #e7edf4;
+  border-radius: 12px;
+  background: linear-gradient(100deg, #fbfdff 0%, #f5f9fd 100%);
+}
+
+.file-explorer-stats-primary,
+.file-explorer-stats-types {
+  display: flex;
+  align-items: center;
+}
+
+.file-explorer-stats-primary {
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.file-explorer-stat-primary,
+.file-explorer-stat-folder,
+.file-explorer-type-stat {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.file-explorer-stat-primary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 116px;
+  padding: 9px 11px;
+  color: #275a9f;
+  border-radius: 9px;
+  background: transparent;
+  text-align: left;
+  transition: background-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.file-explorer-stat-primary:hover,
+.file-explorer-stat-primary.is-active {
+  background: #eaf4ff;
+  box-shadow: inset 0 0 0 1px rgba(47, 128, 237, 0.12);
+}
+
+.file-explorer-stat-primary:active,
+.file-explorer-stat-folder:active,
+.file-explorer-type-stat:active {
+  transform: translateY(1px);
+}
+
+.file-explorer-stat-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: #2f80ed;
+  background: #dceeff;
+  font-size: 16px;
+}
+
+.file-explorer-stat-copy,
+.file-explorer-stat-size {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.file-explorer-stat-copy strong,
+.file-explorer-stat-size strong {
+  color: #1f3c62;
+  font-size: 20px;
+  line-height: 22px;
+  letter-spacing: -0.02em;
+}
+
+.file-explorer-stat-copy span,
+.file-explorer-stat-size span {
+  color: #8796a8;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.file-explorer-stat-size {
+  min-width: 84px;
+  padding: 0 14px;
+  border-right: 1px solid #e6edf5;
+}
+
+.file-explorer-stat-size strong {
+  color: #27a866;
+}
+
+.file-explorer-stat-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: #9b6b09;
+  background: transparent;
+  font-size: 12px;
+  transition: background-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.file-explorer-stat-folder svg {
+  color: #e8a31a;
+  font-size: 15px;
+}
+
+.file-explorer-stat-folder strong {
+  color: #825809;
+  font-size: 15px;
+}
+
+.file-explorer-stat-folder:hover,
+.file-explorer-stat-folder.is-active {
+  background: #fff7e7;
+  box-shadow: inset 0 0 0 1px rgba(232, 163, 26, 0.16);
+}
+
+.file-explorer-stats-types {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 6px;
+  padding-left: 18px;
+  border-left: 1px solid #e6edf5;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.file-explorer-stats-types::-webkit-scrollbar {
+  display: none;
+}
+
+.file-explorer-stats-types-label {
+  flex: 0 0 auto;
+  margin-right: 2px;
+  color: #98a5b5;
+  font-size: 11px;
+}
+
+.file-explorer-type-stat {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  color: #64748b;
+  background: transparent;
+  font-size: 11px;
+  transition: background-color 140ms ease, color 140ms ease, transform 140ms ease;
+}
+
+.file-explorer-type-stat i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--type-accent);
+}
+
+.file-explorer-type-stat strong {
+  color: #334155;
+  font-size: 12px;
+}
+
+.file-explorer-type-stat:hover,
+.file-explorer-type-stat.is-active {
+  color: #1e5fae;
+  background: color-mix(in srgb, var(--type-accent) 10%, white);
+}
+
+.file-explorer-type-stat.is-empty {
+  opacity: 0.48;
+}
+
+.file-explorer-type-stat.is-empty:hover,
+.file-explorer-type-stat.is-empty.is-active {
+  opacity: 1;
+}
+
+.file-explorer-filter-limit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 8px;
+  padding: 6px 8px;
+  border: 1px solid #e6edf5;
+  border-radius: 7px;
+  background: #fbfdff;
+  font-size: 11px;
+}
+
+.file-explorer-filter-limit .ant-btn {
+  height: auto;
+  padding: 0;
+  font-size: 11px;
+}
+
+.file-explorer-recycle-bin-entry {
+  color: #b54708;
+}
+
+.file-explorer-recycle-bin-entry svg {
+  color: #d46b08;
+}
+
+.file-explorer-open-folder-button.ant-btn {
+  border: 1px solid #b7d8fb !important;
+  border-radius: 12px !important;
+  color: #1677ff !important;
+  background: linear-gradient(135deg, #f4fbff 0%, #dceeff 100%) !important;
+  box-shadow: 0 3px 8px rgba(22, 119, 255, 0.14);
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease, background 140ms ease !important;
+}
+
+.file-explorer-open-folder-button.ant-btn:hover {
+  border-color: #69b1ff !important;
+  background: linear-gradient(135deg, #e9f5ff 0%, #c9e4ff 100%) !important;
+  box-shadow: 0 5px 12px rgba(22, 119, 255, 0.2);
+  transform: translateY(-1px);
+}
+
+.file-explorer-open-folder-button.ant-btn:active {
+  box-shadow: 0 1px 4px rgba(22, 119, 255, 0.16);
+  transform: translateY(0);
+}
+
+/* Project calendar */
+.workbench-context-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 26px;
+}
+
+.workbench-context-summary,
+.workbench-context-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.workbench-context-project-name {
+  max-width: 280px;
+  overflow: hidden;
+  color: #172b45;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 26px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-context-back-button {
+  width: 30px;
+  height: 30px;
+  margin-left: -2px;
+  border: 1px solid #dfe8f1 !important;
+  border-radius: 9px !important;
+  color: #3b5269 !important;
+  background: #f8fbfe !important;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+.workbench-context-back-button:hover {
+  border-color: #a9d4fb !important;
+  color: #1677ff !important;
+  background: #edf7ff !important;
+}
+
+.workbench-context-page-label {
+  position: relative;
+  margin-left: 4px;
+  padding-left: 11px;
+  color: #3b5269;
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.workbench-context-page-label::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 1px;
+  height: 15px;
+  background: #d9e3ec;
+  content: '';
+  transform: translateY(-50%);
+}
+
+.workbench-context-status-tag {
+  margin: 0 !important;
+  border-radius: 999px !important;
+  font-size: 11px;
+  line-height: 20px;
+}
+
+.workbench-context-progress-tag {
+  border-color: #dbe7f3 !important;
+  color: #36506c;
+  background: #f8fbfe;
+}
+
+.workbench-context-memory-tag {
+  border-color: #e2e8f0 !important;
+  color: #64748b;
+  background: #f8fafc;
+}
+
+.workbench-context-nav-button {
+  height: 28px;
+  border-radius: 8px;
+  color: #617286;
+  font-size: 12px;
+  transition: color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.workbench-context-nav-button:not(.is-active):hover {
+  color: #1677ff !important;
+  background: #eef7ff !important;
+}
+
+.workbench-context-nav-button.is-active {
+  border-color: #b8dcfb !important;
+  color: #075ea8 !important;
+  background: #e7f4ff !important;
+  box-shadow: 0 2px 6px rgba(22, 119, 255, 0.12);
+}
+
+.workbench-context-nav-extra {
+  margin-left: 4px;
+  color: inherit !important;
+  font-size: 10px;
+}
+
+/* All project workbenches share the compact header used by file details. */
+.workbench-context-dock {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto minmax(160px, 1fr);
+  gap: 14px;
+  align-items: center;
+  margin: 10px 12px 0;
+  padding: 9px 12px;
+  border: 1px solid #e3eaf2;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+  backdrop-filter: blur(10px);
+}
+
+.workbench-context-dock .workbench-context-summary {
+  justify-self: start;
+}
+
+.workbench-context-dock .workbench-context-nav {
+  justify-self: center;
+}
+
+.workbench-context-dock::after {
+  content: '';
+  min-height: 1px;
+}
+
+.workbench-context-embedded.workbench-context-nav-only .workbench-context-summary,
+.workbench-context-embedded.workbench-context-nav-only .workbench-context-summary:empty {
+  display: none;
+}
+
+/* Team workbench: project health, AI co-creation and collaboration stay visually distinct. */
+.team-workbench-page {
+  max-width: 1560px;
+  margin: 0 auto;
+  padding: 2px 14px 24px;
+}
+
+/* 页面头部 */
+.team-page-header {
+  margin-bottom: 16px;
+}
+
+/* 统计卡片行 */
+.team-stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.team-stat-card {
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid #e8eef4;
+  background: linear-gradient(135deg, #fff 0%, #f8fbff 100%);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+.team-stat-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.team-stat-suffix {
+  font-size: 14px;
+  font-weight: 500;
+  margin-left: 2px;
+}
+
+.team-stat-label {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+/* 主体两栏 Grid */
+.team-main-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.team-main-left,
+.team-main-right {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* AI 协同卡片 */
+.team-ai-studio-card {
+  overflow: hidden;
+  border-color: #e2ebf4 !important;
+  border-radius: 12px !important;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+.team-ai-studio-card .ant-card-head {
+  min-height: 44px;
+  border-bottom-color: #e8f0f7;
+  background: linear-gradient(90deg, #f7fbff, #fff);
+}
+
+.team-ai-studio-card .ant-card-head-title {
+  color: #243b53;
+  font-weight: 650;
+}
+
+.team-ai-studio-card .ant-card-body {
+  padding: 14px;
+}
+
+.team-ai-studio-anchor {
+  scroll-margin-top: 14px;
+}
+
+.team-ai-studio-description {
+  display: block;
+  padding: 8px 10px;
+  border-left: 3px solid #91caff;
+  border-radius: 0 8px 8px 0;
+  background: #f6faff;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.team-ai-studio-controls {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr auto;
+  gap: 10px;
+  align-items: end;
+  padding: 10px;
+  border: 1px solid #e4edf6;
+  border-radius: 10px;
+  background: #fbfdff;
+}
+
+.team-ai-studio-label {
+  display: block;
+  margin-bottom: 5px;
+  color: #6e8297;
+  font-size: 12px;
+}
+
+.team-ai-studio-imports {
+  min-width: 140px;
+}
+
+.team-ai-studio-card .ant-input,
+.team-ai-studio-card .ant-select-selector {
+  border-color: #dfeaf4 !important;
+  border-radius: 8px !important;
+}
+
+/* 阶段推进卡片 */
+.team-stage-card {
+  border-radius: 12px !important;
+}
+
+@media (max-width: 1100px) {
+  .team-main-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 920px) {
+  .team-ai-studio-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .team-ai-studio-imports {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 640px) {
+  .team-workbench-page {
+    padding-inline: 8px;
+  }
+
+  .team-stats-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .team-ai-studio-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .team-ai-studio-imports {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 1080px) {
+  .workbench-context-dock {
+    grid-template-columns: minmax(230px, 1fr) auto;
+    gap: 8px;
+  }
+
+  .workbench-context-dock .workbench-context-nav {
+    justify-self: end;
+  }
+
+  .workbench-context-dock::after {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .workbench-context-dock {
+    grid-template-columns: 1fr;
+  }
+
+  .workbench-context-dock .workbench-context-nav {
+    justify-self: start;
+  }
+}
+
+.calendar-page {
+  height: 100%;
+  overflow: auto;
+  padding: 22px;
+  background:
+    radial-gradient(circle at 8% -10%, rgba(56, 189, 248, 0.14), transparent 30%),
+    linear-gradient(135deg, #f5f9fd 0%, #f8fbfd 52%, #f2f7fb 100%);
+}
+
+.calendar-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 auto 18px;
+  max-width: 1500px;
+}
+
+.calendar-page-header .ant-typography {
+  margin: 0;
+}
+
+.calendar-page-header .ant-typography h4,
+.calendar-page-header h4.ant-typography {
+  color: #1b3450;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+
+.calendar-sync-tag {
+  border: 0 !important;
+  font-size: 12px;
+}
+
+.calendar-page-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 350px;
+  gap: 18px;
+  align-items: start;
+  max-width: 1500px;
+  margin: 0 auto;
+}
+
+.calendar-month-card,
+.calendar-agenda-card,
+.calendar-upcoming-card,
+.calendar-day-editor-card,
+.calendar-itinerary-card {
+  overflow: hidden;
+  border: 1px solid rgba(218, 230, 241, 0.92) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 12px 32px rgba(38, 74, 108, 0.07);
+}
+
+.calendar-month-card .ant-card-body {
+  padding: 10px 18px 18px;
+}
+
+.calendar-month-card .ant-picker-calendar-header {
+  padding: 8px 2px 14px;
+}
+
+.calendar-month-card .ant-picker-calendar-header .ant-select-selector {
+  border-radius: 8px !important;
+}
+
+.calendar-month-card .ant-picker-content th {
+  padding: 8px 0 !important;
+  color: #8796a8;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.calendar-month-card .ant-picker-cell {
+  padding: 3px 2px;
+}
+
+.calendar-month-card .ant-picker-cell-inner {
+  min-height: 74px !important;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.calendar-month-card .ant-picker-cell:not(.ant-picker-cell-selected) .ant-picker-cell-inner:hover {
+  border-color: #d3e6fa;
+  background: #f6fbff;
+}
+
+.calendar-month-card .ant-picker-cell-selected .ant-picker-cell-inner {
+  border-color: #9ed2ff;
+  background: linear-gradient(135deg, #e9f5ff, #f3faff) !important;
+  box-shadow: 0 3px 10px rgba(37, 99, 235, 0.1);
+}
+
+.calendar-month-card .ant-picker-cell-today .ant-picker-cell-inner::before {
+  border-color: #1992e5 !important;
+  border-radius: 9px !important;
+}
+
+.calendar-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 2px 2px 10px;
+  color: #75859a;
+  font-size: 11px;
+}
+
+.calendar-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.calendar-legend i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.calendar-legend-rest { background: #94a3b8; }
+.calendar-legend-holiday { background: #f97316; }
+.calendar-legend-workday { background: #16a34a; }
+.calendar-legend-itinerary { background: #8b5cf6; }
+
+.calendar-cell-content {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 4px;
+  min-height: 22px;
+  padding: 0 6px 4px;
+}
+
+.calendar-cell-statuses {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.calendar-day-state,
+.calendar-work-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+}
+
+.calendar-day-state.workday { color: #198754; background: #eaf8ef; }
+.calendar-day-state.rest { color: #64748b; background: #eef2f6; }
+.calendar-day-state.holiday { color: #e76116; background: #fff0e7; }
+.calendar-work-state.leave { color: #7c3aed; background: #f0eaff; }
+.calendar-work-state.business { color: #0969b3; background: #e1f2ff; }
+.calendar-work-state.overtime { color: #a16207; background: #fff4d6; }
+
+.calendar-event-dots {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 8px;
+  padding: 0;
+}
+
+.calendar-event-dots span,
+.calendar-upcoming-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.calendar-event-dots em {
+  color: #7c8a9b;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.calendar-agenda {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.calendar-agenda-card .ant-card-head,
+.calendar-upcoming-card .ant-card-head,
+.calendar-itinerary-card .ant-card-head {
+  min-height: 48px;
+  background: linear-gradient(90deg, rgba(248, 251, 254, 0.95), rgba(255, 255, 255, 0.95));
+}
+
+.calendar-agenda-card .ant-card-head-title,
+.calendar-upcoming-card .ant-card-head-title {
+  color: #253a52;
+  font-size: 14px;
+}
+
+.calendar-agenda-item {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 7px;
+  width: 100%;
+}
+
+.calendar-event-icon {
+  padding-top: 2px;
+}
+
+.calendar-agenda-item .ant-typography-secondary {
+  font-size: 11px;
+}
+
+.calendar-event-note {
+  display: inline-block;
+  margin-top: 2px;
+  color: #8392a5 !important;
+  line-height: 1.4;
+}
+
+.calendar-day-kind-tag {
+  margin-inline-end: 0 !important;
+  border: 0 !important;
+  font-size: 11px;
+}
+
+.calendar-day-kind-tag.workday { color: #198754; background: #eaf8ef; }
+.calendar-day-kind-tag.rest { color: #64748b; background: #eef2f6; }
+.calendar-day-kind-tag.holiday { color: #e76116; background: #fff0e7; }
+
+.calendar-editor-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0 13px;
+  border-bottom: 1px solid #edf2f7;
+}
+
+.calendar-selected-date {
+  color: #243b53;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+
+.calendar-editor-title-row .ant-typography-secondary {
+  font-size: 11px;
+}
+
+.calendar-day-editor-card .ant-card-body,
+.calendar-itinerary-card .ant-card-body {
+  padding: 16px;
+}
+
+.calendar-editor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 13px;
+}
+
+.calendar-editor-label {
+  color: #52677d;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.calendar-editor-section .ant-segmented {
+  padding: 3px;
+  border-radius: 9px;
+  background: #f1f5f9;
+}
+
+.calendar-editor-section .ant-segmented-item {
+  min-height: 29px;
+  border-radius: 7px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 29px;
+}
+
+.calendar-editor-section .ant-segmented-item-selected {
+  color: #1d4ed8;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(30, 64, 100, 0.12);
+}
+
+.calendar-editor-section .ant-input {
+  border-color: #e1eaf2;
+  border-radius: 9px;
+  background: #fbfdff;
+  font-size: 12px;
+}
+
+.calendar-save-note {
+  align-self: flex-end;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+}
+
+.calendar-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.calendar-status-actions.is-wide {
+  justify-content: flex-start;
+}
+
+.calendar-status-button {
+  border-color: transparent !important;
+  font-size: 11px;
+}
+
+.calendar-status-button.leave { color: #7c3aed; background: #f0eaff; }
+.calendar-status-button.business { color: #0969b3; background: #e1f2ff; }
+.calendar-status-button.overtime { color: #a16207; background: #fff4d6; }
+.calendar-status-button.is-active.leave { border-color: #a78bfa !important; box-shadow: 0 0 0 1px #a78bfa; }
+.calendar-status-button.is-active.business { border-color: #65bff5 !important; box-shadow: 0 0 0 1px #65bff5; }
+.calendar-status-button.is-active.overtime { border-color: #f3bf4e !important; box-shadow: 0 0 0 1px #f3bf4e; }
+
+.calendar-itinerary-card .ant-card-head {
+  min-height: 46px;
+}
+
+.calendar-itinerary-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.calendar-itinerary-form .ant-input,
+.calendar-itinerary-form .ant-picker {
+  border-color: #e1eaf2;
+  border-radius: 9px;
+  background: #fbfdff;
+  font-size: 12px;
+}
+
+.calendar-reminder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.calendar-reminder-row .ant-picker {
+  width: 100%;
+}
+
+.calendar-reminder-hint {
+  display: block;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.calendar-upcoming-card .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.calendar-upcoming-item {
+  display: grid;
+  grid-template-columns: 38px 8px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 4px;
+  border: 0;
+  border-radius: 7px;
+  color: #425466;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  transition: background-color 140ms ease;
+}
+
+.calendar-upcoming-item:hover {
+  background: #f1f7fd;
+}
+
+.calendar-upcoming-date {
+  color: #8492a3;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 980px) {
+  .calendar-page-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .calendar-agenda {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .calendar-page {
+    padding: 14px;
+  }
+
+  .calendar-page-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .calendar-status-actions {
+    justify-content: flex-start;
+  }
+
+  .calendar-month-card .ant-picker-cell-inner {
+    min-height: 57px !important;
+  }
+
+  .calendar-cell-content {
+    padding-inline: 3px;
+  }
+
+  .calendar-agenda {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 920px) {
+  .file-explorer-stats {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .file-explorer-stats-types {
+    width: 100%;
+    padding-top: 9px;
+    padding-left: 0;
+    border-top: 1px solid #e6edf5;
+    border-left: 0;
+  }
 }
 
 

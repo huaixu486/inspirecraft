@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import {
   AppSettings,
+  CalendarDayRecord,
+  CalendarItinerary,
   CompositionWeightConfig,
   HolidayDataSource,
   StageConfig,
@@ -11,6 +13,7 @@ import { DEFAULT_STAGES } from '../utils/timelineStages';
 interface SettingsState {
   workspacePath: string;
   workspaceCapacity: number;
+  recycleBinRetentionDays: number;
   workspaceUsedBytes: number;
   userProfile: UserProfile | null;
   customStages: StageConfig[];
@@ -18,14 +21,20 @@ interface SettingsState {
   enableSystemNotifications: boolean;
   holidayDataSource: HolidayDataSource;
   holidayApiUrl: string;
+  calendarDayRecords: CalendarDayRecord[];
+  calendarItineraries: CalendarItinerary[];
   isLoading: boolean;
 
   loadSettings: () => Promise<void>;
   updateWorkspacePath: (path: string) => Promise<void>;
   updateWorkspaceCapacity: (gb: number) => Promise<void>;
+  updateRecycleBinRetentionDays: (days: number) => Promise<void>;
   updateUserProfile: (profile: UserProfile) => Promise<void>;
   updateSystemNotifications: (enabled: boolean) => Promise<void>;
   updateHolidaySettings: (settings: { source?: HolidayDataSource; apiUrl?: string }) => Promise<void>;
+  updateCalendarDayRecords: (records: CalendarDayRecord[]) => Promise<void>;
+  updateCalendarItineraries: (itineraries: CalendarItinerary[]) => Promise<void>;
+  updateCalendarItineraryById: (id: string, updates: Partial<CalendarItinerary>) => Promise<void>;
   updateCompositionWeights: (weights: CompositionWeightConfig | null) => Promise<void>;
   refreshWorkspaceUsed: () => Promise<void>;
   addStage: (stage: StageConfig) => Promise<void>;
@@ -42,12 +51,15 @@ function buildSettingsSnapshot(state: SettingsState, overrides: Partial<AppSetti
   return {
     workspacePath: state.workspacePath,
     workspaceCapacity: state.workspaceCapacity,
+    recycleBinRetentionDays: state.recycleBinRetentionDays,
     userProfile: state.userProfile ?? undefined,
     customStages: state.customStages,
     compositionWeights: state.compositionWeights ?? undefined,
     enableSystemNotifications: state.enableSystemNotifications,
     holidayDataSource: state.holidayDataSource,
     holidayApiUrl: state.holidayApiUrl,
+    calendarDayRecords: state.calendarDayRecords,
+    calendarItineraries: state.calendarItineraries,
     ...overrides,
   };
 }
@@ -55,6 +67,7 @@ function buildSettingsSnapshot(state: SettingsState, overrides: Partial<AppSetti
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   workspacePath: '',
   workspaceCapacity: 10,
+  recycleBinRetentionDays: 30,
   workspaceUsedBytes: 0,
   userProfile: null,
   customStages: [],
@@ -62,6 +75,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   enableSystemNotifications: true,
   holidayDataSource: 'auto',
   holidayApiUrl: 'https://timor.tech/api/holiday/year/{year}',
+  calendarDayRecords: [],
+  calendarItineraries: [],
   isLoading: false,
 
   loadSettings: async () => {
@@ -72,16 +87,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         set({
           workspacePath: settings.workspacePath,
           workspaceCapacity: settings.workspaceCapacity ?? 10,
+          recycleBinRetentionDays: Math.min(365, Math.max(1, settings.recycleBinRetentionDays ?? 30)),
           userProfile: settings.userProfile ?? null,
           customStages: settings.customStages ?? [],
           compositionWeights: settings.compositionWeights ?? null,
           enableSystemNotifications: settings.enableSystemNotifications !== false,
           holidayDataSource: settings.holidayDataSource || 'auto',
           holidayApiUrl: settings.holidayApiUrl || 'https://timor.tech/api/holiday/year/{year}',
+          calendarDayRecords: settings.calendarDayRecords || [],
+          calendarItineraries: settings.calendarItineraries || [],
           isLoading: false,
         });
         // 异步计算工作区大小，不阻塞设置加载
         void get().refreshWorkspaceUsed();
+        void window.electronAPI.cleanupRecycleBin?.({ workspacePath: settings.workspacePath });
       } else {
         set({ isLoading: false });
       }
@@ -111,6 +130,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to save settings:', error);
       set({ workspaceCapacity: prevCap });
+    }
+  },
+
+  updateRecycleBinRetentionDays: async (days: number) => {
+    const previous = get().recycleBinRetentionDays;
+    const next = Math.min(365, Math.max(1, Math.round(days || 30)));
+    set({ recycleBinRetentionDays: next });
+    try {
+      await saveSettings(buildSettingsSnapshot(get(), { recycleBinRetentionDays: next }));
+      await window.electronAPI.cleanupRecycleBin?.({ workspacePath: get().workspacePath });
+    } catch (error) {
+      console.error('Failed to save recycle bin retention:', error);
+      set({ recycleBinRetentionDays: previous });
     }
   },
 
@@ -150,6 +182,40 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to save holiday settings:', error);
       set({ holidayDataSource: prevSource, holidayApiUrl: prevApiUrl });
+    }
+  },
+
+  updateCalendarDayRecords: async (records) => {
+    const previous = get().calendarDayRecords;
+    set({ calendarDayRecords: records });
+    try {
+      await saveSettings(buildSettingsSnapshot(get(), { calendarDayRecords: records }));
+    } catch (error) {
+      console.error('Failed to save calendar day records:', error);
+      set({ calendarDayRecords: previous });
+    }
+  },
+
+  updateCalendarItineraries: async (itineraries) => {
+    const previous = get().calendarItineraries;
+    set({ calendarItineraries: itineraries });
+    try {
+      await saveSettings(buildSettingsSnapshot(get(), { calendarItineraries: itineraries }));
+    } catch (error) {
+      console.error('Failed to save calendar itineraries:', error);
+      set({ calendarItineraries: previous });
+    }
+  },
+
+  updateCalendarItineraryById: async (id, updates) => {
+    const previous = get().calendarItineraries;
+    const next = previous.map(item => item.id === id ? { ...item, ...updates } : item);
+    set({ calendarItineraries: next });
+    try {
+      await saveSettings(buildSettingsSnapshot(get(), { calendarItineraries: next }));
+    } catch (error) {
+      console.error('Failed to update calendar itinerary:', error);
+      set({ calendarItineraries: previous });
     }
   },
 

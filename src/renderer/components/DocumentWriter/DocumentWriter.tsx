@@ -53,6 +53,7 @@ const formatKnowledgeItems = (items: Array<StageMemoryEntry | ReferenceMaterial>
 interface Props {
   onBack?: () => void;
   focus?: import('../../../shared/types').WorkbenchFocus;
+  hideHeader?: boolean;
 }
 
 type RewriteVariant = {
@@ -96,7 +97,7 @@ const FormatBadge: React.FC<{ label: string; value?: string }> = ({ label, value
   );
 };
 
-const DocumentWriter: React.FC<Props> = ({ onBack, focus }) => {
+const DocumentWriter: React.FC<Props> = ({ onBack, focus, hideHeader = false }) => {
   const { currentProject, versions } = useProjectStore();
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc } = useProjectDocStore();
@@ -388,17 +389,17 @@ const DocumentWriter: React.FC<Props> = ({ onBack, focus }) => {
   return (
     <div>
       {/* 顶部操作栏 */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, alignItems: 'flex-start' }}>
+      {!hideHeader && <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, alignItems: 'flex-start' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
             <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
-            <Title level={4} style={{ margin: 0 }}>AI协同</Title>
+            <Title level={4} style={{ margin: 0 }}>智能写作</Title>
           </div>
           <Text type="secondary" style={{ fontSize: 13, lineHeight: 1.5 }}>
             选择模板，导入文稿参考，按章节编写内容并导出格式化文档
           </Text>
         </div>
-      </div>
+      </div>}
 
       {/* 选择模板和文稿 */}
       <Card size="small" style={{ marginBottom: 16 }}>

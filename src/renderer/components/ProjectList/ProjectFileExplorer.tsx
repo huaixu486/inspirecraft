@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
-  Typography, Button, Space, Tag, Empty, Spin, Select, message, Modal, Input, Popconfirm, Badge, DatePicker, Dropdown,
+  Typography, Button, Space, Tag, Empty, Spin, Select, message, Modal, Input, Popconfirm, Badge, DatePicker, Dropdown, Popover,
 } from 'antd';
 import dayjs from 'dayjs';
 import {
@@ -18,6 +18,7 @@ import { getAllStages } from '../../utils/timelineStages';
 import WorkbenchContextBar from '../Workbench/WorkbenchContextBar';
 
 const { Text } = Typography;
+const UNDO_HISTORY_TTL_MS = 5 * 60 * 1000;
 
 interface FileItem {
   name: string;
@@ -103,6 +104,7 @@ const getFileNameFromPath = (filePath: string): string =>
 
 const RENAME_TRIGGER_DELAY_MS = 650;
 const FILE_LIST_ROW_HEIGHT = 44;
+const FILTER_RENDER_PAGE_SIZE = 200;
 
 const getParentPath = (filePath: string): string => {
   const normalized = filePath.replace(/[\\/]+$/, '');
@@ -130,7 +132,7 @@ const replacePathPrefix = (candidatePath: string, oldPrefix: string, newPrefix: 
 const isRenameTriggerClick = (event: React.MouseEvent) =>
   Boolean((event.target as HTMLElement).closest('[data-file-rename-trigger="true"]'));
 
-const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
+const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
   const [items, setItems] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [currentPath, setCurrentPath] = useState(project.folderPath);
@@ -145,7 +147,9 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [filterType, setFilterType] = useState<string | null>(null);
+  const [filterRenderLimit, setFilterRenderLimit] = useState(FILTER_RENDER_PAGE_SIZE);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
   const [renamingPath, setRenamingPath] = useState('');
   const [renameValue, setRenameValue] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
@@ -185,13 +189,31 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const importZipPathRef = useRef<string>('');
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
-  const { customStages } = useSettingsStore();
+  const { customStages, workspacePath } = useSettingsStore();
   const allStages = getAllStages(customStages);
   const highlightTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const undoStackRef = useRef<UndoEntry[]>([]);
+  const undoExpiryTimerRef = useRef<number | null>(null);
+
+  const clearUndoHistory = useCallback(() => {
+    if (undoExpiryTimerRef.current !== null) {
+      window.clearTimeout(undoExpiryTimerRef.current);
+      undoExpiryTimerRef.current = null;
+    }
+    setUndoStack([]);
+  }, []);
 
   // 保持 ref 同步
   useEffect(() => { undoStackRef.current = undoStack; }, [undoStack]);
+
+  // 撤回仅服务于当前目录的近期误操作：切换目录或离开文件详情后立即释放。
+  useEffect(() => {
+    clearUndoHistory();
+  }, [currentPath, clearUndoHistory]);
+
+  useEffect(() => () => {
+    if (undoExpiryTimerRef.current !== null) window.clearTimeout(undoExpiryTimerRef.current);
+  }, []);
 
   const invalidateProjectSearchIndex = () => {
     // Reserved for future disk-backed indexes. Current search stays in memory to keep typing responsive.
@@ -329,6 +351,23 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   };
 
   const isInRoot = currentPath === project.folderPath;
+  const currentFolderName = currentPath.split(/[/\\]/).filter(Boolean).pop() || project.name;
+
+  const handleCopyCurrentFolderPath = async () => {
+    try {
+      await navigator.clipboard.writeText(currentPath);
+      message.success('已复制当前文件夹路径');
+    } catch {
+      message.error('复制路径失败');
+    }
+  };
+
+  const handleOpenCurrentFolderInExplorer = async () => {
+    const result = await window.electronAPI.openInExplorer(currentPath);
+    if (!result.success) {
+      message.error(result.error || '无法打开文件夹');
+    }
+  };
 
   // 子树统计（来自 treeStats，currentPath 变化时加载）
   const KNOWN_EXTS = ['.docx', '.doc', '.pdf', '.xlsx', '.xls', '.pptx', '.ppt', '.txt'];
@@ -338,10 +377,32 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   const sq = searchQuery.trim();
   const isFiltering = !!filterType || !!sq;
 
+  useEffect(() => {
+    setFilterRenderLimit(FILTER_RENDER_PAGE_SIZE);
+  }, [filterType, searchQuery, currentPath]);
+
   const treeTypeCount = treeStats?.typeCount || {};
   const treeFileCount = treeStats?.fileCount ?? 0;
   const treeFolderCount = treeStats?.folderCount ?? 0;
   const treeTotalSize = treeStats?.totalSize ?? 0;
+  // 保留所有分类入口（包括当前数量为 0 的类型），避免统计栏把可用筛选隐藏掉。
+  const typeStats = Object.entries(treeTypeCount)
+    .sort(([leftExt, leftCount], [rightExt, rightCount]) => {
+      const leftIsEmpty = Number(leftCount) === 0;
+      const rightIsEmpty = Number(rightCount) === 0;
+      if (leftIsEmpty !== rightIsEmpty) return leftIsEmpty ? 1 : -1;
+      const countDelta = Number(rightCount) - Number(leftCount);
+      return countDelta || leftExt.localeCompare(rightExt);
+    });
+
+  const typeAccent = (ext: string) => {
+    if (ext === '.doc' || ext === '.docx') return '#2f80ed';
+    if (ext === '.pdf') return '#ef5350';
+    if (ext === '.xls' || ext === '.xlsx') return '#2fb344';
+    if (ext === '.ppt' || ext === '.pptx') return '#f59e0b';
+    if (ext === '其他') return '#7b8794';
+    return '#6c7a89';
+  };
 
   const matchesTreeFilter = (file: TreeFileItem) => {
     if (!filterType || filterType === '__dir__') return true;
@@ -366,6 +427,12 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       }))
     )
     : items;
+  const renderedDisplayItems = isFiltering
+    ? displayItems.slice(0, filterRenderLimit)
+    : displayItems;
+  const hiddenFilteredItemCount = isFiltering
+    ? Math.max(0, displayItems.length - renderedDisplayItems.length)
+    : 0;
 
   // 选择模板时自动填充
   const handleTemplateChange = (templateId: string) => {
@@ -455,7 +522,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       pushUndo({
         label: `创建 ${createdName}`,
         undo: async () => {
-          await window.electronAPI.deleteFile(createdPath);
+          await window.electronAPI.deleteFile(createdPath, { permanent: true });
           loadContents();
         },
       });
@@ -499,7 +566,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       pushUndo({
         label: `创建文件夹 ${folderName}`,
         undo: async () => {
-          await window.electronAPI.deleteFolder(createdPath);
+          await window.electronAPI.deleteFolder(createdPath, { permanent: true });
           await loadContents();
         },
       });
@@ -536,9 +603,28 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     highlightTimers.current.set(filePath, timer);
   };
 
+  // 从全局行动中心或命令面板进入文件页时，定位到关联文档所在目录。
+  // 只接受当前项目根目录内的路径，避免外部引用改变文件浏览器位置。
+  useEffect(() => {
+    if (focus?.target !== 'files') return;
+    const focusedDoc = focus.docId ? projectDocs.find(doc => doc.id === focus.docId) : undefined;
+    const filePath = focus.filePath || focusedDoc?.sourceFilePath;
+    if (!filePath || !isPathEqualOrInside(filePath, project.folderPath)) return;
+
+    const targetDirectory = getParentPath(filePath);
+    if (targetDirectory && targetDirectory !== currentPath) {
+      setCurrentPath(targetDirectory);
+    }
+    // 等待目录切换后的内容加载开始，再保留一段高亮状态。
+    const timer = window.setTimeout(() => highlightFile(filePath), 0);
+    return () => window.clearTimeout(timer);
+  }, [focus?.target, focus?.filePath, focus?.docId, project.folderPath, projectDocs, currentPath]);
+
   // 压入撤销栈
   const pushUndo = (entry: UndoEntry) => {
     setUndoStack(prev => [entry, ...prev].slice(0, 20)); // 最多保留20步
+    if (undoExpiryTimerRef.current !== null) window.clearTimeout(undoExpiryTimerRef.current);
+    undoExpiryTimerRef.current = window.setTimeout(clearUndoHistory, UNDO_HISTORY_TTL_MS);
   };
 
   // 执行撤销
@@ -723,8 +809,8 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
               label: `创建 ${copies.length} 个副本`,
               undo: async () => {
                 for (const copy of copies) {
-                  if (copy.isDirectory) await window.electronAPI.deleteFolder(copy.path);
-                  else await window.electronAPI.deleteFile(copy.path);
+                  if (copy.isDirectory) await window.electronAPI.deleteFolder(copy.path, { permanent: true });
+                  else await window.electronAPI.deleteFile(copy.path, { permanent: true });
                 }
                 await loadContents();
               },
@@ -767,10 +853,11 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
   };
 
   // 拖出文件：Electron 官方链路要求从 HTML dragstart 事件内触发 webContents.startDrag
+  // 拖出文件/文件夹：Electron 原生拖拽
   const handleFileDragStart = (item: FileItem, event: React.DragEvent<HTMLDivElement>) => {
     event.stopPropagation();
     const target = event.target as HTMLElement;
-    if (item.isDirectory || renamingPath === item.path || target.closest('[data-no-file-drag="true"]')) {
+    if (renamingPath === item.path || target.closest('[data-no-file-drag="true"]')) {
       event.preventDefault();
       return;
     }
@@ -780,12 +867,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     setIsDraggingFileOut(true);
     setIsDragOver(false);
 
-    const fileUrl = `file:///${item.path.replace(/\\/g, '/')}`;
-    event.dataTransfer.effectAllowed = 'copy';
-    event.dataTransfer.setData('text/plain', item.path);
-    event.dataTransfer.setData('text/uri-list', fileUrl);
-    event.dataTransfer.setData('DownloadURL', `application/octet-stream:${item.name}:${fileUrl}`);
-    event.preventDefault();
+    // 不设置 event.dataTransfer，全部交给 Electron startDrag 处理，避免冲突
     const result = window.electronAPI.startDrag(item.path);
     if (!result?.success) {
       setIsDraggingFileOut(false);
@@ -911,21 +993,16 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       ? await window.electronAPI.deleteFolder(item.path)
       : await window.electronAPI.deleteFile(item.path);
     if (result.success) {
-      if (!item.isDirectory) {
-        const ext = item.name.split('.').pop() || '';
-        const nameWithoutExt = item.name.replace(/\.[^.]+$/, '');
+      if (result.recycleEntry?.id) {
         pushUndo({
-          label: `删除 ${item.name}`,
+          label: `恢复 ${item.name}`,
           undo: async () => {
-            await window.electronAPI.createBlankFile({
-              folderPath: currentPath,
-              fileName: nameWithoutExt,
-              fileType: ext,
-            });
+            await window.electronAPI.restoreRecycleBinItem({ workspacePath, id: result.recycleEntry!.id });
             highlightFile(item.path);
-            await loadContents();
+            await Promise.all([loadContents(), loadTreeStats()]);
           },
         });
+        message.success(`已将 ${item.name} 移入回收站`);
       }
     } else {
       message.error(`删除 ${item.name} 失败`);
@@ -940,7 +1017,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
     for (const item of toDelete) {
       await handleDeleteFile(item);
     }
-    message.success(`已删除 ${toDelete.length} 个项目`);
+    message.success(`已将 ${toDelete.length} 个项目移入回收站`);
     setSelectedPaths(new Set());
     loadContents();
     loadTreeStats();
@@ -992,8 +1069,8 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
               label: `复制 ${copies.length} 个项目`,
               undo: async () => {
                 for (const copy of copies) {
-                  if (copy.isDirectory) await window.electronAPI.deleteFolder(copy.path);
-                  else await window.electronAPI.deleteFile(copy.path);
+                if (copy.isDirectory) await window.electronAPI.deleteFolder(copy.path, { permanent: true });
+                else await window.electronAPI.deleteFile(copy.path, { permanent: true });
                 }
                 await loadContents();
               },
@@ -1188,14 +1265,20 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
       onDrop={handleDropFiles}
       onClick={(e) => { if (e.target === e.currentTarget) setSelectedPaths(new Set()); }}
     >
-      {/* Header */}
+      {/* Header — sticky 吸顶，滚动时保持可见 */}
       <div style={{
+        position: 'sticky', top: 0, zIndex: 10,
         marginBottom: 18, padding: '12px 14px', background: 'rgba(255,255,255,0.96)',
         backdropFilter: 'blur(10px)', border: '1px solid #e5e7eb', borderRadius: 12,
         boxShadow: '0 8px 24px rgba(15, 23, 42, 0.06)',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 240, flex: '1 1 320px' }}>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(300px, 1fr) minmax(430px, auto) minmax(360px, 1fr)',
+          alignItems: 'center',
+          gap: 16,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
             <Button
               type="text"
               icon={<ArrowLeftOutlined />}
@@ -1203,10 +1286,33 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
               title={isInRoot ? '返回项目列表' : '返回上级'}
               style={{ width: 36, height: 36, borderRadius: 10, color: '#374151', background: '#f8fafc', border: '1px solid #e5e7eb', flexShrink: 0 }}
             />
-            <div style={{ width: 40, height: 40, borderRadius: 12, background: 'linear-gradient(135deg, #e0f2fe 0%, #dbeafe 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-              <FolderOpenOutlined style={{ color: '#1677ff', fontSize: 20 }} />
-            </div>
+            <Button
+              type="text"
+              icon={<FolderOpenOutlined />}
+              onClick={() => void handleOpenCurrentFolderInExplorer()}
+              title="在文件资源管理器中打开当前文件夹"
+              aria-label="在文件资源管理器中打开当前文件夹"
+              className="file-explorer-open-folder-button"
+              style={{ width: 40, height: 40, flexShrink: 0 }}
+            />
             <div style={{ minWidth: 0 }}>
+              <Text
+                strong
+                title="点击复制当前文件夹完整路径"
+                onClick={() => void handleCopyCurrentFolderPath()}
+                style={{ display: 'block', fontSize: 17, color: '#111827', maxWidth: 320, lineHeight: 1.25, cursor: 'copy' }}
+                ellipsis={{ tooltip: currentPath }}
+              >
+                {currentFolderName}
+              </Text>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                <Tag color={isInRoot ? 'blue' : 'default'} style={{ margin: 0, borderRadius: 999, fontSize: 11 }}>
+                  {isInRoot ? '根目录' : '子目录'}
+                </Tag>
+                <WorkbenchContextBar globalPage="project-files" embedded hideProjectTitle mode="status" />
+              </div>
+            </div>
+            <div style={{ display: 'none' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                 <Text strong style={{ fontSize: 17, color: '#111827', maxWidth: 320 }} ellipsis={{ tooltip: project.name }}>
                   {project.name}
@@ -1221,15 +1327,48 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
             </div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap', flex: '0 1 620px', minWidth: 300 }}>
+          <div style={{ display: 'flex', justifyContent: 'center', minWidth: 0 }}>
+            <WorkbenchContextBar globalPage="project-files" embedded hideProjectTitle mode="nav" />
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexWrap: 'nowrap', minWidth: 0 }}>
+            <Popover
+              trigger="click"
+              placement="bottomRight"
+              open={searchOpen}
+              onOpenChange={setSearchOpen}
+              content={(
+                <Input
+                  autoFocus
+                  allowClear
+                  size="middle"
+                  prefix={<SearchOutlined style={{ color: '#9ca3af' }} />}
+                  placeholder="搜索文件名 / 后缀"
+                  value={searchQuery}
+                  onChange={event => setSearchQuery(event.target.value)}
+                  onPressEnter={() => setSearchOpen(false)}
+                  style={{ width: 260, borderRadius: 8 }}
+                />
+              )}
+            >
+              <Button
+                type={searchQuery ? 'primary' : 'default'}
+                icon={<SearchOutlined />}
+                size="middle"
+                style={{ borderRadius: 8 }}
+              >
+                搜索
+              </Button>
+            </Popover>
             <Input
+              hidden
               allowClear
               size="middle"
               prefix={<SearchOutlined style={{ color: '#9ca3af' }} />}
               placeholder="搜索文件名 / 后缀"
               value={searchQuery}
               onChange={event => setSearchQuery(event.target.value)}
-              style={{ width: 240, borderRadius: 8 }}
+              style={{ display: 'none' }}
             />
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: 4, background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: 10 }}>
               <Badge count={undoStack.length} size="small" offset={[-4, 0]}>
@@ -1238,7 +1377,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
                   onClick={handleUndo}
                   size="middle"
                   disabled={undoStack.length === 0}
-                  title={undoStack.length > 0 ? `撤销：${undoStack[0].label} (Ctrl+Z)` : '无可撤销操作'}
+                  title={undoStack.length > 0 ? `撤销：${undoStack[0].label} (Ctrl+Z，记录最多保留 5 分钟)` : '无可撤销操作'}
                   style={{ borderRadius: 8 }}
                 />
               </Badge>
@@ -1262,9 +1401,6 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
             </Dropdown>
           </div>
         </div>
-        <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #eef2f7' }}>
-          <WorkbenchContextBar globalPage="project-files" embedded hideProjectTitle />
-        </div>
       </div>
       {/* 多选状态栏 */}
       {selectedPaths.size > 1 && (
@@ -1279,53 +1415,56 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
         </div>
       )}
 
-      {/* 概览卡片（统计当前目录及所有子目录） */}
+      {/* 概览：重点数据优先呈现，只有实际存在的文件类型才显示。 */}
       {treeStats && (
-        <div style={{
-          display: 'flex', gap: 12, marginBottom: 20,
-          padding: '14px 16px', background: '#f6f8fa', borderRadius: 10,
-        }}>
-          <div
-            style={{ flex: 1, textAlign: 'center', cursor: 'pointer', padding: '4px 0', borderRadius: 6, background: filterType === null ? '#e6f7ff' : 'transparent', transition: 'background 0.2s' }}
-            onClick={() => setFilterType(null)}
-            onMouseEnter={e => { if (filterType !== null) e.currentTarget.style.background = '#f0f0f0'; }}
-            onMouseLeave={e => { if (filterType !== null) e.currentTarget.style.background = 'transparent'; }}
-          >
-            <div style={{ fontSize: 22, fontWeight: 'bold', color: filterType === null ? '#1890ff' : '#666' }}>{treeFileCount}</div>
-            <Text type={filterType === null ? undefined : 'secondary'} style={{ fontSize: 11 }}>文件</Text>
-          </div>
-          <div style={{ flex: 1, textAlign: 'center' }}>
-            <div style={{ fontSize: 22, fontWeight: 'bold', color: '#52c41a' }}>{formatSize(treeTotalSize)}</div>
-            <Text type="secondary" style={{ fontSize: 11 }}>总大小</Text>
-          </div>
-          <div
-            style={{ flex: 1, textAlign: 'center', cursor: 'pointer', padding: '4px 0', borderRadius: 6, background: filterType === '__dir__' ? '#e6f7ff' : 'transparent', transition: 'background 0.2s' }}
-            onClick={() => setFilterType(filterType === '__dir__' ? null : '__dir__')}
-            onMouseEnter={e => { if (filterType !== '__dir__') e.currentTarget.style.background = '#f0f0f0'; }}
-            onMouseLeave={e => { if (filterType !== '__dir__') e.currentTarget.style.background = 'transparent'; }}
-          >
-            <div style={{ fontSize: 22, fontWeight: 'bold', color: filterType === '__dir__' ? '#1890ff' : '#faad14' }}>{treeFolderCount}</div>
-            <Text type={filterType === '__dir__' ? undefined : 'secondary'} style={{ fontSize: 11 }}>文件夹</Text>
-          </div>
-          {Object.entries(treeTypeCount).map(([ext, count]) => (
-            <div
-              key={ext}
-              style={{
-                flex: 1, textAlign: 'center', cursor: 'pointer',
-                padding: '4px 0', borderRadius: 6,
-                background: filterType === ext ? '#e6f7ff' : 'transparent',
-                transition: 'background 0.2s',
-              }}
-              onClick={() => setFilterType(filterType === ext ? null : ext)}
-              onMouseEnter={e => { if (filterType !== ext) e.currentTarget.style.background = '#f0f0f0'; }}
-              onMouseLeave={e => { if (filterType !== ext) e.currentTarget.style.background = 'transparent'; }}
+        <section className="file-explorer-stats" aria-label="文件统计">
+          <div className="file-explorer-stats-primary">
+            <button
+              type="button"
+              className={`file-explorer-stat-primary${filterType === null ? ' is-active' : ''}`}
+              onClick={() => setFilterType(null)}
             >
-              <div style={{ fontSize: 22, fontWeight: 'bold', color: filterType === ext ? '#1890ff' : '#666' }}>{count as number}</div>
-              <Text type={filterType === ext ? undefined : 'secondary'} style={{ fontSize: 11 }}>{ext.replace('.', '').toUpperCase() || '其他'}</Text>
+              <FileOutlined className="file-explorer-stat-icon" />
+              <span className="file-explorer-stat-copy">
+                <strong>{treeFileCount.toLocaleString()}</strong>
+                <span>文件</span>
+              </span>
+            </button>
+            <div className="file-explorer-stat-size">
+              <span>数据占用</span>
+              <strong>{formatSize(treeTotalSize)}</strong>
             </div>
-          ))}
-        </div>
+            <button
+              type="button"
+              className={`file-explorer-stat-folder${filterType === '__dir__' ? ' is-active' : ''}`}
+              onClick={() => setFilterType(filterType === '__dir__' ? null : '__dir__')}
+            >
+              <FolderOutlined />
+              <span><strong>{treeFolderCount.toLocaleString()}</strong> 文件夹</span>
+            </button>
+          </div>
+
+          {typeStats.length > 0 && (
+            <div className="file-explorer-stats-types" aria-label="文件类型筛选">
+              <span className="file-explorer-stats-types-label">按类型</span>
+              {typeStats.map(([ext, count]) => (
+                <button
+                  key={ext}
+                  type="button"
+                  className={`file-explorer-type-stat${filterType === ext ? ' is-active' : ''}${Number(count) === 0 ? ' is-empty' : ''}`}
+                  style={{ '--type-accent': typeAccent(ext) } as React.CSSProperties}
+                  onClick={() => setFilterType(filterType === ext ? null : ext)}
+                >
+                  <i aria-hidden="true" />
+                  <span>{ext.replace('.', '').toUpperCase() || '其他'}</span>
+                  <strong>{Number(count).toLocaleString()}</strong>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
       )}
+
 
       {/* 文件列表 */}
       {loading || treeLoading ? (
@@ -1371,7 +1510,19 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
               <Button type="link" size="small" style={{ fontSize: 11, padding: 0 }} onClick={() => { setFilterType(null); setSearchQuery(''); }}>清除</Button>
             </div>
           )}
-          {displayItems.map(item => {
+          {hiddenFilteredItemCount > 0 && (
+            <div className="file-explorer-filter-limit">
+              <Text type="secondary">已显示 {renderedDisplayItems.length} / {displayItems.length} 项</Text>
+              <Button
+                size="small"
+                type="link"
+                onClick={() => setFilterRenderLimit(limit => limit + FILTER_RENDER_PAGE_SIZE)}
+              >
+                加载更多（剩余 {hiddenFilteredItemCount}）
+              </Button>
+            </div>
+          )}
+          {renderedDisplayItems.map(item => {
             const isHighlighted = highlightedPaths.has(item.path);
             const isSelected = selectedPaths.has(item.path);
             const isDirDragOver = item.isDirectory && (internalDragOverPath === item.path || dragOverDirPath === item.path);
@@ -1455,15 +1606,15 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
                 onMouseLeave={e => { if (!isSelected && !isDirDragOver) e.currentTarget.style.background = 'transparent'; }}
               >
                 <div
-                  data-native-file-drag={!item.isDirectory ? 'true' : undefined}
-                  draggable={!item.isDirectory && renamingPath !== item.path}
-                  onDragStart={!item.isDirectory ? (e) => handleFileDragStart(item, e) : undefined}
-                  onDragEnd={!item.isDirectory ? () => {
+                  data-native-file-drag="true"
+                  draggable={renamingPath !== item.path}
+                  onDragStart={(e) => handleFileDragStart(item, e)}
+                  onDragEnd={() => {
                     setIsDraggingFileOut(false);
                     setTimeout(() => { suppressClickRef.current = false; }, 0);
-                  } : undefined}
-                  style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 0, height: '100%', userSelect: 'none' }}
-                  title={!item.isDirectory ? '拖动名称可发送文件；拖动行空白处可移动，按住 Ctrl 可复制' : '拖动行可移动文件夹，按住 Ctrl 可复制；双击进入文件夹'}
+                  }}
+                  style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 0, height: '100%', userSelect: 'none', cursor: 'grab' }}
+                  title={item.isDirectory ? '拖动可发送文件夹；拖动行空白处可移动，按住 Ctrl 可复制' : '拖动名称可发送文件；拖动行空白处可移动，按住 Ctrl 可复制'}
                 >
                   {fileIcon(item.ext, item.isDirectory)}
                   <div data-file-rename-trigger="true" style={{ flex: 1, marginLeft: 10, minWidth: 0, display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
@@ -1509,12 +1660,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack }) => {
                 <Text type="secondary" style={{ width: 140, flexShrink: 0, fontSize: 11, lineHeight: '20px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                   {formatDate(item.modifiedAt)}
                 </Text>
-                <div data-no-file-drag="true" style={{ width: 70, flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2 }}>
-                  <Button
-                    type="text" size="small" icon={<FolderOpenOutlined />}
-                    onClick={(e) => { e.stopPropagation(); window.electronAPI.openInExplorer(item.path); }}
-                    title="打开文件所在位置"
-                  />
+                <div data-no-file-drag="true" style={{ width: 34, flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
                   <Popconfirm
                     title={`确定删除 ${item.name}？`}
                     onConfirm={(e) => { e?.stopPropagation(); handleDeleteFile(item); }}

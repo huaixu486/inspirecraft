@@ -2,31 +2,39 @@ import { Project, ProjectDocument, StageConfig } from '../../shared/types';
 import { detectTimelineStage } from './timelineStages';
 import { composePrompt } from './promptComposer';
 import { isAIJobCancelledError, useAIJobStore } from '../stores/aiJobStore';
+import { useProjectStore } from '../stores/projectStore';
+import { useProjectDocStore } from '../stores/projectDocStore';
 
-export const AUTO_PROJECT_DESCRIPTION_INTERVAL_DAYS = 5;
+export const AUTO_PROJECT_DESCRIPTION_INTERVAL_DAYS = 3;
+const RETRY_INTERVAL_HOURS = 24;
 const MAX_PENDING_FILE_NAMES = 10;
-const MAX_DOC_NAMES_FOR_PROMPT = 14;
+const MAX_DOC_NAMES_FOR_PROMPT = 5;
 
 export type UpdateProjectFn = (id: string, updates: Partial<Project>) => Promise<void>;
 
+/** 用户手动写过描述 → 永不覆盖 */
 export const isManualProjectDescription = (project?: Project | null) =>
   Boolean(project?.description?.trim()) && project?.descriptionSource !== 'auto';
 
-export const isAutoDescriptionProject = (project?: Project | null) =>
-  Boolean(project) && !isManualProjectDescription(project);
-
 const addDays = (date: Date, days: number) => new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+const addHours = (date: Date, hours: number) => new Date(date.getTime() + hours * 60 * 60 * 1000);
 
 const cleanFileName = (value = '') => value.split(/[\\/]/).pop()?.trim() || value.trim();
 
+/**
+ * 记录文件活动，重置三天静默计时。
+ * 跳过条件：手动描述、已成功生成。
+ */
 export const markAutoDescriptionFileActivity = async (
   project: Project,
   updateProject: UpdateProjectFn,
-  fileNames: string[] = [],
+  options: { activityAt?: string; fileNames?: string[] } = {},
 ) => {
-  if (!isAutoDescriptionProject(project)) return;
-  const now = new Date();
-  const cleanedNames = fileNames.map(cleanFileName).filter(Boolean);
+  if (isManualProjectDescription(project)) return;
+  if (project.autoDescriptionGeneratedAt) return;
+
+  const activityAt = options.activityAt || new Date().toISOString();
+  const cleanedNames = (options.fileNames || []).map(cleanFileName).filter(Boolean);
   const pendingNames = [
     ...(project.autoDescriptionPendingFileNames || []),
     ...cleanedNames,
@@ -34,15 +42,38 @@ export const markAutoDescriptionFileActivity = async (
 
   await updateProject(project.id, {
     descriptionSource: 'auto',
-    autoDescriptionPendingSince: project.autoDescriptionPendingSince || now.toISOString(),
-    autoDescriptionNextUpdateAt: project.autoDescriptionNextUpdateAt || addDays(now, AUTO_PROJECT_DESCRIPTION_INTERVAL_DAYS).toISOString(),
+    autoDescriptionLastFileActivityAt: activityAt,
+    autoDescriptionPendingSince: activityAt,
+    autoDescriptionNextUpdateAt: addDays(new Date(activityAt), AUTO_PROJECT_DESCRIPTION_INTERVAL_DAYS).toISOString(),
     autoDescriptionPendingFileNames: pendingNames,
   });
 };
 
-export const shouldGenerateAutoProjectDescription = (project?: Project | null) => {
-  if (!project || !isAutoDescriptionProject(project)) return false;
+/**
+ * 判断是否应该生成：
+ * 1. 不是手动描述
+ * 2. 未成功生成过（autoDescriptionGeneratedAt 为空）
+ * 3. 当前没有描述内容
+ * 4. 有待处理文件活动且已过三天
+ * 5. 不在重试退避期内（autoDescriptionRetryAt > now 则跳过）
+ */
+export const shouldGenerateAutoProjectDescription = (
+  project?: Project | null,
+  fileCount?: number,
+) => {
+  if (!project) return false;
+  if (isManualProjectDescription(project)) return false;
+  if (project.autoDescriptionGeneratedAt) return false;
+  if (project.description?.trim()) return false;
   if (!project.autoDescriptionPendingSince) return false;
+  if (fileCount !== undefined && fileCount < 2) return false;
+
+  // 重试退避：如果设置了 retryAt 且还没到时间，跳过
+  if (project.autoDescriptionRetryAt) {
+    const retryAt = new Date(project.autoDescriptionRetryAt).getTime();
+    if (retryAt > Date.now()) return false;
+  }
+
   const nextAt = project.autoDescriptionNextUpdateAt || project.autoDescriptionPendingSince;
   return new Date(nextAt).getTime() <= Date.now();
 };
@@ -50,27 +81,26 @@ export const shouldGenerateAutoProjectDescription = (project?: Project | null) =
 const normalizeAiSummary = (value: string) =>
   value
     .replace(/^项目描述[:：]?\s*/i, '')
-    .replace(/["“”]/g, '')
+    .replace(/["""]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 80);
 
 const buildAutoDescriptionPrompt = (project: Project, docs: ProjectDocument[], allStages: StageConfig[]) => {
   const projectDocs = docs.filter(doc => doc.projectId === project.id);
-  const pendingNames = (project.autoDescriptionPendingFileNames || []).slice(-MAX_PENDING_FILE_NAMES);
   const docNames = projectDocs
     .map(doc => cleanFileName(doc.name || doc.sourceFilePath || ''))
     .filter(Boolean)
-    .slice(-MAX_DOC_NAMES_FOR_PROMPT);
+    .slice(0, MAX_DOC_NAMES_FOR_PROMPT);
   const stages = Array.from(new Set(projectDocs
     .map(doc => detectTimelineStage(allStages, doc.name, doc.sourceFilePath))
     .filter(stage => stage && stage !== '其他'))).slice(0, 5);
 
   return composePrompt('description', {
     projectName: project.name,
-    stages: stages.join('、'),
-    pendingFiles: pendingNames.join('、'),
-    existingFiles: docNames.join('、'),
+    stages: stages.join('、') || '暂无',
+    pendingFiles: '',
+    existingFiles: docNames.join('、') || '暂无',
   });
 };
 
@@ -79,48 +109,125 @@ export const maybeGenerateAutoProjectDescription = async (
   docs: ProjectDocument[],
   allStages: StageConfig[],
   updateProject: UpdateProjectFn,
+  fileCount?: number,
+  options: { forceRetry?: boolean } = {},
 ) => {
-  if (!shouldGenerateAutoProjectDescription(project)) return false;
+  const isEligibleForRetry = !isManualProjectDescription(project)
+    && !project.autoDescriptionGeneratedAt
+    && !project.description?.trim()
+    && (fileCount === undefined || fileCount >= 2);
+  if (options.forceRetry ? !isEligibleForRetry : !shouldGenerateAutoProjectDescription(project, fileCount)) return false;
+  const now = new Date();
+  const nowIso = now.toISOString();
   try {
     const prompt = buildAutoDescriptionPrompt(project, docs, allStages);
     const response = await useAIJobStore.getState().runAIJob(
       {
         scene: 'description',
-        title: `\u66f4\u65b0\u9879\u76ee\u63cf\u8ff0\uff1a${project.name}`,
+        title: `生成项目概述：${project.name}`,
         projectId: project.id,
-        inputHash: `${project.id}:${project.autoDescriptionPendingSince || ''}:${(project.autoDescriptionPendingFileNames || []).join('|')}`,
+        inputHash: `auto-desc:${project.id}:${project.autoDescriptionPendingSince || ''}`,
         resultPreview: (value) => normalizeAiSummary(String(value || '')),
+        retry: async () => {
+          // Re-read the project state before retrying. A user may have edited
+          // the description after the original request failed.
+          const latestProject = useProjectStore.getState().projects.find(item => item.id === project.id);
+          if (!latestProject) return;
+          await maybeGenerateAutoProjectDescription(
+            latestProject,
+            useProjectDocStore.getState().projectDocs,
+            allStages,
+            updateProject,
+            fileCount,
+            { forceRetry: true },
+          );
+        },
       },
       async ({ setProgress, throwIfCancelled }) => {
         setProgress(45);
         const value = await window.electronAPI.callAI({ prompt, mode: 'single' });
         throwIfCancelled();
         setProgress(85);
+        if (!normalizeAiSummary(String(value || ''))) {
+          throw new Error('AI 未返回可用的项目概述');
+        }
         return value;
       },
     );
     const description = normalizeAiSummary(String(response || ''));
     if (!description) {
+      // AI 返回空内容：不永久锁定，24 小时后重试
       await updateProject(project.id, {
-        autoDescriptionNextUpdateAt: addDays(new Date(), 1).toISOString(),
+        autoDescriptionGenerationAttempted: true,
+        autoDescriptionLastErrorAt: nowIso,
+        autoDescriptionRetryAt: addHours(now, RETRY_INTERVAL_HOURS).toISOString(),
       });
       return false;
     }
+    // 成功：写入描述并永久锁定
     await updateProject(project.id, {
       description,
       descriptionSource: 'auto',
-      autoDescriptionUpdatedAt: new Date().toISOString(),
+      autoDescriptionUpdatedAt: nowIso,
+      autoDescriptionGeneratedAt: nowIso,
+      autoDescriptionGenerationAttempted: true,
       autoDescriptionPendingSince: undefined,
       autoDescriptionNextUpdateAt: undefined,
+      autoDescriptionRetryAt: undefined,
+      autoDescriptionLastErrorAt: undefined,
       autoDescriptionPendingFileNames: [],
     });
     return true;
   } catch (error) {
     if (isAIJobCancelledError(error)) return false;
     console.warn('Auto project description failed:', error);
+    // 失败：不永久锁定，24 小时后重试
     await updateProject(project.id, {
-      autoDescriptionNextUpdateAt: addDays(new Date(), 1).toISOString(),
+      autoDescriptionGenerationAttempted: true,
+      autoDescriptionLastErrorAt: nowIso,
+      autoDescriptionRetryAt: addHours(now, RETRY_INTERVAL_HOURS).toISOString(),
     });
     return false;
   }
+};
+
+/**
+ * 清除自动生成锁定，允许重新生成。
+ * 用于用户手动点击"恢复自动生成资格"按钮。
+ */
+export const resetAutoDescriptionLock = async (
+  project: Project,
+  updateProject: UpdateProjectFn,
+) => {
+  await updateProject(project.id, {
+    description: '',
+    descriptionSource: undefined,
+    autoDescriptionGeneratedAt: undefined,
+    autoDescriptionGenerationAttempted: undefined,
+    autoDescriptionUpdatedAt: undefined,
+    autoDescriptionRetryAt: undefined,
+    autoDescriptionLastErrorAt: undefined,
+  });
+};
+
+/**
+ * 将自动生成的描述转为手动描述（用户编辑后）。
+ */
+export const convertToManualDescription = async (
+  project: Project,
+  updateProject: UpdateProjectFn,
+  newDescription: string,
+) => {
+  await updateProject(project.id, {
+    description: newDescription,
+    descriptionSource: 'manual',
+    autoDescriptionGeneratedAt: undefined,
+    autoDescriptionGenerationAttempted: undefined,
+    autoDescriptionUpdatedAt: undefined,
+    autoDescriptionPendingSince: undefined,
+    autoDescriptionNextUpdateAt: undefined,
+    autoDescriptionRetryAt: undefined,
+    autoDescriptionLastErrorAt: undefined,
+    autoDescriptionPendingFileNames: [],
+  });
 };

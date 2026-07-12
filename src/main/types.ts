@@ -8,6 +8,12 @@ export interface Project {
   autoDescriptionPendingSince?: string;
   autoDescriptionNextUpdateAt?: string;
   autoDescriptionPendingFileNames?: string[];
+  autoDescriptionLastFileActivityAt?: string;
+  autoDescriptionGeneratedAt?: string;
+  autoDescriptionGenerationAttempted?: boolean;
+  autoDescriptionLastScannedAt?: string;
+  autoDescriptionRetryAt?: string;
+  autoDescriptionLastErrorAt?: string;
   folderPath: string;
   folderModifiedAt?: string; // 项目文件夹内最近文件/目录修改时间
   status: 'active' | 'completed' | 'paused';
@@ -314,14 +320,37 @@ export interface StageConfig {
 
 // 应用设置
 export type HolidayDataSource = 'auto' | 'local' | 'online';
+export type CalendarDayTypeOverride = 'workday' | 'rest';
+export type CalendarWorkStatus = 'leave' | 'business' | 'overtime';
+
+export interface CalendarDayRecord {
+  date: string;
+  dayType?: CalendarDayTypeOverride;
+  workStatus?: CalendarWorkStatus;
+  note?: string;
+  updatedAt: string;
+}
+
+export interface CalendarItinerary {
+  id: string;
+  date: string;
+  title: string;
+  note?: string;
+  reminderAt?: string;
+  notifiedAt?: string;
+  createdAt: string;
+}
 
 export interface AppSettings {
   workspacePath: string; // 项目工作区路径
   workspaceCapacity: number; // 工作区容量上限（GB）
+  recycleBinRetentionDays?: number; // 回收站自动清理天数，1-365
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
   enableSystemNotifications?: boolean; // Enable Windows system notifications
   holidayDataSource?: HolidayDataSource; // Calendar holiday source
   holidayApiUrl?: string; // Calendar holiday API URL, supports {year}
+  calendarDayRecords?: CalendarDayRecord[];
+  calendarItineraries?: CalendarItinerary[];
   customStages?: StageConfig[]; // 自定义阶段配置
 }
 

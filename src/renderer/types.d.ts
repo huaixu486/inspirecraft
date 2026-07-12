@@ -37,7 +37,7 @@ interface ElectronAPI {
   importFiles: (params: { folderPath: string; filePaths: string[] }) => Promise<{ success: boolean; files?: { name: string; path: string }[]; error?: string }>;
   duplicateFiles: (params: { sourcePaths: string[]; targetFolder: string }) => Promise<{ success: boolean; copies?: { name: string; path: string; isDirectory: boolean }[]; error?: string }>;
   moveFiles: (params: { sourcePaths: string[]; targetFolder: string }) => Promise<{ success: boolean; moved?: { name: string; path: string; sourcePath: string; isDirectory: boolean }[]; errors?: string[]; error?: string }>;
-  deleteFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  deleteFile: (filePath: string, options?: { permanent?: boolean }) => Promise<{ success: boolean; recycleEntry?: { id: string }; error?: string }>;
   createFolder: (params: { folderPath: string; folderName: string }) => Promise<{ success: boolean; folderPath?: string; error?: string }>;
   readFile: (filePath: string) => Promise<string>;
   readDir: (dirPath: string) => Promise<string[]>;
@@ -129,13 +129,30 @@ interface ElectronAPI {
   onFriendRequestReceived?: (callback: (payload: CollaborationFriendRequest) => void) => () => void;
 
   // 设置操作
-  loadSettings: () => Promise<{ workspacePath: string; workspaceCapacity: number; userProfile?: { nickname: string; email: string; avatar?: string }; customStages?: any[]; compositionWeights?: import('../shared/types').CompositionWeightConfig; enableSystemNotifications?: boolean; holidayDataSource?: 'auto' | 'local' | 'online'; holidayApiUrl?: string } | null>;
+  loadSettings: () => Promise<{ workspacePath: string; workspaceCapacity: number; recycleBinRetentionDays?: number; userProfile?: { nickname: string; email: string; avatar?: string }; customStages?: any[]; compositionWeights?: import('../shared/types').CompositionWeightConfig; enableSystemNotifications?: boolean; holidayDataSource?: 'auto' | 'local' | 'online'; holidayApiUrl?: string; calendarDayRecords?: import('../shared/types').CalendarDayRecord[]; calendarItineraries?: import('../shared/types').CalendarItinerary[] } | null>;
   saveSettings: (config: any) => Promise<void>;
   createProjectFolder: (params: { projectName: string; workspacePath: string }) => Promise<{ success: boolean; folderPath?: string; error?: string }>;
   getWorkspaceSize: (workspacePath: string) => Promise<{ success: boolean; bytes: number }>;
   listWorkspaceFolders: (dirPath: string) => Promise<{ success: boolean; folders: string[]; error?: string }>;
+  listWorkspaceMigrationProjects: (params: { sourceWorkspacePath: string }) => Promise<{
+    success: boolean;
+    projects?: Array<{ id: string; name: string; folderPath: string; folderName: string; exists: boolean }>;
+    error?: string;
+  }>;
+  migrateWorkspaceProjects: (params: { sourceWorkspacePath: string; targetWorkspacePath: string; projectIds: string[] }) => Promise<{
+    success: boolean;
+    migratedProjectIds?: string[];
+    failed?: Array<{ id: string; name: string; error: string }>;
+    error?: string;
+  }>;
   moveFolder: (params: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>;
-  deleteFolder: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
+  deleteFolder: (folderPath: string, options?: { permanent?: boolean }) => Promise<{ success: boolean; recycleEntry?: { id: string }; error?: string }>;
+  listRecycleBin: (params: { workspacePath: string }) => Promise<{ success: boolean; entries?: Array<{ id: string; name: string; originalPath: string; isDirectory: boolean; deletedAt: string; size: number }>; error?: string }>;
+  restoreRecycleBinItem: (params: { workspacePath: string; id: string }) => Promise<{ success: boolean; error?: string }>;
+  permanentlyDeleteRecycleBinItem: (params: { workspacePath: string; id: string }) => Promise<{ success: boolean; error?: string }>;
+  emptyRecycleBin: (params: { workspacePath: string }) => Promise<{ success: boolean; removed?: number; error?: string }>;
+  cleanupRecycleBin?: (params: { workspacePath: string }) => Promise<{ success: boolean; removed?: number; error?: string }>;
+  scanProjectFiles: (folderPath: string) => Promise<{ success: boolean; files?: Array<{ path: string; size: number; modifiedAt: string }>; error?: string }>;
 
   // 项目文档操作
   saveProjectDoc: (doc: any) => Promise<void>;

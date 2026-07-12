@@ -830,7 +830,7 @@ const parseAiStageReport = (value: string): AiStageReport => {
   };
 };
 
-const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shared/types').WorkbenchFocus }> = ({ onBack, focus }) => {
+const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shared/types').WorkbenchFocus; hideHeader?: boolean }> = ({ onBack, focus, hideHeader = false }) => {
   const {
     currentProject,
     currentStageName,
@@ -2013,6 +2013,12 @@ ${documentContent.slice(0, 9000)}`;
     message.success('状态已更新');
   };
 
+  const handleToggleTaskType = async (task: TaskItem) => {
+    const nextType: TaskItem['type'] = task.type === 'ai' ? 'manual' : 'ai';
+    await updateTask(task.id, { type: nextType });
+    message.success(nextType === 'ai' ? '已归类为 AI 任务' : '已归类为人工任务');
+  };
+
   const renderTaskItem = (task: TaskItem) => {
     const relatedDoc = task.relatedDocId ? projectDocsList.find((doc) => doc.id === task.relatedDocId) : null;
     const source = task.source || 'manual';
@@ -2049,9 +2055,16 @@ ${documentContent.slice(0, 9000)}`;
         ].filter(Boolean)}
       >
         <List.Item.Meta
-          avatar={task.type === 'ai'
-            ? <RobotOutlined style={{ color: '#1677ff', fontSize: 18 }} />
-            : <UserOutlined style={{ color: '#52c41a', fontSize: 18 }} />}
+          avatar={
+            <Button
+              type="text"
+              size="small"
+              title={task.type === 'ai' ? '当前为 AI 任务，点击切换为人工任务' : '当前为人工任务，点击切换为 AI 任务'}
+              icon={task.type === 'ai' ? <RobotOutlined /> : <UserOutlined />}
+              onClick={() => { void handleToggleTaskType(task); }}
+              style={{ color: task.type === 'ai' ? '#1677ff' : '#52c41a', fontSize: 18 }}
+            />
+          }
           title={
             <Space wrap size={6}>
               <Text delete={task.status === 'completed'}>{task.title}</Text>
@@ -2129,7 +2142,7 @@ ${documentContent.slice(0, 9000)}`;
         scrollbarGutter: 'stable',
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, alignItems: 'flex-start' }}>
+      {!hideHeader && <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, alignItems: 'flex-start' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
             <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
@@ -2141,7 +2154,7 @@ ${documentContent.slice(0, 9000)}`;
           <Button icon={<FileTextOutlined />} onClick={handleCreateReportTask}>保存为报告任务</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>新建任务</Button>
         </Space>
-      </div>
+      </div>}
 
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Card>
@@ -2154,7 +2167,10 @@ ${documentContent.slice(0, 9000)}`;
           <Progress percent={stageProgressPercent || projectProgress} style={{ marginTop: 12, marginBottom: 0 }} />
         </Card>
 
-        <Card title="阶段文档报告">
+        <Card
+          title="阶段文档报告"
+          extra={hideHeader ? <Button size="small" icon={<FileTextOutlined />} onClick={handleCreateReportTask}>保存为报告任务</Button> : null}
+        >
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             <Row gutter={12} align="bottom">
               <Col span={8}>
@@ -2734,6 +2750,7 @@ ${documentContent.slice(0, 9000)}`;
           title={`任务工作台${selectedStage ? ` · ${selectedStage}` : ''}`}
           extra={
             <Space>
+              {hideHeader && <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>新建任务</Button>}
               <Select
                 size="small"
                 value={statusFilter}

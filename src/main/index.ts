@@ -801,6 +801,140 @@ async function getDirSize(dirPath: string): Promise<number> {
   return totalSize;
 }
 
+type WorkspaceMigrationPathPair = { source: string; target: string };
+
+function isSameOrChildPath(targetPath: string, rootPath: string): boolean {
+  const relative = path.relative(path.resolve(rootPath), path.resolve(targetPath));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function remapMigratedPath(value: string | undefined, paths: WorkspaceMigrationPathPair[]): string | undefined {
+  if (!value) return value;
+  const matchingPath = [...paths]
+    .sort((a, b) => b.source.length - a.source.length)
+    .find(item => isSameOrChildPath(value, item.source));
+  if (!matchingPath) return value;
+  return path.resolve(matchingPath.target, path.relative(matchingPath.source, value));
+}
+
+async function moveWorkspaceFolder(sourcePath: string, targetPath: string): Promise<void> {
+  await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+  if (fs.existsSync(targetPath)) throw new Error('目标工作区中已存在同名文件夹');
+  try {
+    await fs.promises.rename(sourcePath, targetPath);
+  } catch (error: any) {
+    // 跨磁盘移动会触发 EXDEV，改为复制完成后删除源目录。
+    if (error?.code !== 'EXDEV') throw error;
+    await fs.promises.cp(sourcePath, targetPath, { recursive: true, errorOnExist: true, force: false });
+    await fs.promises.rm(sourcePath, { recursive: true, force: false });
+  }
+}
+
+const RECYCLE_BIN_DIR_NAME = '.projecthub-recycle-bin';
+const RECYCLE_BIN_ENTRIES_DIR_NAME = 'entries';
+const RECYCLE_BIN_INDEX_FILE_NAME = 'index.json';
+
+type RecycleBinEntry = {
+  id: string;
+  name: string;
+  originalPath: string;
+  recycledPath: string;
+  isDirectory: boolean;
+  deletedAt: string;
+  size: number;
+};
+
+function getActiveWorkspaceRoot(requestedWorkspacePath?: string): string {
+  const configuredWorkspacePath = String(loadSettingsFromDisk().workspacePath || '').trim();
+  if (!configuredWorkspacePath) throw new Error('尚未设置工作区路径');
+  const configuredRoot = path.resolve(configuredWorkspacePath);
+  if (requestedWorkspacePath && path.resolve(requestedWorkspacePath) !== configuredRoot) {
+    throw new Error('回收站只能操作当前工作区');
+  }
+  return configuredRoot;
+}
+
+function getRecycleBinPaths(workspaceRoot: string) {
+  const root = path.join(workspaceRoot, RECYCLE_BIN_DIR_NAME);
+  return {
+    root,
+    entries: path.join(root, RECYCLE_BIN_ENTRIES_DIR_NAME),
+    index: path.join(root, RECYCLE_BIN_INDEX_FILE_NAME),
+  };
+}
+
+function loadRecycleBinEntries(workspaceRoot: string): RecycleBinEntry[] {
+  const { index } = getRecycleBinPaths(workspaceRoot);
+  if (!fs.existsSync(index)) return [];
+  try {
+    const records = JSON.parse(fs.readFileSync(index, 'utf-8'));
+    return Array.isArray(records) ? records : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecycleBinEntries(workspaceRoot: string, entries: RecycleBinEntry[]): void {
+  const paths = getRecycleBinPaths(workspaceRoot);
+  fs.mkdirSync(paths.entries, { recursive: true });
+  const tempIndex = `${paths.index}.tmp`;
+  fs.writeFileSync(tempIndex, JSON.stringify(entries, null, 2), 'utf-8');
+  fs.renameSync(tempIndex, paths.index);
+}
+
+async function removeRecycleBinEntryFile(entry: RecycleBinEntry): Promise<void> {
+  if (!fs.existsSync(entry.recycledPath)) return;
+  if (entry.isDirectory) await fs.promises.rm(entry.recycledPath, { recursive: true, force: true });
+  else await fs.promises.unlink(entry.recycledPath);
+}
+
+async function cleanupRecycleBinForWorkspace(workspaceRoot: string): Promise<number> {
+  const retentionDays = Math.min(365, Math.max(1, Number(loadSettingsFromDisk().recycleBinRetentionDays || 30)));
+  const threshold = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const entries = loadRecycleBinEntries(workspaceRoot);
+  const expired = entries.filter(entry => !Number.isFinite(new Date(entry.deletedAt).getTime()) || new Date(entry.deletedAt).getTime() <= threshold);
+  await Promise.all(expired.map(removeRecycleBinEntryFile));
+  if (expired.length) saveRecycleBinEntries(workspaceRoot, entries.filter(entry => !expired.includes(entry)));
+  return expired.length;
+}
+
+async function movePathToRecycleBin(filePath: string): Promise<RecycleBinEntry> {
+  const workspaceRoot = getActiveWorkspaceRoot();
+  const sourcePath = path.resolve(filePath);
+  const recyclePaths = getRecycleBinPaths(workspaceRoot);
+  if (!isSameOrChildPath(sourcePath, workspaceRoot) || isSameOrChildPath(sourcePath, recyclePaths.root)) {
+    throw new Error('只能将当前工作区中的文件或文件夹移入回收站');
+  }
+  if (!fs.existsSync(sourcePath)) throw new Error('文件或文件夹不存在');
+
+  await cleanupRecycleBinForWorkspace(workspaceRoot);
+  await fs.promises.mkdir(recyclePaths.entries, { recursive: true });
+  const stat = await fs.promises.stat(sourcePath);
+  const id = `recycle-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const recycledPath = path.join(recyclePaths.entries, `${id}-${path.basename(sourcePath)}`);
+  if (stat.isDirectory()) await moveWorkspaceFolder(sourcePath, recycledPath);
+  else {
+    try {
+      await fs.promises.rename(sourcePath, recycledPath);
+    } catch (error: any) {
+      if (error?.code !== 'EXDEV') throw error;
+      await fs.promises.copyFile(sourcePath, recycledPath, fs.constants.COPYFILE_EXCL);
+      await fs.promises.unlink(sourcePath);
+    }
+  }
+  const entry: RecycleBinEntry = {
+    id,
+    name: path.basename(sourcePath),
+    originalPath: sourcePath,
+    recycledPath,
+    isDirectory: stat.isDirectory(),
+    deletedAt: new Date().toISOString(),
+    size: stat.isDirectory() ? await getDirSize(recycledPath) : stat.size,
+  };
+  saveRecycleBinEntries(workspaceRoot, [entry, ...loadRecycleBinEntries(workspaceRoot)]);
+  return entry;
+}
+
 // 保存设置
 function saveSettingsToDisk(settings: AppSettings) {
   ensureDataDir();
@@ -2126,14 +2260,16 @@ ipcMain.handle('file:duplicate', async (_event: any, params: { sourcePaths: stri
 });
 
 // 删除文件
-ipcMain.handle('file:delete', async (_event: any, filePath: string) => {
+ipcMain.handle('file:delete', async (_event: any, filePath: string, options?: { permanent?: boolean }) => {
   try {
     const check = checkWithinWorkspace(filePath);
     if (!check.ok) return { success: false, error: check.error };
+    let recycleEntry: RecycleBinEntry | undefined;
     if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+      if (options?.permanent) fs.unlinkSync(filePath);
+      else recycleEntry = await movePathToRecycleBin(filePath);
     }
-    return { success: true };
+    return { success: true, recycleEntry };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
@@ -3963,7 +4099,8 @@ ipcMain.handle('folder:getContents', async (_event: any, folderPath: string) => 
     const check = checkWithinWorkspace(folderPath);
     if (!check.ok) return { success: false, error: check.error, items: [] };
     if (!fs.existsSync(folderPath)) return { success: true, items: [] };
-    const entries = await fs.promises.readdir(folderPath, { withFileTypes: true });
+    const entries = (await fs.promises.readdir(folderPath, { withFileTypes: true }))
+      .filter(entry => entry.name !== RECYCLE_BIN_DIR_NAME);
     const items = await Promise.all(entries.map(async entry => {
       const fullPath = path.join(folderPath, entry.name);
       let size = 0;
@@ -4073,7 +4210,7 @@ interface ScannedStageFile {
 }
 
 const stageScanExts = new Set(['.doc', '.docx', '.pdf', '.txt', '.ppt', '.pptx', '.xls', '.xlsx']);
-const ignoredScanDirs = new Set(['.git', 'node_modules', 'dist', 'build', '.cache']);
+const ignoredScanDirs = new Set(['.git', 'node_modules', 'dist', 'build', '.cache', RECYCLE_BIN_DIR_NAME]);
 
 async function scanStageFiles(folderPath: string, output: ScannedStageFile[] = []): Promise<ScannedStageFile[]> {
   if (!fs.existsSync(folderPath)) return output;
@@ -4114,6 +4251,51 @@ ipcMain.handle('folder:scanStageFiles', async (_event: any, folderPath: string) 
     return { success: false, files: [], error: error.message };
   }
 });
+// ---- workspace:scanProjectFiles ----
+// 轻量扫描：只返回文件路径、大小、修改时间，不读内容，不识别阶段
+ipcMain.handle('workspace:scanProjectFiles', async (_event: any, folderPath: string) => {
+  const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.cache', '.projecthub-recycle-bin', '.projecthub-data']);
+  const SKIP_PREFIXES = ['.', '~$', '.~'];
+  const result: Array<{ path: string; size: number; modifiedAt: string }> = [];
+  const MAX_FILES = 5000;
+
+  const walk = async (dir: string) => {
+    if (result.length >= MAX_FILES) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch { return; }
+    for (const entry of entries) {
+      if (result.length >= MAX_FILES) return;
+      if (SKIP_DIRS.has(entry.name)) continue;
+      if (SKIP_PREFIXES.some(p => entry.name.startsWith(p))) continue;
+
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (entry.isFile()) {
+        try {
+          const stat = await fs.promises.stat(fullPath);
+          result.push({
+            path: fullPath,
+            size: stat.size,
+            modifiedAt: stat.mtime.toISOString(),
+          });
+        } catch { /* skip unreadable files */ }
+      }
+    }
+  };
+
+  try {
+    const check = checkWithinWorkspace(folderPath);
+    if (!check.ok) return { success: false, error: check.error, files: [] };
+    await walk(folderPath);
+    return { success: true, files: result };
+  } catch (error: any) {
+    return { success: false, files: [], error: error.message };
+  }
+});
+
 // ---- folder:getTreeStats ----
 interface TreeFileEntry {
   name: string;
@@ -4503,6 +4685,184 @@ ipcMain.handle('workspace:getSize', async (_event: any, workspacePath: string) =
   }
 });
 
+ipcMain.handle('workspace:listRecycleBin', async (_event: any, params: { workspacePath: string }) => {
+  try {
+    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
+    await cleanupRecycleBinForWorkspace(workspaceRoot);
+    const allEntries = loadRecycleBinEntries(workspaceRoot);
+    // 过滤掉实体文件已不存在的残留条目，并持久化清理
+    const validEntries = allEntries.filter(entry => fs.existsSync(entry.recycledPath));
+    if (validEntries.length !== allEntries.length) {
+      saveRecycleBinEntries(workspaceRoot, validEntries);
+    }
+    const sorted = validEntries.sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
+    return { success: true, entries: sorted };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace:restoreRecycleBinItem', async (_event: any, params: { workspacePath: string; id: string }) => {
+  try {
+    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
+    const entries = loadRecycleBinEntries(workspaceRoot);
+    const entry = entries.find(item => item.id === params?.id);
+    if (!entry) return { success: false, error: '回收站项目不存在' };
+    if (!fs.existsSync(entry.recycledPath)) return { success: false, error: '回收站中的文件已不存在' };
+    if (!isSameOrChildPath(entry.originalPath, workspaceRoot)) return { success: false, error: '原始路径不在当前工作区' };
+    if (fs.existsSync(entry.originalPath)) return { success: false, error: '原位置已有同名文件或文件夹，请先处理冲突' };
+    if (entry.isDirectory) await moveWorkspaceFolder(entry.recycledPath, entry.originalPath);
+    else {
+      await fs.promises.mkdir(path.dirname(entry.originalPath), { recursive: true });
+      await fs.promises.rename(entry.recycledPath, entry.originalPath);
+    }
+    saveRecycleBinEntries(workspaceRoot, entries.filter(item => item.id !== entry.id));
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace:permanentlyDeleteRecycleBinItem', async (_event: any, params: { workspacePath: string; id: string }) => {
+  try {
+    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
+    const entries = loadRecycleBinEntries(workspaceRoot);
+    const entry = entries.find(item => item.id === params?.id);
+    if (!entry) return { success: false, error: '回收站项目不存在' };
+    await removeRecycleBinEntryFile(entry);
+    saveRecycleBinEntries(workspaceRoot, entries.filter(item => item.id !== entry.id));
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace:emptyRecycleBin', async (_event: any, params: { workspacePath: string }) => {
+  try {
+    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
+    const entries = loadRecycleBinEntries(workspaceRoot);
+    await Promise.all(entries.map(removeRecycleBinEntryFile));
+    saveRecycleBinEntries(workspaceRoot, []);
+    return { success: true, removed: entries.length };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace:cleanupRecycleBin', async (_event: any, params: { workspacePath: string }) => {
+  try {
+    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
+    return { success: true, removed: await cleanupRecycleBinForWorkspace(workspaceRoot) };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+// 工作区迁移：由主进程在切换设置前完成，避免新旧工作区的路径校验互相影响。
+ipcMain.handle('workspace:listMigrationProjects', async (_event: any, params: { sourceWorkspacePath: string }) => {
+  try {
+    const sourceWorkspacePath = String(params?.sourceWorkspacePath || '').trim();
+    const sourceRoot = sourceWorkspacePath ? path.resolve(sourceWorkspacePath) : '';
+    const projects = loadProjectsFromDisk();
+    const candidates = sourceRoot
+      ? projects.filter(project => project.folderPath && isSameOrChildPath(project.folderPath, sourceRoot))
+      : projects;
+    return {
+      success: true,
+      projects: candidates.map(project => ({
+        id: project.id,
+        name: project.name,
+        folderPath: project.folderPath,
+        folderName: path.basename(project.folderPath || project.name),
+        exists: Boolean(project.folderPath && fs.existsSync(project.folderPath)),
+      })),
+    };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace:migrateProjects', async (_event: any, params: {
+  sourceWorkspacePath: string;
+  targetWorkspacePath: string;
+  projectIds: string[];
+}) => {
+  try {
+    const sourceWorkspacePath = String(params?.sourceWorkspacePath || '').trim();
+    const targetWorkspacePath = String(params?.targetWorkspacePath || '').trim();
+    if (!targetWorkspacePath) return { success: false, error: '请选择新的工作区路径' };
+
+    const sourceRoot = sourceWorkspacePath ? path.resolve(sourceWorkspacePath) : '';
+    const targetRoot = path.resolve(targetWorkspacePath);
+    if (sourceRoot && sourceRoot.toLowerCase() === targetRoot.toLowerCase()) {
+      return { success: false, error: '新旧工作区路径相同，无需迁移' };
+    }
+
+    const allProjects = loadProjectsFromDisk();
+    const sourceProjects = sourceRoot
+      ? allProjects.filter(project => project.folderPath && isSameOrChildPath(project.folderPath, sourceRoot))
+      : allProjects;
+    const selectedIds = new Set((params?.projectIds || []).map(String));
+    const selectedProjects = sourceProjects.filter(project => selectedIds.has(project.id));
+
+    if (selectedProjects.some(project => project.folderPath && isSameOrChildPath(targetRoot, project.folderPath))) {
+      return { success: false, error: '新的工作区不能位于待迁移项目文件夹内部' };
+    }
+
+    await fs.promises.mkdir(targetRoot, { recursive: true });
+    const migrated: Array<{ project: Project; folderPath: string }> = [];
+    const failed: Array<{ id: string; name: string; error: string }> = [];
+
+    for (const project of selectedProjects) {
+      try {
+        const sourceFolder = path.resolve(project.folderPath || '');
+        if (!project.folderPath || !fs.existsSync(sourceFolder)) throw new Error('原项目文件夹不存在');
+        const targetFolder = path.join(targetRoot, path.basename(sourceFolder));
+        await moveWorkspaceFolder(sourceFolder, targetFolder);
+        const watcher = folderWatchers.get(project.id);
+        if (watcher) {
+          watcher.close();
+          folderWatchers.delete(project.id);
+        }
+        migrated.push({ project, folderPath: targetFolder });
+      } catch (error: any) {
+        failed.push({ id: project.id, name: project.name, error: error?.message || String(error) });
+      }
+    }
+
+    const pathPairs = migrated.map(item => ({ source: path.resolve(item.project.folderPath), target: item.folderPath }));
+    const migratedIds = new Set(migrated.map(item => item.project.id));
+    const now = new Date().toISOString();
+    const migratedProjects = migrated.map(({ project, folderPath }) => ({ ...project, folderPath, updatedAt: now }));
+
+    // 迁移后仅保留成功迁移的项目及其关联记录；未勾选和失败项不会出现在新列表中。
+    saveProjectsToDisk(migratedProjects);
+    saveVersionsToDisk(loadVersionsFromDisk()
+      .filter(version => migratedIds.has(version.projectId))
+      .map(version => ({ ...version, filePath: remapMigratedPath(version.filePath, pathPairs) || version.filePath })));
+    saveProjectDocsToDisk(loadProjectDocsFromDisk()
+      .filter(doc => migratedIds.has(doc.projectId))
+      .map(doc => ({ ...doc, sourceFilePath: remapMigratedPath(doc.sourceFilePath, pathPairs) })));
+    saveTasksToDisk(loadTasksFromDisk().filter(task => migratedIds.has(task.projectId)));
+    saveReviewsToDisk(loadReviewsFromDisk().filter(review => migratedIds.has(review.projectId)));
+    saveStageMemoriesToDisk(loadStageMemoriesFromDisk()
+      .filter(entry => migratedIds.has(entry.projectId))
+      .map(entry => ({ ...entry, sourceFilePath: remapMigratedPath(entry.sourceFilePath, pathPairs) })));
+    saveReferenceMaterialsToDisk(loadReferenceMaterialsFromDisk()
+      .filter(material => migratedIds.has(material.projectId))
+      .map(material => ({ ...material, filePath: remapMigratedPath(material.filePath, pathPairs) })));
+    saveTemplatesToDisk(loadTemplatesFromDisk().map(template => ({
+      ...template,
+      filePath: remapMigratedPath(template.filePath, pathPairs),
+    })));
+    saveSettingsToDisk({ ...loadSettingsFromDisk(), workspacePath: targetRoot });
+
+    return { success: true, migratedProjectIds: Array.from(migratedIds), failed };
+  } catch (error: any) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
 // ==================== 项目文档操作 ====================
 
 ipcMain.handle('projectDoc:save', async (_event: any, doc: ProjectDocument) => {
@@ -4768,13 +5128,15 @@ ipcMain.handle('workspace:moveFolder', async (_event: any, params: { src: string
 });
 
 // 删除文件夹
-ipcMain.handle('workspace:deleteFolder', async (_event: any, folderPath: string) => {
+ipcMain.handle('workspace:deleteFolder', async (_event: any, folderPath: string, options?: { permanent?: boolean }) => {
   try {
     const check = checkWithinWorkspace(folderPath);
     if (!check.ok) return { success: false, error: check.error };
     if (!fs.existsSync(folderPath)) return { success: true };
-    fs.rmSync(folderPath, { recursive: true, force: true });
-    return { success: true };
+    let recycleEntry: RecycleBinEntry | undefined;
+    if (options?.permanent) fs.rmSync(folderPath, { recursive: true, force: true });
+    else recycleEntry = await movePathToRecycleBin(folderPath);
+    return { success: true, recycleEntry };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
@@ -5483,6 +5845,28 @@ app.whenReady().then(() => {
   ensureWindowsNotificationShortcut();
   createWindow();
   startCollaborationServer().catch(() => {});
+
+  // 启动后自动清理回收站过期条目
+  try {
+    const settings = loadSettingsFromDisk();
+    if (settings.workspacePath) {
+      cleanupRecycleBinForWorkspace(settings.workspacePath).catch((err) => {
+        console.warn('[RecycleBin] Startup cleanup failed:', err);
+      });
+    }
+  } catch {}
+
+  // 每 12 小时自动清理回收站
+  setInterval(() => {
+    try {
+      const settings = loadSettingsFromDisk();
+      if (settings.workspacePath) {
+        cleanupRecycleBinForWorkspace(settings.workspacePath).catch((err) => {
+          console.warn('[RecycleBin] Periodic cleanup failed:', err);
+        });
+      }
+    } catch {}
+  }, 12 * 60 * 60 * 1000);
 });
 
 app.on('window-all-closed', () => {

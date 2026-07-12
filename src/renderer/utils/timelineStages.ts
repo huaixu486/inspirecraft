@@ -207,12 +207,8 @@ export const buildProjectStageSegments = (
       return toMs(doc.createdAt);
     };
     const getDocEndMs = (doc: ProjectDocument) => {
-      if (isImportedDoc(doc)) {
-        const modifiedMs = toMs(doc.sourceFileModifiedAt);
-        if (Number.isFinite(modifiedMs)) return modifiedMs;
-        const createdMs = toMs(doc.sourceFileCreatedAt);
-        if (Number.isFinite(createdMs)) return createdMs;
-      }
+      // 文件创建/修改时间只表示活动时间，绝不能推断为阶段完成时间。
+      // 否则自动扫描到的新文件会被误判为完成，且取消完成后会立即重新完成。
       return toMs(doc.completedAt);
     };
     const getDocActivityMs = (doc: ProjectDocument) => {
@@ -238,7 +234,8 @@ export const buildProjectStageSegments = (
     const deadlineTimes = validTimes(docs.map(doc => doc.deadline));
     const completedTimes = docs.map(getDocEndMs).filter(Number.isFinite);
     const activityTimes = docs.map(getDocActivityMs).filter(Number.isFinite);
-    const allCompleted = docs.length > 0 && docs.every(doc => isImportedDoc(doc) ? Number.isFinite(getDocEndMs(doc)) : Boolean(doc.completedAt));
+    // 所有文档都具有明确 completedAt 时，阶段才算完成。
+    const allCompleted = docs.length > 0 && docs.every(doc => Boolean(doc.completedAt));
 
     const stageMeta = getStageMeta(allStages)[stage] || { color: '#8c8c8c', label: stage };
 
