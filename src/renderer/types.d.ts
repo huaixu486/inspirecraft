@@ -68,7 +68,7 @@ interface ElectronAPI {
   // 项目操作
   saveProject: (project: any) => Promise<void>;
   loadProjects: () => Promise<any[]>;
-  deleteProject: (projectId: string) => Promise<void>;
+  deleteProject: (projectId: string) => Promise<{ success: boolean; recycleEntry?: { id: string; name?: string }; error?: string }>;
   refreshProjectFolderModifiedAt: (projectIds: string[]) => Promise<{ id: string; folderModifiedAt: string }[]>;
 
   // 版本操作
@@ -165,7 +165,7 @@ interface ElectronAPI {
   }>;
   moveFolder: (params: { src: string; dest: string }) => Promise<{ success: boolean; error?: string }>;
   deleteFolder: (folderPath: string, options?: { permanent?: boolean }) => Promise<{ success: boolean; recycleEntry?: { id: string }; error?: string }>;
-  listRecycleBin: (params: { workspacePath: string }) => Promise<{ success: boolean; entries?: Array<{ id: string; name: string; originalPath: string; isDirectory: boolean; deletedAt: string; size: number }>; error?: string }>;
+  listRecycleBin: (params: { workspacePath: string }) => Promise<{ success: boolean; entries?: Array<{ id: string; name: string; originalPath: string; isDirectory: boolean; isProject?: boolean; deletedAt: string; size: number }>; error?: string }>;
   restoreRecycleBinItem: (params: { workspacePath: string; id: string }) => Promise<{ success: boolean; error?: string }>;
   permanentlyDeleteRecycleBinItem: (params: { workspacePath: string; id: string }) => Promise<{ success: boolean; error?: string }>;
   emptyRecycleBin: (params: { workspacePath: string }) => Promise<{ success: boolean; removed?: number; error?: string }>;

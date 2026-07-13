@@ -430,7 +430,9 @@ const ProjectList: React.FC<Props> = ({ onEnterProject }) => {
                   icon={<DeleteOutlined />}
                   onClick={(e) => {
                     e.stopPropagation();
-                    deleteProject(project.id);
+                    void deleteProject(project.id)
+                      .then(() => message.success('项目已移入回收站'))
+                      .catch((error: Error) => message.error(error.message || '删除项目失败'));
                   }}
                 >
                   删除

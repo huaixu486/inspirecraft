@@ -33,7 +33,7 @@ interface ProjectState {
   setPendingReportDocOnly: (only: boolean) => void;
   setPendingWorkflowFocus: (focus: WorkflowFocus | null) => void;
   updateProject: (id: string, updates: Partial<Project>) => Promise<void>;
-  deleteProject: (id: string) => Promise<void>;
+  deleteProject: (id: string) => Promise<{ success: boolean; recycleEntry?: { id: string; name?: string } }>;
 
   // 版本操作
   loadVersions: () => Promise<void>;
@@ -121,13 +121,20 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   deleteProject: async (id) => {
     const prev = get().projects;
+    const previousCurrentProject = get().currentProject;
     const newProjects = prev.filter((p) => p.id !== id);
-    set({ projects: newProjects });
+    set({
+      projects: newProjects,
+      currentProject: previousCurrentProject?.id === id ? null : previousCurrentProject,
+    });
     try {
-      await window.electronAPI.deleteProject(id);
+      const result = await window.electronAPI.deleteProject(id);
+      if (!result?.success) throw new Error(result?.error || '删除项目失败');
+      return result;
     } catch (error) {
       console.error('Failed to delete project:', error);
-      set({ projects: prev });
+      set({ projects: prev, currentProject: previousCurrentProject });
+      throw error;
     }
   },
 

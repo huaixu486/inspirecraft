@@ -1246,6 +1246,15 @@ type RecycleBinEntry = {
   isDirectory: boolean;
   deletedAt: string;
   size: number;
+  projectSnapshot?: {
+    project: Project;
+    versions: DocumentVersion[];
+    documents: ProjectDocument[];
+    tasks: TaskItem[];
+    reviews: ReviewResult[];
+    stageMemories: StageMemoryEntry[];
+    referenceMaterials: ReferenceMaterial[];
+  };
 };
 
 function getActiveWorkspaceRoot(requestedWorkspacePath?: string): string {
@@ -2852,9 +2861,49 @@ ipcMain.handle('project:refreshFolderModifiedAt', async (_event: any, projectIds
 });
 
 ipcMain.handle('project:delete', async (_event: any, projectId: string) => {
-  const projects = loadProjectsFromDisk();
-  const filtered = projects.filter(p => p.id !== projectId);
-  saveProjectsToDisk(filtered);
+  try {
+    const projects = loadProjectsFromDisk();
+    const project = projects.find(item => item.id === projectId);
+    if (!project) return { success: false, error: 'Project not found' };
+
+    const snapshot = {
+      project,
+      versions: loadVersionsFromDisk().filter(item => item.projectId === projectId),
+      documents: loadProjectDocsFromDisk().filter(item => item.projectId === projectId),
+      tasks: loadTasksFromDisk().filter(item => item.projectId === projectId),
+      reviews: loadReviewsFromDisk().filter(item => item.projectId === projectId),
+      stageMemories: loadStageMemoriesFromDisk().filter(item => item.projectId === projectId),
+      referenceMaterials: loadReferenceMaterialsFromDisk().filter(item => item.projectId === projectId),
+    };
+
+    let recycleEntry: RecycleBinEntry | undefined;
+    if (project.folderPath && fs.existsSync(project.folderPath)) {
+      recycleEntry = await movePathToRecycleBin(project.folderPath);
+      const workspaceRoot = getActiveWorkspaceRoot();
+      const entries = loadRecycleBinEntries(workspaceRoot);
+      const entry = entries.find(item => item.id === recycleEntry!.id);
+      if (entry) {
+        entry.projectSnapshot = snapshot;
+        saveRecycleBinEntries(workspaceRoot, entries);
+      }
+    }
+
+    const watcher = folderWatchers.get(projectId);
+    if (watcher) {
+      watcher.close();
+      folderWatchers.delete(projectId);
+    }
+    saveProjectsToDisk(projects.filter(item => item.id !== projectId));
+    saveVersionsToDisk(loadVersionsFromDisk().filter(item => item.projectId !== projectId));
+    saveProjectDocsToDisk(loadProjectDocsFromDisk().filter(item => item.projectId !== projectId));
+    saveTasksToDisk(loadTasksFromDisk().filter(item => item.projectId !== projectId));
+    saveReviewsToDisk(loadReviewsFromDisk().filter(item => item.projectId !== projectId));
+    saveStageMemoriesToDisk(loadStageMemoriesFromDisk().filter(item => item.projectId !== projectId));
+    saveReferenceMaterialsToDisk(loadReferenceMaterialsFromDisk().filter(item => item.projectId !== projectId));
+    return { success: true, recycleEntry };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
 });
 
 // 文件选择对话框
@@ -5188,7 +5237,7 @@ ipcMain.handle('workspace:listRecycleBin', async (_event: any, params: { workspa
       saveRecycleBinEntries(workspaceRoot, validEntries);
     }
     const sorted = validEntries.sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
-    return { success: true, entries: sorted };
+    return { success: true, entries: sorted.map(entry => ({ ...entry, isProject: Boolean(entry.projectSnapshot) })) };
   } catch (error: any) {
     return { success: false, error: error.message || String(error) };
   }
@@ -5203,10 +5252,23 @@ ipcMain.handle('workspace:restoreRecycleBinItem', async (_event: any, params: { 
     if (!fs.existsSync(entry.recycledPath)) return { success: false, error: '回收站中的文件已不存在' };
     if (!isSameOrChildPath(entry.originalPath, workspaceRoot)) return { success: false, error: '原始路径不在当前工作区' };
     if (fs.existsSync(entry.originalPath)) return { success: false, error: '原位置已有同名文件或文件夹，请先处理冲突' };
+    if (entry.projectSnapshot && loadProjectsFromDisk().some(project => project.id === entry.projectSnapshot!.project.id)) {
+      return { success: false, error: '同 ID 的项目记录已存在，无法恢复' };
+    }
     if (entry.isDirectory) await moveWorkspaceFolder(entry.recycledPath, entry.originalPath);
     else {
       await fs.promises.mkdir(path.dirname(entry.originalPath), { recursive: true });
       await fs.promises.rename(entry.recycledPath, entry.originalPath);
+    }
+    if (entry.projectSnapshot) {
+      const snapshot = entry.projectSnapshot;
+      saveProjectsToDisk([...loadProjectsFromDisk(), snapshot.project]);
+      saveVersionsToDisk([...loadVersionsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.versions]);
+      saveProjectDocsToDisk([...loadProjectDocsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.documents]);
+      saveTasksToDisk([...loadTasksFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.tasks]);
+      saveReviewsToDisk([...loadReviewsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.reviews]);
+      saveStageMemoriesToDisk([...loadStageMemoriesFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.stageMemories]);
+      saveReferenceMaterialsToDisk([...loadReferenceMaterialsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.referenceMaterials]);
     }
     saveRecycleBinEntries(workspaceRoot, entries.filter(item => item.id !== entry.id));
     return { success: true };

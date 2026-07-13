@@ -519,6 +519,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   const setPendingReportDocOnly = useProjectStore(s => s.setPendingReportDocOnly);
   const setPendingWorkflowFocus = useProjectStore(s => s.setPendingWorkflowFocus);
   const updateProject = useProjectStore(s => s.updateProject);
+  const deleteProject = useProjectStore(s => s.deleteProject);
   const templates = useTemplateStore(s => s.templates);
   const reviews = useTemplateStore(s => s.reviews);
   const projectDocs = useProjectDocStore(s => s.projectDocs);
@@ -560,6 +561,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   // 项目描述编辑状态
   const [descEditing, setDescEditing] = useState(false);
   const [descEditText, setDescEditText] = useState('');
+  const [deletingProject, setDeletingProject] = useState(false);
   const descEditRef = useRef<any>(null);
   // 报告Tab：已读报告 & 展开的阶段
   const [readReportIds, setReadReportIds] = useState<Set<string>>(new Set());
@@ -1413,6 +1415,20 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
     }
     setCurrentProject(currentProject);
     onOpenDetail?.(page);
+  };
+
+  const handleDeleteCurrentProject = async () => {
+    if (!currentProject || deletingProject) return;
+    setDeletingProject(true);
+    try {
+      await deleteProject(currentProject.id);
+      message.success('项目已移入回收站，可在回收站恢复');
+      onClose();
+    } catch (error: any) {
+      message.error(error?.message || '删除项目失败');
+    } finally {
+      setDeletingProject(false);
+    }
   };
 
   const handleOpenQuickPlanEditor = () => {
@@ -2531,15 +2547,27 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
             <Title level={5} title={currentProject.name} ellipsis style={{ margin: 0, fontSize: 15, maxWidth: 260 }}>{currentProject.name}</Title>
           </div>
         </div>
-        <Button
-          type="text"
-          icon={<CloseOutlined />}
-          onClick={onClose}
-          size="small"
-          style={{ transition: 'transform 0.15s ease, background 0.15s ease' }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = 'rotate(90deg)'; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'rotate(0deg)'; }}
-        />
+        <Space size={2}>
+          <Popconfirm
+            title="删除项目？"
+            description="项目文件夹和关联记录会移入回收站，可在回收站恢复。"
+            okText="移入回收站"
+            cancelText="取消"
+            okButtonProps={{ danger: true, loading: deletingProject }}
+            onConfirm={() => void handleDeleteCurrentProject()}
+          >
+            <Button type="text" danger icon={<DeleteOutlined />} size="small" title="删除项目" loading={deletingProject} />
+          </Popconfirm>
+          <Button
+            type="text"
+            icon={<CloseOutlined />}
+            onClick={onClose}
+            size="small"
+            style={{ transition: 'transform 0.15s ease, background 0.15s ease' }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = 'rotate(90deg)'; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'rotate(0deg)'; }}
+          />
+        </Space>
       </div>
 
       {contentReady ? (

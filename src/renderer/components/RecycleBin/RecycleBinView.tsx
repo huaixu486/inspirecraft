@@ -19,6 +19,7 @@ interface RecycleBinEntry {
   name: string;
   originalPath: string;
   isDirectory: boolean;
+  isProject?: boolean;
   deletedAt: string;
   size: number;
 }
@@ -98,7 +99,9 @@ const RecycleBinView: React.FC<RecycleBinViewProps> = ({ onBack }) => {
       ellipsis: true,
       render: (_: unknown, record: RecycleBinEntry) => (
         <Space size={8}>
-          {record.isDirectory
+          {record.isProject
+            ? <FolderOutlined style={{ color: '#1677ff', fontSize: 16 }} />
+            : record.isDirectory
             ? <FolderOutlined style={{ color: '#d48806', fontSize: 16 }} />
             : <FileOutlined style={{ color: '#1677ff', fontSize: 16 }} />
           }
@@ -141,7 +144,7 @@ const RecycleBinView: React.FC<RecycleBinViewProps> = ({ onBack }) => {
       width: 80,
       render: (_: unknown, record: RecycleBinEntry) => (
         <Tag color={record.isDirectory ? 'orange' : 'blue'}>
-          {record.isDirectory ? '文件夹' : '文件'}
+          {record.isProject ? '项目' : record.isDirectory ? '文件夹' : '文件'}
         </Tag>
       ),
     },
