@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Badge, Button, Empty, List, Popover, Space, Tag, Typography } from 'antd';
-import { BellOutlined, CheckOutlined } from '@ant-design/icons';
+import { Badge, Button, Empty, List, Popover, Progress, Space, Tabs, Tag, Typography } from 'antd';
+import { BellOutlined, CheckCircleOutlined, CheckOutlined, CloseCircleOutlined, CloseOutlined, LoadingOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
@@ -12,7 +12,7 @@ type NotificationTarget = 'overview' | 'project-plan' | 'project-report' | 'proj
 
 type NotificationItem = {
   id: string;
-  type: 'report' | 'review' | 'deadline' | 'ai';
+  type: 'report' | 'review' | 'deadline';
   severity: 'high' | 'medium' | 'low';
   title: string;
   description: string;
@@ -64,7 +64,6 @@ const typeLabel: Record<NotificationItem['type'], string> = {
   report: '\u62a5\u544a',
   review: '\u5ba1\u67e5',
   deadline: '\u622a\u6b62',
-  ai: 'AI',
 };
 
 const aiSceneLabel: Record<AIJob['scene'], string> = {
@@ -81,33 +80,15 @@ const aiSceneLabel: Record<AIJob['scene'], string> = {
   general: 'AI 处理',
 };
 
-const buildAIJobNotification = (job: AIJob): NotificationItem | null => {
-  if (job.status !== 'running' && job.status !== 'completed' && job.status !== 'failed') return null;
-  const action = aiSceneLabel[job.scene] || 'AI 处理';
-  const createdAt = job.status === 'completed' || job.status === 'failed'
-    ? job.finishedAt || job.updatedAt
-    : job.startedAt || job.updatedAt;
-  const statusLabel = job.status === 'running' ? '开始' : job.status === 'completed' ? '完成' : '失败';
-  const usage = job.tokenUsage && job.tokenUsage.totalTokens > 0
-    ? `输入 ${job.tokenUsage.inputTokens.toLocaleString()} / 输出 ${job.tokenUsage.outputTokens.toLocaleString()}，共 ${job.tokenUsage.totalTokens.toLocaleString()} Token${job.tokenUsage.source === 'estimated' ? '（估算）' : ''}`
-    : '';
-  return {
-    id: `ai-${job.id}-${job.status}-${createdAt}`,
-    type: 'ai',
-    severity: job.status === 'failed' ? 'high' : job.status === 'running' ? 'medium' : 'low',
-    title: `${action}${statusLabel}`,
-    description: job.status === 'failed'
-      ? job.error || '请检查网络或模型配置后重试。'
-      : job.status === 'running'
-        ? job.title || '正在等待模型返回结果。'
-        : [job.title, usage].filter(Boolean).join(' · '),
-    projectId: job.projectId,
-    target: 'overview',
-    createdAt,
-    // AI 调用已经由主进程发送 Windows 通知，通知中心只保留应用内消息。
-    native: false,
-  };
+const aiStatusMeta: Record<AIJob['status'], { label: string; color: string; icon?: React.ReactNode }> = {
+  queued: { label: '排队中', color: 'default' },
+  running: { label: '进行中', color: 'processing', icon: <LoadingOutlined /> },
+  completed: { label: '已完成', color: 'success', icon: <CheckCircleOutlined /> },
+  failed: { label: '失败', color: 'error', icon: <CloseCircleOutlined /> },
+  cancelled: { label: '已取消', color: 'default' },
 };
+
+const isActiveAIJob = (job: AIJob) => job.status === 'queued' || job.status === 'running';
 
 const buildLatestReportNotification = (projectId: string, projectName: string, docs: ProjectDocument[]): NotificationItem | null => {
   const reportDocs = docs
@@ -187,13 +168,15 @@ const NotificationCenter: React.FC<Props> = ({ onOpenTarget }) => {
   const { projects } = useProjectStore();
   const { reviews } = useTemplateStore();
   const { projectDocs } = useProjectDocStore();
-  const aiJobs = useAIJobStore(state => state.jobs);
+  const { jobs: aiJobs, cancelJob, retryJob, clearJob, syncExternalActivity } = useAIJobStore();
   const { enableSystemNotifications } = useSettingsStore();
   const [open, setOpen] = useState(false);
   const [readIds, setReadIds] = useState<Set<string>>(() => loadIdSet(READ_KEY));
   const nativeIdsRef = useRef<Set<string>>(loadIdSet(NATIVE_KEY));
   const didPrimeNativeRef = useRef(false);
   const listScrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => window.electronAPI.onAIActivity?.(syncExternalActivity), [syncExternalActivity]);
 
   const items = useMemo(() => {
     const list: NotificationItem[] = [];
@@ -205,17 +188,22 @@ const NotificationCenter: React.FC<Props> = ({ onOpenTarget }) => {
       const deadline = buildDeadlineNotification(project.id, project.name, projectDocs);
       if (deadline) list.push(deadline);
     });
-    aiJobs.forEach(job => {
-      const notification = buildAIJobNotification(job);
-      if (notification) list.push(notification);
-    });
-
     return list
       .sort((a, b) => safeDateMs(b.createdAt) - safeDateMs(a.createdAt))
       .slice(0, 24);
-  }, [aiJobs, projectDocs, projects, reviews]);
+  }, [projectDocs, projects, reviews]);
+
+  const sortedAIJobs = useMemo(() => {
+    const order: Record<AIJob['status'], number> = { running: 0, queued: 1, failed: 2, completed: 3, cancelled: 4 };
+    return [...aiJobs].sort((a, b) => {
+      const rank = (order[a.status] ?? 5) - (order[b.status] ?? 5);
+      return rank || safeDateMs(b.updatedAt) - safeDateMs(a.updatedAt);
+    }).slice(0, 20);
+  }, [aiJobs]);
 
   const unreadCount = items.filter(item => !readIds.has(item.id)).length;
+  const activeAICount = aiJobs.filter(job => job.status === 'queued' || job.status === 'running').length;
+  const failedAICount = aiJobs.filter(job => job.status === 'failed').length;
 
   useEffect(() => {
     if (items.length === 0) return;
@@ -293,68 +281,78 @@ const NotificationCenter: React.FC<Props> = ({ onOpenTarget }) => {
   };
 
   const content = (
-    <div
-      style={{ width: 286, maxWidth: 'calc(100vw - 48px)', overscrollBehavior: 'contain', userSelect: 'none' }}
-      onMouseDown={(event) => event.preventDefault()}
-      onWheel={handlePopoverWheel}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-        <Space size={6}>
-          <Text strong>{'\u901a\u77e5'}</Text>
-          {unreadCount > 0 && <Tag color="blue" style={{ margin: 0 }}>{unreadCount} {'\u672a\u8bfb'}</Tag>}
-        </Space>
-        <Button size="small" type="text" icon={<CheckOutlined />} onClick={markAllRead} disabled={unreadCount === 0}>
-          {'\u5df2\u8bfb'}
-        </Button>
-      </div>
-      {items.length === 0 ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={'\u6682\u65e0\u63d0\u9192'} />
-      ) : (
-        <div
-          ref={listScrollRef}
-          style={{ maxHeight: 320, overflowY: 'auto', overscrollBehavior: 'contain', paddingRight: 4 }}
-        >
-          <List
-            size="small"
-            dataSource={items.slice(0, 8)}
-            renderItem={(item) => {
-              const unread = !readIds.has(item.id);
-              return (
-                <List.Item
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => openItem(item)}
-                  style={{
-                    cursor: 'pointer',
-                    alignItems: 'flex-start',
-                    borderRadius: 7,
-                    padding: '8px 7px',
-                    background: unread ? '#f5faff' : 'transparent',
-                    borderBlockEnd: 'none',
-                    marginBottom: 3,
-                    userSelect: 'none',
-                  }}
-                >
-                  <List.Item.Meta
-                    title={
-                      <Space size={5} style={{ maxWidth: '100%' }}>
-                        {unread && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#1677ff', flexShrink: 0 }} />}
-                        <Text strong={unread} style={{ fontSize: 12, maxWidth: 188 }} ellipsis={{ tooltip: item.title }}>{item.title}</Text>
-                        <Tag color={severityColor[item.severity]} style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px' }}>{typeLabel[item.type]}</Tag>
-                      </Space>
-                    }
-                    description={
-                      <div>
-                        <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: item.description }}>{item.description}</Text>
-                        <Text type="secondary" style={{ display: 'block', fontSize: 10, marginTop: 1 }}>{formatTime(item.createdAt)}</Text>
-                      </div>
-                    }
+    <div style={{ width: 350, maxWidth: 'calc(100vw - 48px)', overscrollBehavior: 'contain', userSelect: 'none' }}>
+      <Tabs
+        size="small"
+        defaultActiveKey="system"
+        items={[
+          {
+            key: 'system',
+            label: <Space size={5}>系统{unreadCount > 0 && <Tag color="blue" style={{ margin: 0 }}>{unreadCount}</Tag>}</Space>,
+            children: <>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
+                <Button size="small" type="text" icon={<CheckOutlined />} onClick={markAllRead} disabled={unreadCount === 0}>全部已读</Button>
+              </div>
+              {items.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无系统提醒" /> : (
+                <div ref={listScrollRef} style={{ maxHeight: 320, overflowY: 'auto', overscrollBehavior: 'contain', paddingRight: 4 }} onWheel={handlePopoverWheel}>
+                  <List
+                    size="small"
+                    dataSource={items.slice(0, 10)}
+                    renderItem={(item) => {
+                      const unread = !readIds.has(item.id);
+                      return (
+                        <List.Item
+                          onClick={() => openItem(item)}
+                          style={{ cursor: 'pointer', alignItems: 'flex-start', borderRadius: 7, padding: '8px 7px', background: unread ? '#f5faff' : 'transparent', borderBlockEnd: 'none', marginBottom: 3 }}
+                        >
+                          <List.Item.Meta
+                            title={<Space size={5} style={{ maxWidth: '100%' }}>{unread && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#1677ff', flexShrink: 0 }} />}<Text strong={unread} style={{ fontSize: 12, maxWidth: 188 }} ellipsis={{ tooltip: item.title }}>{item.title}</Text><Tag color={severityColor[item.severity]} style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px' }}>{typeLabel[item.type]}</Tag></Space>}
+                            description={<div><Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: item.description }}>{item.description}</Text><Text type="secondary" style={{ display: 'block', fontSize: 10, marginTop: 1 }}>{formatTime(item.createdAt)}</Text></div>}
+                          />
+                        </List.Item>
+                      );
+                    }}
                   />
-                </List.Item>
-              );
-            }}
-          />
-        </div>
-      )}
+                </div>
+              )}
+            </>,
+          },
+          {
+            key: 'ai',
+            label: <Space size={5}>AI{activeAICount > 0 && <Tag color="processing" style={{ margin: 0 }}>{activeAICount}</Tag>}{failedAICount > 0 && <Tag color="error" style={{ margin: 0 }}>{failedAICount}</Tag>}</Space>,
+            children: sortedAIJobs.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 AI 任务" /> : (
+              <div style={{ maxHeight: 350, overflowY: 'auto', overscrollBehavior: 'contain', paddingRight: 4 }}>
+                <List
+                  size="small"
+                  dataSource={sortedAIJobs}
+                  renderItem={(job) => {
+                    const meta = aiStatusMeta[job.status];
+                    const canRetry = job.status === 'failed' && job.canRetry;
+                    const usage = job.tokenUsage && job.tokenUsage.totalTokens > 0
+                      ? `Token ${job.tokenUsage.totalTokens.toLocaleString()}（入 ${job.tokenUsage.inputTokens.toLocaleString()} / 出 ${job.tokenUsage.outputTokens.toLocaleString()}）${job.tokenUsage.source === 'estimated' ? ' 估算' : ''}`
+                      : '';
+                    return (
+                      <List.Item
+                        style={{ alignItems: 'flex-start', borderRadius: 7, padding: '8px 7px', borderBlockEnd: 'none', marginBottom: 3, background: job.status === 'failed' ? '#fff2f0' : isActiveAIJob(job) ? '#f5faff' : 'transparent' }}
+                        actions={[
+                          isActiveAIJob(job) && <Button key="cancel" size="small" type="text" danger icon={<StopOutlined />} onClick={() => cancelJob(job.id)}>取消</Button>,
+                          canRetry && <Button key="retry" size="small" type="text" icon={<ReloadOutlined />} onClick={() => void retryJob(job.id)}>重试</Button>,
+                          !isActiveAIJob(job) && <Button key="dismiss" size="small" type="text" icon={<CloseOutlined style={{ fontSize: 10 }} />} onClick={() => clearJob(job.id)} style={{ padding: '0 4px' }} />,
+                        ].filter(Boolean)}
+                      >
+                        <List.Item.Meta
+                          title={<Space size={5} style={{ maxWidth: '100%' }}><Text strong style={{ maxWidth: 170, fontSize: 12 }} ellipsis={{ tooltip: job.title }}>{aiSceneLabel[job.scene]}</Text><Tag icon={meta.icon} color={meta.color} style={{ margin: 0, fontSize: 10, lineHeight: '16px', padding: '0 5px' }}>{meta.label}</Tag></Space>}
+                          description={<div><Text type={job.status === 'failed' ? 'danger' : 'secondary'} style={{ display: 'block', fontSize: 11 }} ellipsis={{ tooltip: job.error || job.resultPreview || job.title }}>{job.error || job.resultPreview || job.title}</Text>{isActiveAIJob(job) && <Progress percent={job.progress} size="small" showInfo={false} style={{ margin: '3px 0 1px' }} />}<Text type="secondary" style={{ display: 'block', fontSize: 10, marginTop: 1 }}>{formatTime(job.finishedAt || job.startedAt || job.createdAt)}{usage ? ` · ${usage}` : ''}</Text></div>}
+                        />
+                      </List.Item>
+                    );
+                  }}
+                />
+              </div>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 

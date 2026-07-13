@@ -13,7 +13,6 @@ import {
 } from '@ant-design/icons';
 import Overview from './components/Overview/Overview';
 import NotificationCenter from './components/Notifications/NotificationCenter';
-import AIJobCenter from './components/Notifications/AIJobCenter';
 import ProjectFileExplorer from './components/ProjectList/ProjectFileExplorer';
 import { useProjectStore } from './stores/projectStore';
 import { useTemplateStore } from './stores/templateStore';
@@ -1028,7 +1027,6 @@ const App: React.FC = () => {
         </div>
 
         <Space size={8}>
-          <AIJobCenter />
           <NotificationCenter onOpenTarget={handleOpenNotificationTarget} />
           <Popover open={friendPopoverOpen} onOpenChange={(open) => { setFriendPopoverOpen(open); if (open) void refreshLanFriends(); }} trigger="click" placement="bottomRight" content={friendPopoverContent} arrow overlayStyle={{ maxWidth: 306 }}>
             <Badge count={onlineFriendCount + pendingRequestCount} size="small" overflowCount={9} offset={[-2, 4]}>
