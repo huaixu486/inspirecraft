@@ -40,6 +40,8 @@ interface ElectronAPI {
   openFiles: (filters?: any[]) => Promise<string[] | null>;
   openInExplorer: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
   openFileWithApp: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  compressToZip: (sourcePath: string) => Promise<{ success: boolean; filePath?: string; fileName?: string; error?: string }>;
+  extractZip: (zipPath: string) => Promise<{ success: boolean; targetPath?: string; fileCount?: number; error?: string }>;
     startDrag: (filePath: string) => { success: boolean; error?: string };
   getPathForFile: (file: File) => string;
   renameFile: (params: { filePath: string; newName: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
@@ -135,7 +137,7 @@ interface ElectronAPI {
   removeCollaborationFriend?: (friendId: string) => Promise<{ success: boolean; friends?: CollaborationPeerInfo[]; error?: string }>;
   sendCollaborationFile?: (params: { endpoint?: string; friendId?: string; filePath: string; projectName?: string; senderName?: string }) => Promise<{ success: boolean; result?: any; error?: string }>;
   onCollaborationPeersChanged?: (callback: (payload: { peers?: CollaborationPeerInfo[]; friends?: CollaborationPeerInfo[] }) => void) => () => void;
-  onCollaborationFileReceived?: (callback: (payload: { filePath?: string; fileName?: string; size?: number; senderName?: string; projectName?: string; receivedAt?: string }) => void) => () => void;
+  onCollaborationFileReceived?: (callback: (payload: { filePath?: string; fileName?: string; size?: number; isDirectory?: boolean; fileCount?: number; senderName?: string; projectName?: string; receivedAt?: string }) => void) => () => void;
   onCollaborationTaskReceived?: (callback: (payload: { task?: any; projectName?: string; senderName?: string; sentAt?: string }) => void) => () => void;
   onCollaborationChatReceived?: (callback: (message: CollaborationChatMessage) => void) => () => void;
   sendFriendRequest?: (params: { targetId: string; targetHost: string; targetPort: number; message?: string }) => Promise<{ success: boolean; request?: any; error?: string }>;

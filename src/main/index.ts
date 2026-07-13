@@ -49,6 +49,14 @@ let collaborationDiscoveryTimer: NodeJS.Timeout | null = null;
 const COLLABORATION_DISCOVERY_PORT = 39219;
 const COLLABORATION_PEER_TTL_MS = 12000;
 const discoveredCollaborationPeers = new Map<string, LanPeerRecord>();
+const incomingFolderTransfers = new Map<string, {
+  rootPath: string;
+  expiresAt: number;
+  senderId: string;
+  senderName: string;
+  projectName: string;
+  folderName: string;
+}>();
 
 type CollaborationTaskPayload = {
   task?: TaskItem;
@@ -113,6 +121,12 @@ type CollaborationFileSendParams = {
   senderName?: string;
 };
 
+type CollaborationFolderEntry = {
+  relativePath: string;
+  isDirectory: boolean;
+  fullPath: string;
+};
+
 function getLanAddresses() {
   const addresses: string[] = [];
   const interfaces = os.networkInterfaces();
@@ -147,6 +161,46 @@ function writeJson(res: http.ServerResponse, statusCode: number, payload: any) {
     'Access-Control-Allow-Origin': '*',
   });
   res.end(body);
+}
+
+function getSafeTransferRelativePath(value: string) {
+  const normalized = String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!normalized || normalized.includes('\0')) throw new Error('Invalid transfer path');
+  const parts = normalized.split('/');
+  if (parts.some(part => !part || part === '.' || part === '..')) throw new Error('Unsafe transfer path');
+  return parts.join('/');
+}
+
+function resolveFolderTransferPath(rootPath: string, relativePath: string) {
+  const safeRelativePath = getSafeTransferRelativePath(relativePath);
+  const outputPath = path.resolve(rootPath, safeRelativePath);
+  const safety = checkPathInside(outputPath, rootPath);
+  if (!safety.ok) throw new Error('Unsafe transfer path');
+  return outputPath;
+}
+
+function writeIncomingStream(req: http.IncomingMessage, outputPath: string) {
+  const temporaryPath = `${outputPath}.part-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return new Promise<{ size: number }>((resolve, reject) => {
+    let size = 0;
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    const output = fs.createWriteStream(temporaryPath);
+    req.on('data', chunk => { size += Buffer.byteLength(chunk); });
+    req.on('error', reject);
+    output.on('error', reject);
+    output.on('finish', () => {
+      try {
+        fs.renameSync(temporaryPath, outputPath);
+        resolve({ size });
+      } catch (error) {
+        reject(error);
+      }
+    });
+    req.pipe(output);
+  }).catch(error => {
+    try { if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath); } catch {}
+    throw error;
+  });
 }
 
 const normalizeCollaborationEmail = (value?: string) => String(value || '').trim().toLowerCase();
@@ -355,6 +409,54 @@ function getUniqueTransferPath(targetPath: string) {
   return base + ' (' + index + ')' + ext;
 }
 
+function getUniqueDirectoryPath(targetPath: string) {
+  if (!fs.existsSync(targetPath)) return targetPath;
+  let index = 1;
+  while (fs.existsSync(`${targetPath} (${index})`)) index += 1;
+  return `${targetPath} (${index})`;
+}
+
+async function createZipArchiveFromPath(sourcePath: string, outputPath: string) {
+  const stat = fs.statSync(sourcePath);
+  if (!stat.isFile() && !stat.isDirectory()) throw new Error('Only files and folders can be compressed');
+
+  const zip = new JSZip();
+  const sourceName = path.basename(sourcePath);
+  if (stat.isDirectory()) {
+    // Keep the selected folder itself as the top-level entry so a received/extracted
+    // folder never spills its contents into the current directory.
+    zip.folder(sourceName);
+    addFolderToZip(zip, sourcePath, path.dirname(sourcePath));
+  } else {
+    zip.file(sourceName, fs.readFileSync(sourcePath));
+  }
+  const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  fs.writeFileSync(outputPath, buffer);
+  return outputPath;
+}
+
+async function extractZipArchiveToNewFolder(zipPath: string) {
+  if (path.extname(zipPath).toLowerCase() !== '.zip') throw new Error('Only ZIP archives are supported');
+  const targetPath = getUniqueDirectoryPath(path.join(path.dirname(zipPath), path.basename(zipPath, '.zip')));
+  const zip = await JSZip.loadAsync(fs.readFileSync(zipPath));
+  const files: Array<{ entryPath: string; entry: any; outputPath: string }> = [];
+
+  zip.forEach((entryPath: string, entry: any) => {
+    if (entry.dir) return;
+    const outputPath = path.resolve(targetPath, entryPath);
+    const safety = checkPathInside(outputPath, targetPath);
+    if (!safety.ok) throw new Error(`Unsafe archive path: ${entryPath}`);
+    files.push({ entryPath, entry, outputPath });
+  });
+
+  fs.mkdirSync(targetPath, { recursive: true });
+  for (const file of files) {
+    fs.mkdirSync(path.dirname(file.outputPath), { recursive: true });
+    fs.writeFileSync(file.outputPath, await file.entry.async('nodebuffer'));
+  }
+  return { targetPath, fileCount: files.length };
+}
+
 function getIncomingFilesDir() {
   const dir = path.join(app.getPath('downloads'), 'ProjectHub Received');
   fs.mkdirSync(dir, { recursive: true });
@@ -391,13 +493,126 @@ function saveIncomingCollaborationFile(req: http.IncomingMessage, requestUrl: UR
   });
 }
 
-function sendFileToPeer(params: CollaborationFileSendParams) {
-  const stat = fs.statSync(params.filePath);
-  if (stat.isDirectory()) throw new Error('Folder transfer is not supported yet');
+function collectFolderTransferEntries(folderPath: string, basePath = folderPath): CollaborationFolderEntry[] {
+  const entries: CollaborationFolderEntry[] = [];
+  for (const entry of fs.readdirSync(folderPath, { withFileTypes: true })) {
+    const fullPath = path.join(folderPath, entry.name);
+    const relativePath = path.relative(basePath, fullPath).replace(/\\/g, '/');
+    // Do not follow symbolic links: a transfer must only contain the folder the
+    // sender explicitly selected, not arbitrary files referenced by a link.
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) {
+      entries.push({ fullPath, relativePath, isDirectory: true });
+      entries.push(...collectFolderTransferEntries(fullPath, basePath));
+    } else if (entry.isFile()) {
+      entries.push({ fullPath, relativePath, isDirectory: false });
+    }
+  }
+  return entries;
+}
+
+function sendCollaborationJson(url: URL, payload: any) {
+  const body = Buffer.from(JSON.stringify(payload));
+  return new Promise<any>((resolve, reject) => {
+    const req = http.request({
+      hostname: url.hostname,
+      port: url.port || 80,
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': body.length },
+    }, res => {
+      let response = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { response += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(response || '{}');
+          if (res.statusCode && res.statusCode >= 400) reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+          else resolve(parsed);
+        } catch {
+          reject(new Error(`Invalid response from peer${res.statusCode ? ` (HTTP ${res.statusCode})` : ''}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+function sendFolderFileToPeer(url: URL, transferId: string, entry: CollaborationFolderEntry) {
+  const stat = fs.statSync(entry.fullPath);
+  return new Promise<any>((resolve, reject) => {
+    const req = http.request({
+      hostname: url.hostname,
+      port: url.port || 80,
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': stat.size,
+        'X-ProjectHub-Folder-Transfer-Id': encodeURIComponent(transferId),
+        'X-ProjectHub-Relative-Path': encodeURIComponent(entry.relativePath),
+      },
+    }, res => {
+      let response = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { response += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(response || '{}');
+          if (res.statusCode && res.statusCode >= 400) reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+          else resolve(parsed);
+        } catch {
+          if (res.statusCode && res.statusCode >= 400) reject(new Error(`HTTP ${res.statusCode}`));
+          else resolve({ success: true });
+        }
+      });
+    });
+    req.on('error', reject);
+    fs.createReadStream(entry.fullPath).on('error', reject).pipe(req);
+  });
+}
+
+async function sendFolderToPeer(params: CollaborationFileSendParams) {
+  const identity = requireCollaborationEmail();
+  const entries = collectFolderTransferEntries(params.filePath);
+  const baseUrl = resolveCollaborationTarget(params);
+  const initUrl = new URL(baseUrl.toString());
+  initUrl.pathname = '/folders/init';
+  const init = await sendCollaborationJson(initUrl, {
+    fromId: identity.id,
+    folderName: path.basename(params.filePath),
+    senderName: params.senderName || identity.name,
+    projectName: params.projectName || '',
+  });
+  if (!init?.success || !init.transferId) throw new Error(init?.error || 'Failed to start folder transfer');
+
+  const directoryUrl = new URL(baseUrl.toString());
+  directoryUrl.pathname = '/folders/directory';
+  const fileUrl = new URL(baseUrl.toString());
+  fileUrl.pathname = '/folders/file';
+  for (const entry of entries.filter(item => item.isDirectory)) {
+    await sendCollaborationJson(directoryUrl, { transferId: init.transferId, relativePath: entry.relativePath });
+  }
+  for (const entry of entries.filter(item => !item.isDirectory)) {
+    await sendFolderFileToPeer(fileUrl, init.transferId, entry);
+  }
+  const completeUrl = new URL(baseUrl.toString());
+  completeUrl.pathname = '/folders/complete';
+  await sendCollaborationJson(completeUrl, { transferId: init.transferId, fileCount: entries.filter(item => !item.isDirectory).length });
+  return { success: true, transferKind: 'folder', originalName: path.basename(params.filePath), fileCount: entries.filter(item => !item.isDirectory).length };
+}
+
+async function sendFileToPeer(params: CollaborationFileSendParams) {
+  const sourceStat = fs.statSync(params.filePath);
+  if (!sourceStat.isFile() && !sourceStat.isDirectory()) throw new Error('Only files and folders can be sent');
+  if (sourceStat.isDirectory()) return sendFolderToPeer(params);
+
+  const stat = sourceStat;
   const url = resolveCollaborationTarget(params);
   url.pathname = '/files';
   const fileName = path.basename(params.filePath);
-  return new Promise<any>((resolve, reject) => {
+  const result = await new Promise<any>((resolve, reject) => {
     const req = http.request({
       hostname: url.hostname,
       port: url.port || 80,
@@ -428,6 +643,7 @@ function sendFileToPeer(params: CollaborationFileSendParams) {
     req.on('error', reject);
     fs.createReadStream(params.filePath).on('error', reject).pipe(req);
   });
+  return { ...result, transferKind: 'file', originalName: path.basename(params.filePath) };
 }
 
 function normalizeCollaborationEndpoint(endpoint: string) {
@@ -478,6 +694,59 @@ function createCollaborationHttpServer() {
       if (req.method === 'POST' && requestUrl.pathname === '/files') {
         const file = await saveIncomingCollaborationFile(req, requestUrl);
         return writeJson(res, 200, { success: true, file });
+      }
+      if (req.method === 'POST' && requestUrl.pathname === '/folders/init') {
+        const payload = JSON.parse(await readRequestBody(req) || '{}');
+        const friend = getCollaborationFriends().find(item => item.id === payload.fromId && item.status === 'accepted');
+        if (!friend) return writeJson(res, 403, { success: false, error: 'Folder sender is not an accepted friend' });
+        const folderName = sanitizeTransferFileName(String(payload.folderName || 'Shared folder'));
+        const rootPath = getUniqueDirectoryPath(path.join(getIncomingFilesDir(), folderName));
+        const transferId = `folder-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+        fs.mkdirSync(rootPath, { recursive: true });
+        incomingFolderTransfers.set(transferId, {
+          rootPath,
+          expiresAt: Date.now() + 30 * 60 * 1000,
+          senderId: friend.id,
+          senderName: String(payload.senderName || friend.name),
+          projectName: String(payload.projectName || ''),
+          folderName,
+        });
+        return writeJson(res, 200, { success: true, transferId });
+      }
+      if (req.method === 'POST' && requestUrl.pathname === '/folders/directory') {
+        const payload = JSON.parse(await readRequestBody(req) || '{}');
+        const transfer = incomingFolderTransfers.get(String(payload.transferId || ''));
+        if (!transfer || transfer.expiresAt < Date.now()) return writeJson(res, 404, { success: false, error: 'Folder transfer expired' });
+        const directoryPath = resolveFolderTransferPath(transfer.rootPath, String(payload.relativePath || ''));
+        fs.mkdirSync(directoryPath, { recursive: true });
+        return writeJson(res, 200, { success: true });
+      }
+      if (req.method === 'POST' && requestUrl.pathname === '/folders/file') {
+        const transferIdHeader = Array.isArray(req.headers['x-projecthub-folder-transfer-id']) ? req.headers['x-projecthub-folder-transfer-id'][0] : req.headers['x-projecthub-folder-transfer-id'];
+        const relativePathHeader = Array.isArray(req.headers['x-projecthub-relative-path']) ? req.headers['x-projecthub-relative-path'][0] : req.headers['x-projecthub-relative-path'];
+        const transfer = incomingFolderTransfers.get(decodeURIComponent(String(transferIdHeader || '')));
+        if (!transfer || transfer.expiresAt < Date.now()) return writeJson(res, 404, { success: false, error: 'Folder transfer expired' });
+        const outputPath = resolveFolderTransferPath(transfer.rootPath, decodeURIComponent(String(relativePathHeader || '')));
+        const file = await writeIncomingStream(req, outputPath);
+        return writeJson(res, 200, { success: true, file });
+      }
+      if (req.method === 'POST' && requestUrl.pathname === '/folders/complete') {
+        const payload = JSON.parse(await readRequestBody(req) || '{}');
+        const transferId = String(payload.transferId || '');
+        const transfer = incomingFolderTransfers.get(transferId);
+        if (!transfer || transfer.expiresAt < Date.now()) return writeJson(res, 404, { success: false, error: 'Folder transfer expired' });
+        incomingFolderTransfers.delete(transferId);
+        const fileCount = Math.max(0, Number(payload.fileCount) || 0);
+        mainWindow?.webContents.send('collaboration:fileReceived', {
+          filePath: transfer.rootPath,
+          fileName: transfer.folderName,
+          isDirectory: true,
+          fileCount,
+          senderName: transfer.senderName,
+          projectName: transfer.projectName,
+          receivedAt: new Date().toISOString(),
+        });
+        return writeJson(res, 200, { success: true });
       }
       if (req.method === 'POST' && requestUrl.pathname === '/chat') {
         const payload = JSON.parse(await readRequestBody(req) || '{}');
@@ -5499,6 +5768,37 @@ function addFolderToZip(zip: any, folderPath: string, basePath: string) {
     }
   }
 }
+
+// File-detail quick archive actions. Output stays inside the configured workspace.
+ipcMain.handle('file:compressToZip', async (_event: any, sourcePath: string) => {
+  try {
+    const sourceCheck = checkWithinWorkspace(sourcePath);
+    if (!sourceCheck.ok) return { success: false, error: sourceCheck.error };
+    if (!fs.existsSync(sourcePath)) return { success: false, error: 'File or folder does not exist' };
+    const outputPath = getUniqueTransferPath(path.join(path.dirname(sourcePath), `${path.basename(sourcePath)}.zip`));
+    const outputCheck = checkWithinWorkspace(outputPath);
+    if (!outputCheck.ok) return { success: false, error: outputCheck.error };
+    await createZipArchiveFromPath(sourcePath, outputPath);
+    return { success: true, filePath: outputPath, fileName: path.basename(outputPath) };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+// Extract into a new sibling folder to avoid overwriting files in the current view.
+ipcMain.handle('file:extractZip', async (_event: any, zipPath: string) => {
+  try {
+    const zipCheck = checkWithinWorkspace(zipPath);
+    if (!zipCheck.ok) return { success: false, error: zipCheck.error };
+    if (!fs.existsSync(zipPath)) return { success: false, error: 'ZIP archive does not exist' };
+    const result = await extractZipArchiveToNewFolder(zipPath);
+    const outputCheck = checkWithinWorkspace(result.targetPath);
+    if (!outputCheck.ok) return { success: false, error: outputCheck.error };
+    return { success: true, ...result };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
 
 function escapeXml(value: string = ''): string {
   return value

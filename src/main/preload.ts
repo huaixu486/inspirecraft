@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFiles: (filters?: any[]) => ipcRenderer.invoke('dialog:openFiles', filters),
   openInExplorer: (folderPath: string) => ipcRenderer.invoke('file:openInExplorer', folderPath),
   openFileWithApp: (filePath: string) => ipcRenderer.invoke('file:openWithDefaultApp', filePath),
+  compressToZip: (sourcePath: string) => ipcRenderer.invoke('file:compressToZip', sourcePath),
+  extractZip: (zipPath: string) => ipcRenderer.invoke('file:extractZip', zipPath),
   startDrag: (filePath: string) => ipcRenderer.sendSync('shell:startDrag', filePath),
   getPathForFile: (file: any) => webUtils.getPathForFile(file),
   renameFile: (params: { filePath: string; newName: string }) => ipcRenderer.invoke('file:rename', params),

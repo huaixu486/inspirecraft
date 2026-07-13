@@ -8,7 +8,7 @@ import {
   FileExcelOutlined, FilePptOutlined, ArrowLeftOutlined, PlusOutlined,
   ReloadOutlined, FileWordOutlined, DeleteOutlined, FolderOpenOutlined, UndoOutlined,
   ImportOutlined, FolderAddOutlined, SearchOutlined, EditOutlined, CheckCircleOutlined,
-  ExperimentOutlined, SendOutlined, CopyOutlined, ExportOutlined,
+  ExperimentOutlined, SendOutlined, CopyOutlined, ExportOutlined, FileZipOutlined,
 } from '@ant-design/icons';
 import { Project, ProjectDocument, WorkbenchFocus } from '../../../shared/types';
 import { useTemplateStore } from '../../stores/templateStore';
@@ -710,8 +710,29 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
     }
   };
 
+  const handleCompressItem = async (item: FileItem) => {
+    const result = await window.electronAPI.compressToZip(item.path);
+    if (!result.success || !result.filePath) {
+      message.error(result.error || '压缩失败');
+      return;
+    }
+    message.success(`已创建压缩包：${result.fileName || getFileNameFromPath(result.filePath)}`);
+    await loadContents();
+    void loadTreeStats();
+  };
+
+  const handleExtractZipItem = async (item: FileItem) => {
+    const result = await window.electronAPI.extractZip(item.path);
+    if (!result.success || !result.targetPath) {
+      message.error(result.error || '解压失败');
+      return;
+    }
+    message.success(`已解压 ${result.fileCount || 0} 个文件到：${getFileNameFromPath(result.targetPath)}`);
+    await loadContents();
+    void loadTreeStats();
+  };
+
   const handleOpenShareModal = async (item: FileItem) => {
-    if (item.isDirectory) return;
     try {
       const result = await window.electronAPI.listCollaborationFriends?.();
       const friends = (result?.friends || []).map(friend => ({ id: friend.id, name: friend.name || friend.deviceName || friend.id, online: friend.online }));
@@ -741,7 +762,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
         message.error(result?.error || '文件发送失败');
         return;
       }
-      message.success(`已发送「${shareItem.name}」`);
+      message.success(shareItem.isDirectory ? `已发送文件夹「${shareItem.name}」` : `已发送「${shareItem.name}」`);
       setShareItem(null);
     } finally {
       setShareSending(false);
@@ -753,11 +774,13 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
       { key: 'open', icon: <ExportOutlined />, label: item.isDirectory ? '打开文件夹' : '打开文件', onClick: () => void handleOpenFile(item) },
       { key: 'reveal', icon: <FolderOpenOutlined />, label: '在文件资源管理器中显示', onClick: () => void handleShowItemInExplorer(item) },
       { key: 'copy-path', icon: <CopyOutlined />, label: '复制完整路径', onClick: () => void handleCopyItemPath(item) },
-      !item.isDirectory && { type: 'divider' as const },
+      { key: 'compress', icon: <FileZipOutlined />, label: '压缩为 ZIP', onClick: () => void handleCompressItem(item) },
+      !item.isDirectory && item.ext.toLowerCase() === '.zip' && { key: 'extract', icon: <FileZipOutlined />, label: '解压到同名文件夹', onClick: () => void handleExtractZipItem(item) },
+      { type: 'divider' as const },
       !item.isDirectory && { key: 'writing', icon: <EditOutlined />, label: '发送到团队写作', onClick: () => void handleSendToWorkbench(item, 'team') },
       !item.isDirectory && { key: 'review', icon: <CheckCircleOutlined />, label: '发送到审阅', onClick: () => void handleSendToWorkbench(item, 'review') },
       !item.isDirectory && { key: 'report', icon: <ExperimentOutlined />, label: '发送到报告工作台', onClick: () => void handleSendToWorkbench(item, 'report') },
-      !item.isDirectory && { key: 'share', icon: <SendOutlined />, label: '发送给好友…', onClick: () => void handleOpenShareModal(item) },
+      { key: 'share', icon: <SendOutlined />, label: item.isDirectory ? '发送文件夹给好友…' : '发送给好友…', onClick: () => void handleOpenShareModal(item) },
     ].filter(Boolean) as any[],
   });
 
@@ -1803,7 +1826,9 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
         okButtonProps={{ disabled: !shareFriendId }}
         destroyOnClose
       >
-        <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>选择要接收当前文件的好友</Text>
+        <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+          {shareItem?.isDirectory ? '文件夹将保留原始目录结构直接发送给好友' : '选择要接收当前文件的好友'}
+        </Text>
         <Select
           value={shareFriendId || undefined}
           onChange={setShareFriendId}

@@ -284,7 +284,7 @@ const App: React.FC = () => {
     }
   }, [chatDraft, chatFriend]);
 
-  const sendChatFile = useCallback(async () => {
+  const sendChatAttachment = useCallback(async (filePath: string, isDirectory: boolean) => {
     if (!chatFriend) {
       message.warning('请先选择一位好友');
       return;
@@ -293,9 +293,6 @@ const App: React.FC = () => {
       message.warning('好友当前离线，暂不能发送文件');
       return;
     }
-    const filePath = await window.electronAPI.openFile([{ name: '所有文件', extensions: ['*'] }]);
-    if (!filePath) return;
-
     setChatFileSending(true);
     try {
       const result = await window.electronAPI.sendCollaborationFile?.({
@@ -308,11 +305,21 @@ const App: React.FC = () => {
         message.error(result?.error || '文件发送失败');
         return;
       }
-      message.success('文件已发送给好友');
+      message.success(isDirectory ? '文件夹已发送给好友' : '文件已发送给好友');
     } finally {
       setChatFileSending(false);
     }
   }, [chatFriend, currentProject?.name, userProfile?.nickname]);
+
+  const sendChatFile = useCallback(async () => {
+    const filePath = await window.electronAPI.openFile([{ name: '所有文件', extensions: ['*'] }]);
+    if (filePath) await sendChatAttachment(filePath, false);
+  }, [sendChatAttachment]);
+
+  const sendChatFolder = useCallback(async () => {
+    const folderPath = await window.electronAPI.openFolder();
+    if (folderPath) await sendChatAttachment(folderPath, true);
+  }, [sendChatAttachment]);
 
   const shareCurrentProjectToChat = useCallback(async () => {
     if (!chatFriend) {
@@ -369,10 +376,11 @@ const App: React.FC = () => {
     // 协作事件原生通知
     const offFile = window.electronAPI.onCollaborationFileReceived?.((payload) => {
       if (payload.fileName) {
-        message.success(`已接收文件：${payload.fileName}`);
+        const itemLabel = payload.isDirectory ? '文件夹' : '文件';
+        message.success(`已接收${itemLabel}：${payload.fileName}`);
         window.electronAPI.showSystemNotification?.({
-          title: '收到新文件',
-          body: `${payload.senderName || '好友'} 发送了 ${payload.fileName}${payload.projectName ? `（${payload.projectName}）` : ''}`,
+          title: `收到新${itemLabel}`,
+          body: `${payload.senderName || '好友'} 发送了${itemLabel}：${payload.fileName}${payload.projectName ? `（${payload.projectName}）` : ''}`,
           target: 'overview',
         });
       }
@@ -1459,6 +1467,7 @@ const App: React.FC = () => {
         onDraftChange={setChatDraft}
         onSendMessage={() => void sendChatMessage()}
         onSendFile={() => void sendChatFile()}
+        onSendFolder={() => void sendChatFolder()}
         onShareProject={() => void shareCurrentProjectToChat()}
         onOpenAddFriend={openAddFriendModal}
         onRefresh={() => {

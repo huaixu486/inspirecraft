@@ -15,6 +15,7 @@ import {
 } from 'antd';
 import {
   FileOutlined,
+  FolderOutlined,
   FolderOpenOutlined,
   MessageOutlined,
   PaperClipOutlined,
@@ -42,6 +43,7 @@ interface FriendChatWorkspaceProps {
   onDraftChange: (value: string) => void;
   onSendMessage: () => void;
   onSendFile: () => void;
+  onSendFolder: () => void;
   onShareProject: () => void;
   onOpenAddFriend: () => void;
   onRefresh: () => void;
@@ -63,6 +65,7 @@ const FriendChatWorkspace = ({
   onDraftChange,
   onSendMessage,
   onSendFile,
+  onSendFolder,
   onShareProject,
   onOpenAddFriend,
   onRefresh,
@@ -189,7 +192,8 @@ const FriendChatWorkspace = ({
                 </Space>
                 <Space size={4}>
                   <Tooltip title="将当前项目名称和进度发送到会话"><Button type="text" icon={<FolderOpenOutlined />} onClick={onShareProject}>分享项目</Button></Tooltip>
-                  <Tooltip title="选择文件并发送给该好友"><Button type="text" icon={<PaperClipOutlined />} loading={sendingFile} disabled={!selectedFriend.online} onClick={onSendFile}>发送文件</Button></Tooltip>
+                  <Tooltip title="选择文件（包括 ZIP 压缩包）并发送给该好友"><Button type="text" icon={<PaperClipOutlined />} loading={sendingFile} disabled={!selectedFriend.online} onClick={onSendFile}>发送文件</Button></Tooltip>
+                  <Tooltip title="直接发送文件夹结构，不压缩"><Button type="text" icon={<FolderOutlined />} loading={sendingFile} disabled={!selectedFriend.online} onClick={onSendFolder}>发送文件夹</Button></Tooltip>
                   <Popconfirm title="移除这位好友？" okText="移除" cancelText="取消" onConfirm={() => onRemoveFriend(selectedFriend.id)}>
                     <Tooltip title="移除好友"><Button type="text" danger icon={<UserDeleteOutlined />} /></Tooltip>
                   </Popconfirm>
@@ -238,7 +242,8 @@ const FriendChatWorkspace = ({
                 />
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
                   <Space size={4}>
-                    <Tooltip title="发送文件"><Button type="text" icon={<PaperClipOutlined />} disabled={!selectedFriend.online} onClick={onSendFile} /></Tooltip>
+                    <Tooltip title="发送文件或 ZIP 压缩包"><Button type="text" icon={<PaperClipOutlined />} disabled={!selectedFriend.online} onClick={onSendFile} /></Tooltip>
+                    <Tooltip title="直接发送文件夹，不压缩"><Button type="text" icon={<FolderOutlined />} disabled={!selectedFriend.online} onClick={onSendFolder} /></Tooltip>
                     <Tooltip title="分享当前项目"><Button type="text" icon={<FileOutlined />} onClick={onShareProject} /></Tooltip>
                     <Text type="secondary" style={{ fontSize: 11 }}>仅在局域网内传输</Text>
                   </Space>
