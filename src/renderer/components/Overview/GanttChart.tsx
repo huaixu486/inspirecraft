@@ -348,7 +348,9 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       if (!pan.dragging && Math.hypot(totalDx, totalDy) < 4) return;
       // In the compact card, a long press deliberately enters free panning.
       // Moving before the hold threshold neither pans nor opens the modal.
-      if (compact && !zoomArmedRef.current) {
+      // Once a long press has started a drag, keep that drag alive even though
+      // the visual long-press marker is cleared on its first movement.
+      if (compact && !pan.dragging && !zoomArmedRef.current) {
         clearLongPress();
         panRef.current = { ...pan, active: false };
         onDraggingChange?.(true);
