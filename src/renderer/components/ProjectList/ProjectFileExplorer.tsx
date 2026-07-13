@@ -7,14 +7,16 @@ import {
   FolderOutlined, FileTextOutlined, FilePdfOutlined, FileOutlined,
   FileExcelOutlined, FilePptOutlined, ArrowLeftOutlined, PlusOutlined,
   ReloadOutlined, FileWordOutlined, DeleteOutlined, FolderOpenOutlined, UndoOutlined,
-  ImportOutlined, FolderAddOutlined, SearchOutlined,
+  ImportOutlined, FolderAddOutlined, SearchOutlined, EditOutlined, CheckCircleOutlined,
+  ExperimentOutlined, SendOutlined, CopyOutlined, ExportOutlined,
 } from '@ant-design/icons';
-import { Project, WorkbenchFocus } from '../../../shared/types';
+import { Project, ProjectDocument, WorkbenchFocus } from '../../../shared/types';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 import { getAllStages } from '../../utils/timelineStages';
+import { useNavigationStore } from '../../stores/navigationStore';
 import WorkbenchContextBar from '../Workbench/WorkbenchContextBar';
 
 const { Text } = Typography;
@@ -156,6 +158,10 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
   const [isDraggingFileOut, setIsDraggingFileOut] = useState(false);
   const [dragOverDirPath, setDragOverDirPath] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [shareItem, setShareItem] = useState<FileItem | null>(null);
+  const [shareFriends, setShareFriends] = useState<Array<{ id: string; name: string; online?: boolean }>>([]);
+  const [shareFriendId, setShareFriendId] = useState('');
+  const [shareSending, setShareSending] = useState(false);
   const lastClickRef = React.useRef<{ path: string; time: number } | null>(null);
   const lastSelectedPathRef = useRef<string>('');
   const renameTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -189,6 +195,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
   const importZipPathRef = useRef<string>('');
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
+  const navigate = useNavigationStore(state => state.navigate);
   const { customStages, workspacePath } = useSettingsStore();
   const allStages = getAllStages(customStages);
   const highlightTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
@@ -651,6 +658,108 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
       message.error('无法打开文件');
     }
   };
+
+  const ensureProjectDocument = async (item: FileItem): Promise<ProjectDocument> => {
+    const existing = projectDocs.find(doc =>
+      doc.projectId === project.id
+      && doc.sourceFilePath
+      && normalizeFsPath(doc.sourceFilePath) === normalizeFsPath(item.path),
+    );
+    if (existing) return existing;
+
+    const now = new Date().toISOString();
+    const document: ProjectDocument = {
+      id: `linked-file-${project.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      projectId: project.id,
+      templateId: '',
+      name: item.name,
+      sections: [],
+      overallProgress: 0,
+      lifecycleStatus: 'identified',
+      lifecycleUpdatedAt: now,
+      sourceFilePath: item.path,
+      sourceFileModifiedAt: item.modifiedAt || now,
+      createdAt: now,
+    };
+    await addProjectDoc(document);
+    return document;
+  };
+
+  const handleSendToWorkbench = async (item: FileItem, target: 'team' | 'review' | 'report') => {
+    if (item.isDirectory) return;
+    try {
+      const document = await ensureProjectDocument(item);
+      navigate({ target, projectId: project.id, docId: document.id, filePath: item.path, source: 'file' });
+    } catch (error) {
+      console.error('Failed to link file to workbench:', error);
+      message.error('无法关联该文件，请稍后重试');
+    }
+  };
+
+  const handleShowItemInExplorer = async (item: FileItem) => {
+    const result = await window.electronAPI.openInExplorer(item.isDirectory ? item.path : getParentPath(item.path));
+    if (!result.success) message.error(result.error || '无法打开文件位置');
+  };
+
+  const handleCopyItemPath = async (item: FileItem) => {
+    try {
+      await navigator.clipboard.writeText(item.path);
+      message.success('已复制文件路径');
+    } catch {
+      message.error('复制路径失败');
+    }
+  };
+
+  const handleOpenShareModal = async (item: FileItem) => {
+    if (item.isDirectory) return;
+    try {
+      const result = await window.electronAPI.listCollaborationFriends?.();
+      const friends = (result?.friends || []).map(friend => ({ id: friend.id, name: friend.name || friend.deviceName || friend.id, online: friend.online }));
+      if (friends.length === 0) {
+        message.warning('暂无可发送的好友，请先在团队页面添加好友');
+        return;
+      }
+      setShareItem(item);
+      setShareFriends(friends);
+      setShareFriendId(friends.find(friend => friend.online)?.id || friends[0].id);
+    } catch (error) {
+      console.error('Failed to load collaboration friends:', error);
+      message.error('无法获取好友列表');
+    }
+  };
+
+  const handleSendFileToFriend = async () => {
+    if (!shareItem || !shareFriendId) return;
+    setShareSending(true);
+    try {
+      const result = await window.electronAPI.sendCollaborationFile?.({
+        friendId: shareFriendId,
+        filePath: shareItem.path,
+        projectName: project.name,
+      });
+      if (!result?.success) {
+        message.error(result?.error || '文件发送失败');
+        return;
+      }
+      message.success(`已发送「${shareItem.name}」`);
+      setShareItem(null);
+    } finally {
+      setShareSending(false);
+    }
+  };
+
+  const getFileContextMenu = (item: FileItem) => ({
+    items: [
+      { key: 'open', icon: <ExportOutlined />, label: item.isDirectory ? '打开文件夹' : '打开文件', onClick: () => void handleOpenFile(item) },
+      { key: 'reveal', icon: <FolderOpenOutlined />, label: '在文件资源管理器中显示', onClick: () => void handleShowItemInExplorer(item) },
+      { key: 'copy-path', icon: <CopyOutlined />, label: '复制完整路径', onClick: () => void handleCopyItemPath(item) },
+      !item.isDirectory && { type: 'divider' as const },
+      !item.isDirectory && { key: 'writing', icon: <EditOutlined />, label: '发送到团队写作', onClick: () => void handleSendToWorkbench(item, 'team') },
+      !item.isDirectory && { key: 'review', icon: <CheckCircleOutlined />, label: '发送到审阅', onClick: () => void handleSendToWorkbench(item, 'review') },
+      !item.isDirectory && { key: 'report', icon: <ExperimentOutlined />, label: '发送到报告工作台', onClick: () => void handleSendToWorkbench(item, 'report') },
+      !item.isDirectory && { key: 'share', icon: <SendOutlined />, label: '发送给好友…', onClick: () => void handleOpenShareModal(item) },
+    ].filter(Boolean) as any[],
+  });
 
   // 判断是否为外部文件拖拽。Electron/Chromium 在不同拖拽来源下 types 形态不完全一致，这里统一转数组。
   const getDragTypes = (event: React.DragEvent) => Array.from(event.dataTransfer.types || []);
@@ -1525,8 +1634,8 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
             const isDirDragOver = item.isDirectory && (internalDragOverPath === item.path || dragOverDirPath === item.path);
             const isInDrag = internalDragPaths.has(item.path);
             return (
+              <Dropdown key={item.path} menu={getFileContextMenu(item)} trigger={['contextMenu']} placement="bottomLeft">
               <div
-                key={item.path}
                 draggable={false}
                 data-folder-path={item.isDirectory ? item.path : undefined}
                 onPointerDown={(e) => handleItemPointerDown(item, e)}
@@ -1593,6 +1702,12 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
                     return;
                   }
                   handleFileClick(item, e);
+                }}
+                onContextMenu={() => {
+                  if (!selectedPaths.has(item.path) || selectedPaths.size !== 1) {
+                    setSelectedPaths(new Set([item.path]));
+                    lastSelectedPathRef.current = item.path;
+                  }
                 }}
                 onDoubleClick={(e) => {
                   e.preventDefault();
@@ -1671,10 +1786,36 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
                   </Popconfirm>
                 </div>
               </div>
+              </Dropdown>
             );
           })}
         </div>
       )}
+
+      <Modal
+        title={shareItem ? `发送给好友：${shareItem.name}` : '发送给好友'}
+        open={Boolean(shareItem)}
+        onCancel={() => !shareSending && setShareItem(null)}
+        onOk={() => void handleSendFileToFriend()}
+        okText="发送"
+        cancelText="取消"
+        confirmLoading={shareSending}
+        okButtonProps={{ disabled: !shareFriendId }}
+        destroyOnClose
+      >
+        <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>选择要接收当前文件的好友</Text>
+        <Select
+          value={shareFriendId || undefined}
+          onChange={setShareFriendId}
+          style={{ width: '100%' }}
+          placeholder="选择好友"
+          options={shareFriends.map(friend => ({
+            value: friend.id,
+            label: `${friend.name}${friend.online ? '（在线）' : '（离线）'}`,
+            disabled: friend.online === false,
+          }))}
+        />
+      </Modal>
 
       {/* 新建文件夹弹窗 */}
       <Modal

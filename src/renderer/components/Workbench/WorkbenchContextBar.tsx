@@ -130,6 +130,7 @@ const WorkbenchContextBar: React.FC<Props> = ({ globalPage, embedded = false, hi
   const showProjectTitle = !hideProjectTitle && mode === 'full';
   const showStatus = mode !== 'nav';
   const showNavigation = mode !== 'status';
+  const showQuickActions = showNavigation && globalPage !== 'project-files';
   const isFullDock = !embedded && mode === 'full';
   const stageColor = currentStage ? (stageMeta[currentStage]?.color || '#1677ff') : '#999';
 
@@ -180,7 +181,7 @@ const WorkbenchContextBar: React.FC<Props> = ({ globalPage, embedded = false, hi
         )}
       </div>
 
-      {showNavigation && (
+      {showQuickActions && (
         <div className="workbench-context-nav">
           <Space size={mode === 'nav' ? 6 : 4} wrap>
             {navItems.map(item => {
