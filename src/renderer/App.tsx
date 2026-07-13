@@ -4,13 +4,11 @@ import {
   CalendarOutlined,
   FileTextOutlined,
   SettingOutlined,
-  TeamOutlined,
-  UserAddOutlined,
   CheckOutlined,
   CloseOutlined,
-  ReloadOutlined,
   DeleteOutlined,
   SearchOutlined,
+  MessageOutlined,
 } from '@ant-design/icons';
 import Overview from './components/Overview/Overview';
 import NotificationCenter from './components/Notifications/NotificationCenter';
@@ -95,10 +93,7 @@ const App: React.FC = () => {
   const [friendWorkspaceOpen, setFriendWorkspaceOpen] = useState(false);
   const [lanFriends, setLanFriends] = useState<CollaborationPeerInfo[]>([]);
   const [addFriendOpen, setAddFriendOpen] = useState(false);
-  const [addFriendTab, setAddFriendTab] = useState<'lan' | 'email' | 'requests'>('lan');
-  const [lanPeers, setLanPeers] = useState<CollaborationPeerInfo[]>([]);
   const [friendRequests, setFriendRequests] = useState<CollaborationFriendRequest[]>([]);
-  const [scanningLan, setScanningLan] = useState(false);
   const [emailSearch, setEmailSearch] = useState('');
   const [emailSearchResult, setEmailSearchResult] = useState<CollaborationPeerInfo | null>(null);
   const [emailSearching, setEmailSearching] = useState(false);
@@ -231,18 +226,6 @@ const App: React.FC = () => {
     if (result?.success) setLanFriends(result.friends || []);
   }, []);
 
-  const scanLanPeers = useCallback(async () => {
-    setScanningLan(true);
-    try {
-      const result = await window.electronAPI.listCollaborationPeers?.();
-      if (result?.success) {
-        setLanPeers(result.peers || []);
-      }
-    } finally {
-      setScanningLan(false);
-    }
-  }, []);
-
   const refreshFriendRequests = useCallback(async () => {
     const result = await window.electronAPI.listFriendRequests?.();
     if (result?.success) setFriendRequests(result.requests || []);
@@ -251,10 +234,6 @@ const App: React.FC = () => {
   const hasCollaborationEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(userProfile?.email || '').trim());
 
   const openChat = useCallback(async (friend: CollaborationPeerInfo) => {
-    if (!hasCollaborationEmail) {
-      message.warning('请先在设置中填写有效邮箱，才能使用好友聊天');
-      return;
-    }
     setChatFriend(friend);
     setChatDraft('');
     setChatLoading(true);
@@ -265,7 +244,7 @@ const App: React.FC = () => {
     } finally {
       setChatLoading(false);
     }
-  }, [hasCollaborationEmail]);
+  }, []);
 
   const sendChatMessage = useCallback(async () => {
     const content = chatDraft.trim();
@@ -362,7 +341,7 @@ const App: React.FC = () => {
         return;
       }
       setEmailSearchResult(result.peer || null);
-      if (!result.peer) message.info('局域网内未发现该邮箱对应的在线设备');
+      if (!result.peer) message.info('未发现该邮箱对应的可用好友账户');
     } finally {
       setEmailSearching(false);
     }
@@ -1003,7 +982,7 @@ const App: React.FC = () => {
     });
     if (result?.success) {
       message.success(`已向 ${peer.name || peer.host} 发送好友请求`);
-      setLanPeers(prev => prev.map(p => p.id === peer.id ? { ...p, added: true } : p));
+      setEmailSearchResult(current => current?.id === peer.id ? { ...current, added: true } : current);
     }
   };
 
@@ -1011,7 +990,6 @@ const App: React.FC = () => {
     const result = await window.electronAPI.removeCollaborationFriend?.(friendId);
     if (result?.success) {
       setLanFriends(result.friends || []);
-      setLanPeers(prev => prev.map(p => p.id === friendId ? { ...p, added: false } : p));
     }
   };
 
@@ -1038,8 +1016,6 @@ const App: React.FC = () => {
       return;
     }
     setAddFriendOpen(true);
-    setAddFriendTab('lan');
-    void scanLanPeers();
     void refreshFriendRequests();
   };
 
@@ -1137,18 +1113,12 @@ const App: React.FC = () => {
         </div>
 
         <Space size={8}>
-          <NotificationCenter onOpenTarget={handleOpenNotificationTarget} />
           <Badge count={onlineFriendCount + pendingRequestCount} size="small" overflowCount={9} offset={[-1, 3]}>
             <Button
-              icon={<TeamOutlined />}
-              title={hasCollaborationEmail ? '好友消息' : '请先在设置中填写邮箱'}
-              aria-label={'好友消息'}
+              icon={<MessageOutlined />}
+              title="消息中心"
+              aria-label="消息中心"
               onClick={() => {
-                if (!hasCollaborationEmail) {
-                  message.warning('请先在设置 - 基础设置中填写有效邮箱，才能使用好友功能');
-                  navigateToPage('settings');
-                  return;
-                }
                 setFriendWorkspaceOpen(true);
                 void refreshLanFriends();
                 void refreshFriendRequests();
@@ -1304,7 +1274,7 @@ const App: React.FC = () => {
         />
       )}
 
-      {/* 添加好友弹窗 */}
+      {/* 添加好友：只保留邮箱搜索和请求处理，不再提供局域网扫描入口 */}
       <Modal
         title={'添加好友'}
         open={addFriendOpen}
@@ -1314,55 +1284,14 @@ const App: React.FC = () => {
         destroyOnClose
       >
         <Tabs
-          activeKey={addFriendTab}
-          onChange={(key) => setAddFriendTab(key as 'lan' | 'email' | 'requests')}
+          defaultActiveKey="email"
           items={[
-            {
-              key: 'lan',
-              label: '局域网扫描',
-              children: (
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {scanningLan ? '扫描中...' : `发现 ${lanPeers.length} 个设备`}
-                    </Text>
-                    <Button size="small" icon={<ReloadOutlined />} loading={scanningLan} onClick={scanLanPeers}>{'刷新'}</Button>
-                  </div>
-                  {lanPeers.length === 0 ? (
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={scanningLan ? '正在扫描局域网设备...' : '未发现设备，请确认对方已开启局域网协作'} />
-                  ) : (
-                    <div style={{ maxHeight: 320, overflowY: 'auto' }}>
-                      <List
-                        size="small"
-                        dataSource={lanPeers}
-                        renderItem={(peer) => (
-                          <List.Item
-                            style={{ padding: '8px 4px', borderBlockEnd: '1px solid #f0f0f0' }}
-                            actions={[
-                              peer.added
-                                ? <Tag color="green">{'已添加'}</Tag>
-                                : <Button type="primary" size="small" onClick={() => handleAddFriend(peer)}>{'添加'}</Button>,
-                            ]}
-                          >
-                            <List.Item.Meta
-                              avatar={<span style={{ width: 8, height: 8, borderRadius: '50%', background: peer.online ? '#52c41a' : '#d9d9d9', display: 'inline-block', marginTop: 7 }} />}
-                              title={<Space size={5}><Text>{peer.name || peer.host}</Text><Tag color={peer.online ? 'green' : 'default'} style={{ margin: 0, fontSize: 10 }}>{peer.online ? '在线' : '离线'}</Tag></Space>}
-                              description={<Text type="secondary" style={{ fontSize: 11 }}>{peer.deviceName ? `${peer.deviceName} · ` : ''}{peer.host}:{peer.port}</Text>}
-                            />
-                          </List.Item>
-                        )}
-                      />
-                    </div>
-                  )}
-                </div>
-              ),
-            },
             {
               key: 'email',
               label: '邮箱搜索',
               children: (
                 <div>
-                  <Text type="secondary" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>仅搜索当前局域网内已开启协作、且已填写相同邮箱的设备。</Text>
+                  <Text type="secondary" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>输入对方邮箱搜索可添加的好友账户。</Text>
                   <Input.Search
                     value={emailSearch}
                     onChange={(event) => setEmailSearch(event.target.value)}
@@ -1452,6 +1381,9 @@ const App: React.FC = () => {
         />
       </Modal>
 
+      {/* 保留系统与 AI 的后台通知、Windows 推送和状态同步；展示已并入消息中心。 */}
+      <NotificationCenter hidden onOpenTarget={handleOpenNotificationTarget} />
+
       <FriendChatWorkspace
         open={friendWorkspaceOpen}
         friends={lanFriends}
@@ -1475,6 +1407,7 @@ const App: React.FC = () => {
           void refreshFriendRequests();
         }}
         onRemoveFriend={(friendId) => void handleRemoveFriend(friendId)}
+        onOpenSystemTarget={handleOpenNotificationTarget}
       />
 
       {/* Ctrl+K 命令面板 */}

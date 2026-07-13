@@ -162,9 +162,10 @@ const buildDeadlineNotification = (projectId: string, projectName: string, docs:
 
 interface Props {
   onOpenTarget: (target: NotificationTarget, projectId?: string) => void;
+  hidden?: boolean;
 }
 
-const NotificationCenter: React.FC<Props> = ({ onOpenTarget }) => {
+const NotificationCenter: React.FC<Props> = ({ onOpenTarget, hidden = false }) => {
   const { projects } = useProjectStore();
   const { reviews } = useTemplateStore();
   const { projectDocs } = useProjectDocStore();
@@ -355,6 +356,8 @@ const NotificationCenter: React.FC<Props> = ({ onOpenTarget }) => {
       />
     </div>
   );
+
+  if (hidden) return null;
 
   return (
     <Popover open={open} onOpenChange={setOpen} trigger="click" placement="bottomRight" content={content} arrow overlayStyle={{ maxWidth: 316 }}>

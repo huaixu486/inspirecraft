@@ -2949,6 +2949,125 @@ body.template-editor-modal-open {
   contain: layout paint;
 }
 
+/* Unified system / AI / friend message center */
+.message-center-modal .ant-modal-content {
+  overflow: hidden;
+  border-radius: 18px;
+  box-shadow: 0 28px 76px rgba(15, 23, 42, 0.24);
+}
+
+.message-center-shell {
+  height: min(680px, calc(100vh - 82px));
+  min-height: 510px;
+  display: flex;
+  overflow: hidden;
+  background: #fff;
+}
+
+.message-center-sidebar {
+  width: 292px;
+  flex: 0 0 292px;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 10px 10px;
+  background: linear-gradient(160deg, #f8fbff 0%, #f4f8fd 58%, #f8fafc 100%);
+  border-right: 1px solid #e7edf5;
+}
+
+.message-center-sidebar-head,
+.message-center-brand,
+.message-center-chat-head,
+.message-center-composer > div,
+.message-bubble-meta {
+  display: flex;
+  align-items: center;
+}
+
+.message-center-sidebar-head {
+  justify-content: space-between;
+  padding: 2px 5px 13px;
+}
+
+.message-center-brand { gap: 9px; }
+.message-center-brand .ant-avatar { background: linear-gradient(135deg, #1677ff, #60a5fa); }
+.message-center-brand .ant-typography { display: block; line-height: 1.35; }
+.message-center-brand .ant-typography-secondary { font-size: 11px; }
+
+.message-center-sidebar > .ant-input-affix-wrapper {
+  border-radius: 9px;
+  border-color: #e1eaf5;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.message-center-conversations {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 11px;
+  padding: 0 2px;
+}
+
+.message-center-conversation,
+.message-center-friend {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 8px;
+  margin-bottom: 3px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.message-center-conversation:hover,
+.message-center-friend:hover { background: rgba(22, 119, 255, 0.055); }
+.message-center-conversation.is-active,
+.message-center-friend.is-active { background: #eaf4ff; border-color: #cbe6ff; }
+.message-center-conversation > span,
+.message-center-friend > span { flex: 1; min-width: 0; }
+.message-center-conversation b,
+.message-center-friend b { display: block; color: #1f2937; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message-center-conversation small,
+.message-center-friend small { display: block; color: #94a3b8; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+.message-center-friend.ant-list-item { border-block-end: 0; }
+.message-center-friend .ant-avatar { background: #dbeafe; color: #2563eb; }
+.message-center-section-label { margin: 14px 8px 6px; color: #94a3b8; font-size: 11px; font-weight: 600; letter-spacing: .08em; }
+
+.message-center-chat { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #fff; }
+.message-center-chat-head { min-height: 67px; padding: 11px 18px; justify-content: space-between; border-bottom: 1px solid #edf1f5; background: rgba(255,255,255,.96); }
+.message-center-chat-head .ant-typography { display: block; line-height: 1.4; }
+.message-center-chat-head .ant-typography-secondary { font-size: 11px; }
+.message-center-thread { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 23px; background: radial-gradient(circle at 84% 7%, rgba(219, 234, 254, .55), transparent 30%), linear-gradient(180deg, #fbfdff, #f5f8fc); }
+.message-loading { padding-top: 100px; text-align: center; color: #94a3b8; }
+.message-bubble-row { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 14px; }
+.message-bubble-row.is-outgoing { justify-content: flex-end; }
+.message-bubble { max-width: min(78%, 560px); display: flex; flex-direction: column; gap: 5px; padding: 10px 12px 8px; color: #334155; background: #fff; border: 1px solid #e9eff5; border-radius: 4px 13px 13px; box-shadow: 0 3px 12px rgba(15, 23, 42, .055); }
+.message-bubble-system { border-radius: 4px 13px 13px; }
+.message-bubble.is-failed { border-color: #ffccc7; background: #fff8f7; }
+.message-bubble-outgoing { color: #fff; border: 0; border-radius: 13px 4px 13px 13px; background: linear-gradient(135deg, #1677ff, #3b93ff); box-shadow: 0 4px 12px rgba(22, 119, 255, .2); }
+.message-bubble .ant-typography { white-space: pre-wrap; color: inherit; font-size: 13px; line-height: 1.6; }
+.message-bubble-meta { gap: 4px; min-height: 17px; color: #94a3b8; font-size: 10px; }
+.message-bubble-outgoing .message-bubble-meta { justify-content: flex-end; color: rgba(255,255,255,.74); }
+.message-bubble-meta .ant-btn { height: 20px; padding-inline: 3px; font-size: 10px; }
+.message-progress { width: 100%; height: 4px; overflow: hidden; border-radius: 99px; background: #e6eef8; }
+.message-progress > span { display: block; height: 100%; border-radius: inherit; background: #7c3aed; transition: width 180ms ease; }
+.message-center-composer { padding: 11px 16px 13px; border-top: 1px solid #edf1f5; background: #fff; }
+.message-center-composer .ant-input { border-radius: 9px; resize: none; }
+.message-center-composer > div { justify-content: space-between; margin-top: 7px; }
+.message-center-composer > div > .ant-typography { color: #94a3b8; font-size: 11px; }
+
+@media (max-width: 760px) {
+  .message-center-modal { max-width: calc(100vw - 20px); }
+  .message-center-sidebar { width: 220px; flex-basis: 220px; }
+  .message-center-shell { min-height: 440px; }
+  .message-center-thread { padding: 16px 12px; }
+  .message-bubble { max-width: 88%; }
+}
+
 /* Avoid creating a separate compositor layer for every row while idle.
    The transform layer is applied only during an active horizontal pan above. */
 .gantt-timeline-modal .gantt-scroll-area {
