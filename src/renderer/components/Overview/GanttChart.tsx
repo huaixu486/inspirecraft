@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Card, Modal, Tooltip, Typography } from 'antd';
+import { Card, Modal, Typography } from 'antd';
 import { WarningOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -167,6 +167,10 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
   const viewInitializedRef = useRef(false);
   const pendingViewRef = useRef<{ start: number; span: number } | null>(null);
   const rafRef = useRef(0);
+  const panFrameRef = useRef(0);
+  const longPressTimerRef = useRef(0);
+  const zoomArmedRef = useRef(false);
+  const [zoomArmed, setZoomArmed] = useState(false);
   const flushPendingView = useCallback(() => {
     if (pendingViewRef.current) { setView(pendingViewRef.current); pendingViewRef.current = null; }
     rafRef.current = 0;
@@ -176,7 +180,7 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
     pendingViewRef.current = updater(prev);
     if (!rafRef.current) rafRef.current = requestAnimationFrame(flushPendingView);
   }, [flushPendingView]);
-  const panRef = useRef({ active: false, dragging: false, pointerId: -1, startX: 0, startY: 0, lastX: 0, lastY: 0, baseStart: 0, baseSpan: 0, plotWidth: 0 });
+  const panRef = useRef({ active: false, dragging: false, pointerId: -1, startX: 0, startY: 0, lastX: 0, lastY: 0, baseStart: 0, baseSpan: 0, plotWidth: 0, previewX: 0, pendingScrollTop: -1 });
   const [now, setNow] = useState(Date.now());
   const [viewportWidth, setViewportWidth] = useState(900);
   const resizeRafRef = useRef(0);
@@ -189,7 +193,12 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), MINUTE);
-    return () => { window.clearInterval(timer); if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+    return () => {
+      window.clearInterval(timer);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (panFrameRef.current) cancelAnimationFrame(panFrameRef.current);
+      if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
+    };
   }, []);
 
   const updateViewportWidth = useCallback((force = false) => {
@@ -227,12 +236,15 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
     const el = scrollRef.current;
     if (!el) return;
     const handler = (e: WheelEvent) => {
-      e.stopPropagation();
       const scrollRect = el.getBoundingClientRect();
       const plotLeft = scrollRect.left + PROJECT_COL + STAGE_COL;
       const plotWidth = Math.max(240, scrollRect.width - PROJECT_COL - STAGE_COL);
       const inPlot = e.clientX >= plotLeft && e.clientX <= plotLeft + plotWidth;
       if (!inPlot) return;
+      // Compact cards should stay easy to browse. Zooming requires a deliberate
+      // long press so ordinary wheel scrolling never changes the timeline scale.
+      if (compact && !zoomArmedRef.current) return;
+      e.stopPropagation();
       e.preventDefault();
       const mousePct = clamp((e.clientX - plotLeft) / plotWidth, 0, 1);
       scheduleViewUpdate(current => {
@@ -245,16 +257,45 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
     };
     el.addEventListener('wheel', handler, { capture: true, passive: false });
     return () => el.removeEventListener('wheel', handler, { capture: true });
-  }, [scheduleViewUpdate]);
+  }, [compact, scheduleViewUpdate]);
 
   // 拖动平移
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    const clearLongPress = () => {
+      if (longPressTimerRef.current) {
+        window.clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = 0;
+      }
+      if (zoomArmedRef.current) {
+        zoomArmedRef.current = false;
+        setZoomArmed(false);
+      }
+    };
+    const flushPanPreview = () => {
+      const pan = panRef.current;
+      panFrameRef.current = 0;
+      if (!pan.active) return;
+      el.style.setProperty('--gantt-pan-x', `${pan.previewX}px`);
+      timeAreaRef.current?.style.setProperty('--gantt-pan-x', `${pan.previewX}px`);
+      if (pan.pendingScrollTop >= 0) {
+        el.scrollTop = pan.pendingScrollTop;
+        panRef.current = { ...pan, pendingScrollTop: -1 };
+      }
+    };
+    const schedulePanPreview = () => {
+      if (!panFrameRef.current) panFrameRef.current = requestAnimationFrame(flushPanPreview);
+    };
     const stopPan = (e?: PointerEvent) => {
       const pan = panRef.current;
       if (!pan.active) return;
       if (e && pan.pointerId === e.pointerId) { try { el.releasePointerCapture(e.pointerId); } catch {} }
+      if (panFrameRef.current) {
+        cancelAnimationFrame(panFrameRef.current);
+        panFrameRef.current = 0;
+        if (pan.pendingScrollTop >= 0) el.scrollTop = pan.pendingScrollTop;
+      }
       if (pan.dragging) {
         const totalDx = pan.lastX - pan.startX;
         if (Math.abs(totalDx) >= 0.5 && pan.plotWidth > 0) {
@@ -264,7 +305,8 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
         timeAreaRef.current?.style.removeProperty('--gantt-pan-x');
         onDraggingChange?.(false);
       }
-      panRef.current = { active: false, dragging: false, pointerId: -1, startX: 0, startY: 0, lastX: 0, lastY: 0, baseStart: 0, baseSpan: 0, plotWidth: 0 };
+      clearLongPress();
+      panRef.current = { active: false, dragging: false, pointerId: -1, startX: 0, startY: 0, lastX: 0, lastY: 0, baseStart: 0, baseSpan: 0, plotWidth: 0, previewX: 0, pendingScrollTop: -1 };
       setIsPanning(false);
     };
 
@@ -274,20 +316,31 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       const plotLeft = scrollRect.left + PROJECT_COL + STAGE_COL;
       const plotWidth = Math.max(240, scrollRect.width - PROJECT_COL - STAGE_COL);
       if (e.clientX < plotLeft || e.clientX > plotLeft + plotWidth) return;
-      panRef.current = { active: true, dragging: false, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY, baseStart: viewRef.current.start, baseSpan: viewRef.current.span, plotWidth };
+      panRef.current = { active: true, dragging: false, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY, baseStart: viewRef.current.start, baseSpan: viewRef.current.span, plotWidth, previewX: 0, pendingScrollTop: -1 };
       try { el.setPointerCapture(e.pointerId); } catch {}
+      if (compact) {
+        longPressTimerRef.current = window.setTimeout(() => {
+          const current = panRef.current;
+          if (!current.active || current.pointerId !== e.pointerId || current.dragging) return;
+          zoomArmedRef.current = true;
+          setZoomArmed(true);
+          // A long press is an interaction, not the compact card's open click.
+          onDraggingChange?.(true);
+          longPressTimerRef.current = 0;
+        }, 360);
+      }
     };
 
     const onPointerMove = (e: PointerEvent) => {
       const pan = panRef.current;
       if (!pan.active || pan.pointerId !== e.pointerId) return;
-      const scrollRect = el.getBoundingClientRect();
-      const plotWidth = Math.max(240, scrollRect.width - PROJECT_COL - STAGE_COL);
+      const plotWidth = pan.plotWidth;
       if (plotWidth <= 0) return;
       const totalDx = e.clientX - pan.startX;
       const totalDy = e.clientY - pan.startY;
       if (!pan.dragging && Math.hypot(totalDx, totalDy) < 4) return;
       if (!pan.dragging) {
+        clearLongPress();
         panRef.current = { ...pan, dragging: true };
         setIsPanning(true);
         onDraggingChange?.(true);
@@ -298,11 +351,14 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       const dy = e.clientY - pan.lastY;
       if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
       if (Math.abs(dx) >= 0.5) {
-        el.style.setProperty('--gantt-pan-x', `${totalDx}px`);
-        timeAreaRef.current?.style.setProperty('--gantt-pan-x', `${totalDx}px`);
+        panRef.current = { ...panRef.current, previewX: totalDx };
       }
-      if (Math.abs(dy) >= 0.5) el.scrollTop = Math.max(0, el.scrollTop - dy);
+      if (Math.abs(dy) >= 0.5) {
+        const baseScrollTop = panRef.current.pendingScrollTop >= 0 ? panRef.current.pendingScrollTop : el.scrollTop;
+        panRef.current = { ...panRef.current, pendingScrollTop: Math.max(0, baseScrollTop - dy) };
+      }
       panRef.current = { ...panRef.current, lastX: e.clientX, lastY: e.clientY };
+      schedulePanPreview();
     };
 
     const onPointerUp = (e: PointerEvent) => stopPan(e);
@@ -316,8 +372,10 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       el.removeEventListener('pointermove', onPointerMove, { capture: true });
       el.removeEventListener('pointerup', onPointerUp, { capture: true });
       el.removeEventListener('pointercancel', onPointerCancel, { capture: true });
+      clearLongPress();
+      if (panFrameRef.current) cancelAnimationFrame(panFrameRef.current);
     };
-  }, [onDraggingChange, scheduleViewUpdate]);
+  }, [compact, onDraggingChange, scheduleViewUpdate]);
 
   // 自动适配视图
   const autoFitView = useMemo(() => {
@@ -363,7 +421,7 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       {/* 时间头 */}
       <div style={{ display: 'grid', gridTemplateColumns: `${PROJECT_COL + STAGE_COL}px minmax(0, 1fr)`, height: 30, overflow: 'hidden' }}>
         <div />
-        <div ref={timeAreaRef} className={`gantt-time-header${isPanning ? ' gantt-panning' : ''}`} style={{ position: 'relative', overflow: 'hidden', cursor: isPanning ? 'grabbing' : 'grab' }}>
+        <div ref={timeAreaRef} className={`gantt-time-header${isPanning ? ' gantt-panning' : ''}${zoomArmed ? ' gantt-zoom-armed' : ''}`} style={{ position: 'relative', overflow: 'hidden', cursor: isPanning ? 'grabbing' : zoomArmed ? 'zoom-in' : 'grab' }}>
           <div className="gantt-time-layer" style={{ position: 'absolute', inset: 0 }}>
             {ticks.map((tick, index) => (
               <span key={`${tick.text}-${index}`} style={{ position: 'absolute', left: `${tick.pct}%`, transform: 'translateX(-50%)', fontSize: tick.major ? 11 : 10, color: tick.major ? '#555' : '#aaa', whiteSpace: 'nowrap', userSelect: 'none', pointerEvents: 'none' }}>
@@ -380,7 +438,7 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       </div>
 
       {/* 滚动区域 */}
-      <div className={`gantt-scroll-area${isPanning ? ' gantt-panning' : ''}`} ref={scrollRef} style={{ height, position: 'relative', overflowX: 'hidden', overflowY: compact ? 'hidden' : 'auto', userSelect: isPanning ? 'none' : undefined, cursor: isPanning ? 'grabbing' : 'grab', touchAction: 'none' }}>
+      <div className={`gantt-scroll-area${isPanning ? ' gantt-panning' : ''}${zoomArmed ? ' gantt-zoom-armed' : ''}`} ref={scrollRef} style={{ height, position: 'relative', overflowX: 'hidden', overflowY: compact ? 'hidden' : 'auto', userSelect: isPanning ? 'none' : undefined, cursor: isPanning ? 'grabbing' : zoomArmed ? 'zoom-in' : 'grab', touchAction: 'none' }}>
         {/* 网格线 */}
         <div className="gantt-time-layer" style={{ position: 'absolute', left: PROJECT_COL + STAGE_COL, right: 0, top: 0, height: totalContentHeight || '100%', pointerEvents: 'none', overflow: 'hidden', zIndex: 0 }}>
           {ticks.filter(tick => tick.major).map((tick, index) => (
@@ -454,13 +512,15 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
                     return (
                       <div key={`${project.id}-${segment.stage}-${segment.sourceDocIds.join('-')}`} style={{ position: 'relative', height: 28, overflow: 'visible', minWidth: 0 }}>
                         {actualVisible && (
-                          <Tooltip overlayStyle={{ pointerEvents: 'none' }} title={`${segment.label}：${fmtDate(start)} → ${fmtDate(actualEnd)}${isDone ? '（已完成）' : dlStatus === 'overdue' ? '（逾期）' : '（进行中）'}${hasPlan ? ` | 计划截止 ${fmtDate(planEnd)}` : ''}`}>
-                            <div className="gantt-bar" style={{ position: 'absolute', ...barRect, top: 4, height: 16, borderRadius: 3, border: `1.5px dashed ${color}`, boxSizing: 'border-box', background: stripeBg(color, stripeAngle, '80'), overflow: 'hidden', zIndex: 3, animationDelay: `${Math.min(projectIndex * 80 + segmentIndex * 40, 400)}ms` }}>
-                              {hasPlan && dlStatus === 'overdue' && planEnd <= actualBarEnd && actualBarEnd > start && (
-                                <WarningOutlined style={{ position: 'absolute', left: barTimePointStyle(start, actualBarEnd, planEnd), top: 0, height: '100%', display: 'flex', alignItems: 'center', transform: 'translateX(-50%)', fontSize: 11, color: '#ff4d4f', zIndex: 4, pointerEvents: 'none' }} />
-                              )}
-                            </div>
-                          </Tooltip>
+                          <div
+                            className="gantt-bar"
+                            title={`${segment.label}：${fmtDate(start)} → ${fmtDate(actualEnd)}${isDone ? '（已完成）' : dlStatus === 'overdue' ? '（逾期）' : '（进行中）'}${hasPlan ? ` | 计划截止 ${fmtDate(planEnd)}` : ''}`}
+                            style={{ position: 'absolute', ...barRect, top: 4, height: 16, borderRadius: 3, border: `1.5px dashed ${color}`, boxSizing: 'border-box', background: stripeBg(color, stripeAngle, '80'), overflow: 'hidden', zIndex: 3, animationDelay: `${Math.min(projectIndex * 80 + segmentIndex * 40, 400)}ms` }}
+                          >
+                            {hasPlan && dlStatus === 'overdue' && planEnd <= actualBarEnd && actualBarEnd > start && (
+                              <WarningOutlined style={{ position: 'absolute', left: barTimePointStyle(start, actualBarEnd, planEnd), top: 0, height: '100%', display: 'flex', alignItems: 'center', transform: 'translateX(-50%)', fontSize: 11, color: '#ff4d4f', zIndex: 4, pointerEvents: 'none' }} />
+                            )}
+                          </div>
                         )}
                       </div>
                     );
@@ -488,15 +548,31 @@ interface GanttChartProps {
 
 const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning = false }) => {
   const [timelineModalOpen, setTimelineModalOpen] = useState(false);
+  const [timelineContentMounted, setTimelineContentMounted] = useState(false);
   const suppressOpenRef = useRef(false);
+  const modalMountFrameRef = useRef(0);
 
   const handleCompactClick = useCallback(() => {
-    if (!suppressOpenRef.current) setTimelineModalOpen(true);
+    if (!suppressOpenRef.current) {
+      setTimelineModalOpen(true);
+      // Paint the lightweight modal shell first. Deferring the full timeline by
+      // one frame keeps the click response and opening animation responsive.
+      modalMountFrameRef.current = requestAnimationFrame(() => {
+        modalMountFrameRef.current = requestAnimationFrame(() => {
+          modalMountFrameRef.current = 0;
+          setTimelineContentMounted(true);
+        });
+      });
+    }
     suppressOpenRef.current = false;
   }, []);
 
   const handleDraggingChange = useCallback((dragging: boolean) => {
     if (dragging) suppressOpenRef.current = true;
+  }, []);
+
+  useEffect(() => () => {
+    if (modalMountFrameRef.current) cancelAnimationFrame(modalMountFrameRef.current);
   }, []);
 
   return (
@@ -510,6 +586,7 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
       <Modal
         open={timelineModalOpen}
         onCancel={() => setTimelineModalOpen(false)}
+        afterClose={() => setTimelineContentMounted(false)}
         footer={null}
         centered
         destroyOnClose={false}
@@ -518,7 +595,13 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
         styles={{ mask: { background: 'rgba(15, 23, 42, 0.28)', backdropFilter: 'blur(8px) saturate(0.9)' } }}
         title="全部项目时间线"
       >
-        <GanttTimelineView height={EXPANDED_GANTT_HEIGHT} />
+        {timelineContentMounted ? (
+          <GanttTimelineView height={EXPANDED_GANTT_HEIGHT} />
+        ) : (
+          <div className="gantt-modal-loading" style={{ height: EXPANDED_GANTT_HEIGHT, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div className="skeleton-loading" style={{ width: '100%', height: '100%', borderRadius: 10 }} />
+          </div>
+        )}
       </Modal>
     </>
   );

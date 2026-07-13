@@ -2929,6 +2929,24 @@ body.template-editor-modal-open {
   transform: translate3d(0, 0, 0);
 }
 
+.gantt-scroll-area {
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.gantt-scroll-area.gantt-panning {
+  will-change: scroll-position;
+}
+
+.gantt-zoom-armed {
+  outline: 1px solid rgba(22, 119, 255, 0.3);
+  outline-offset: -1px;
+}
+
+.gantt-modal-loading {
+  contain: layout paint;
+}
+
 .gantt-bars-entering .gantt-bar {
   opacity: 0;
   animation: barGrow 500ms cubic-bezier(0.22, 0.68, 0.35, 1) both;
