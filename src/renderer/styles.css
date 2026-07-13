@@ -2717,6 +2717,24 @@ body.template-editor-modal-open {
   transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
 }
 
+/* Keep the notification counter inside its own button footprint so the
+   neighbouring friends badge cannot cover it in the compact top bar. */
+.notification-bell-badge {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
+}
+
+.notification-bell-badge .ant-badge-count {
+  z-index: 3;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 4px;
+  font-size: 9px;
+  line-height: 14px;
+  box-shadow: 0 0 0 2px #fff;
+}
+
 /* --- Detail Panel push layout (transform-based, zero reflow) --- */
 .overview-detail-rail {
   position: absolute;

@@ -360,7 +360,7 @@ const NotificationCenter: React.FC<Props> = ({ onOpenTarget }) => {
 
   return (
     <Popover open={open} onOpenChange={setOpen} trigger="click" placement="bottomRight" content={content} arrow overlayStyle={{ maxWidth: 316 }}>
-      <Badge className="notification-bell-badge" count={unreadCount} size="small" overflowCount={99} offset={[-2, 4]}>
+      <Badge className="notification-bell-badge" count={unreadCount} size="small" overflowCount={99} offset={[-7, 2]}>
         <Button icon={<BellOutlined />} title={'\u901a\u77e5'} onMouseDown={(event) => event.preventDefault()} />
       </Badge>
     </Popover>
