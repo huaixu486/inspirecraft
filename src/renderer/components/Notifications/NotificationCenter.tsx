@@ -5,13 +5,14 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import type { ProjectDocument, ReviewResult } from '../../../shared/types';
+import { useAIJobStore } from '../../stores/aiJobStore';
+import type { AIJob, ProjectDocument, ReviewResult } from '../../../shared/types';
 
 type NotificationTarget = 'overview' | 'project-plan' | 'project-report' | 'project-review';
 
 type NotificationItem = {
   id: string;
-  type: 'report' | 'review' | 'deadline';
+  type: 'report' | 'review' | 'deadline' | 'ai';
   severity: 'high' | 'medium' | 'low';
   title: string;
   description: string;
@@ -63,6 +64,49 @@ const typeLabel: Record<NotificationItem['type'], string> = {
   report: '\u62a5\u544a',
   review: '\u5ba1\u67e5',
   deadline: '\u622a\u6b62',
+  ai: 'AI',
+};
+
+const aiSceneLabel: Record<AIJob['scene'], string> = {
+  report: 'AI 报告生成',
+  review: 'AI 文档审查',
+  rewrite: 'AI 文稿改写',
+  diff: 'AI 版本对比',
+  summary: 'AI 摘要生成',
+  memory: 'AI 阶段记忆整理',
+  description: 'AI 项目概述编写',
+  taskExecute: 'AI 任务执行',
+  sectionAnalysis: 'AI 章节分析',
+  templateExtract: 'AI 模板提取',
+  general: 'AI 处理',
+};
+
+const buildAIJobNotification = (job: AIJob): NotificationItem | null => {
+  if (job.status !== 'running' && job.status !== 'completed' && job.status !== 'failed') return null;
+  const action = aiSceneLabel[job.scene] || 'AI 处理';
+  const createdAt = job.status === 'completed' || job.status === 'failed'
+    ? job.finishedAt || job.updatedAt
+    : job.startedAt || job.updatedAt;
+  const statusLabel = job.status === 'running' ? '开始' : job.status === 'completed' ? '完成' : '失败';
+  const usage = job.tokenUsage && job.tokenUsage.totalTokens > 0
+    ? `输入 ${job.tokenUsage.inputTokens.toLocaleString()} / 输出 ${job.tokenUsage.outputTokens.toLocaleString()}，共 ${job.tokenUsage.totalTokens.toLocaleString()} Token${job.tokenUsage.source === 'estimated' ? '（估算）' : ''}`
+    : '';
+  return {
+    id: `ai-${job.id}-${job.status}-${createdAt}`,
+    type: 'ai',
+    severity: job.status === 'failed' ? 'high' : job.status === 'running' ? 'medium' : 'low',
+    title: `${action}${statusLabel}`,
+    description: job.status === 'failed'
+      ? job.error || '请检查网络或模型配置后重试。'
+      : job.status === 'running'
+        ? job.title || '正在等待模型返回结果。'
+        : [job.title, usage].filter(Boolean).join(' · '),
+    projectId: job.projectId,
+    target: 'overview',
+    createdAt,
+    // AI 调用已经由主进程发送 Windows 通知，通知中心只保留应用内消息。
+    native: false,
+  };
 };
 
 const buildLatestReportNotification = (projectId: string, projectName: string, docs: ProjectDocument[]): NotificationItem | null => {
@@ -143,6 +187,7 @@ const NotificationCenter: React.FC<Props> = ({ onOpenTarget }) => {
   const { projects } = useProjectStore();
   const { reviews } = useTemplateStore();
   const { projectDocs } = useProjectDocStore();
+  const aiJobs = useAIJobStore(state => state.jobs);
   const { enableSystemNotifications } = useSettingsStore();
   const [open, setOpen] = useState(false);
   const [readIds, setReadIds] = useState<Set<string>>(() => loadIdSet(READ_KEY));
@@ -160,11 +205,15 @@ const NotificationCenter: React.FC<Props> = ({ onOpenTarget }) => {
       const deadline = buildDeadlineNotification(project.id, project.name, projectDocs);
       if (deadline) list.push(deadline);
     });
+    aiJobs.forEach(job => {
+      const notification = buildAIJobNotification(job);
+      if (notification) list.push(notification);
+    });
 
     return list
       .sort((a, b) => safeDateMs(b.createdAt) - safeDateMs(a.createdAt))
       .slice(0, 24);
-  }, [projectDocs, projects, reviews]);
+  }, [aiJobs, projectDocs, projects, reviews]);
 
   const unreadCount = items.filter(item => !readIds.has(item.id)).length;
 

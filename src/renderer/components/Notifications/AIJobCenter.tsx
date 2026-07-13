@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Badge, Button, Empty, List, message, Popover, Progress, Space, Tag, Typography } from 'antd';
+import { Badge, Button, Empty, List, Popover, Progress, Space, Tag, Typography } from 'antd';
 import {
   CheckCircleOutlined, ClearOutlined, CloseCircleOutlined,
   LoadingOutlined, RobotOutlined, StopOutlined, ReloadOutlined,
@@ -54,19 +54,7 @@ const AIJobCenter: React.FC = () => {
   const { jobs, clearFinished, cancelJob, retryJob, clearJob, syncExternalActivity } = useAIJobStore();
   const [open, setOpen] = useState(false);
 
-  useEffect(() => window.electronAPI.onAIActivity?.((activity) => {
-    const isLocalJob = Boolean(activity.requestId && useAIJobStore.getState().jobs.some(job => job.id === activity.requestId));
-    syncExternalActivity(activity);
-    if (isLocalJob) return;
-    const key = `external:${activity.id}`;
-    if (activity.status === 'started') {
-      message.loading({ key, content: `AI 正在处理：${activity.modelName}`, duration: 0 });
-    } else if (activity.status === 'completed') {
-      message.success({ key, content: `AI 已完成：${activity.modelName}`, duration: 5 });
-    } else {
-      message.error({ key, content: `AI 任务失败：${activity.error || '请检查网络或模型配置。'}`, duration: 6 });
-    }
-  }), [syncExternalActivity]);
+  useEffect(() => window.electronAPI.onAIActivity?.(syncExternalActivity), [syncExternalActivity]);
 
   const activeCount = useMemo(() => jobs.filter((job) => job.status === 'queued' || job.status === 'running').length, [jobs]);
   const failedCount = useMemo(() => jobs.filter((job) => job.status === 'failed' || job.status === 'cancelled').length, [jobs]);

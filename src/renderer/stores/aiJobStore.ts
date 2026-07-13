@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { message } from 'antd';
 import type { AIJob, AIJobScene } from '../../shared/types';
 
 export class AIJobCancelledError extends Error {
@@ -84,15 +83,6 @@ const defaultPreview = (value: unknown) => {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
   return text.replace(/\s+/g, ' ').trim().slice(0, 120);
 };
-
-const notifyJob = (kind: 'loading' | 'success' | 'error', key: string, content: string) => {
-  if (typeof document === 'undefined') return;
-  message[kind]({ key, content, duration: kind === 'loading' ? 0 : 5 });
-};
-
-const formatTokenUsage = (usage?: AIJob['tokenUsage']) => usage && usage.totalTokens > 0
-  ? `（输入 ${usage.inputTokens.toLocaleString()} / 输出 ${usage.outputTokens.toLocaleString()}，共 ${usage.totalTokens.toLocaleString()} Token${usage.source === 'estimated' ? '，估算' : ''}）`
-  : '';
 
 /** 生成去重 key：scene + projectId + docId + inputHash */
 const buildDedupeKey = (options: { scene: string; projectId?: string; docId?: string; inputHash?: string }) =>
@@ -257,7 +247,6 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
 
     try {
       get().updateJob(id, { status: 'running', progress: 10, startedAt: nowIso() });
-      notifyJob('loading', id, `AI 正在处理：${options.title}`);
       throwIfCancelled();
       const result = await executor({ jobId: id, signal: controller.signal, setProgress, isCancelled, throwIfCancelled });
       throwIfCancelled();
@@ -275,7 +264,6 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
         canRetry: false,
         tokenUsage: tokenUsage && tokenUsage.totalTokens > 0 ? tokenUsage : undefined,
       });
-      notifyJob('success', id, `AI 已完成：${options.title}${formatTokenUsage(tokenUsage)}`);
       return result;
     } catch (error: any) {
       if (isAIJobCancelledError(error) || isCancelled()) {
@@ -295,7 +283,6 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
         finishedAt: nowIso(),
         canRetry: Boolean(options.retry),
       });
-      notifyJob('error', id, `AI 任务失败：${options.title}。${error?.message || '请稍后重试。'}`);
       throw error;
     } finally {
       activeControllers.delete(id);
