@@ -1,5 +1,5 @@
 ﻿import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Badge, Button, Empty, List, Modal, Popover, Space, Tabs, Tag, Typography, message } from 'antd';
+import { Badge, Button, Empty, Input, List, Modal, Popover, Space, Tabs, Tag, Typography, message } from 'antd';
 import {
   CalendarOutlined,
   FileTextOutlined,
@@ -10,6 +10,9 @@ import {
   CloseOutlined,
   ReloadOutlined,
   DeleteOutlined,
+  MessageOutlined,
+  SearchOutlined,
+  SendOutlined,
 } from '@ant-design/icons';
 import Overview from './components/Overview/Overview';
 import NotificationCenter from './components/Notifications/NotificationCenter';
@@ -93,10 +96,18 @@ const App: React.FC = () => {
   const [friendPopoverOpen, setFriendPopoverOpen] = useState(false);
   const [lanFriends, setLanFriends] = useState<CollaborationPeerInfo[]>([]);
   const [addFriendOpen, setAddFriendOpen] = useState(false);
-  const [addFriendTab, setAddFriendTab] = useState<'lan' | 'requests'>('lan');
+  const [addFriendTab, setAddFriendTab] = useState<'lan' | 'email' | 'requests'>('lan');
   const [lanPeers, setLanPeers] = useState<CollaborationPeerInfo[]>([]);
   const [friendRequests, setFriendRequests] = useState<CollaborationFriendRequest[]>([]);
   const [scanningLan, setScanningLan] = useState(false);
+  const [emailSearch, setEmailSearch] = useState('');
+  const [emailSearchResult, setEmailSearchResult] = useState<CollaborationPeerInfo | null>(null);
+  const [emailSearching, setEmailSearching] = useState(false);
+  const [chatFriend, setChatFriend] = useState<CollaborationPeerInfo | null>(null);
+  const [chatMessages, setChatMessages] = useState<CollaborationChatMessage[]>([]);
+  const [chatDraft, setChatDraft] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatSending, setChatSending] = useState(false);
   const [bootDone, setBootDone] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const lastNonOverviewPageRef = useRef<GlobalPage | null>(null);
@@ -157,6 +168,7 @@ const App: React.FC = () => {
   const loadReviews = useTemplateStore(s => s.loadReviews);
   const loadTasks = useTaskStore(s => s.loadTasks);
   const loadSettings = useSettingsStore(s => s.loadSettings);
+  const userProfile = useSettingsStore(s => s.userProfile);
   const enableSystemNotifications = useSettingsStore(s => s.enableSystemNotifications);
   const calendarItineraries = useSettingsStore(s => s.calendarItineraries);
   const updateCalendarItineraryById = useSettingsStore(s => s.updateCalendarItineraryById);
@@ -236,6 +248,60 @@ const App: React.FC = () => {
     if (result?.success) setFriendRequests(result.requests || []);
   }, []);
 
+  const hasCollaborationEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(userProfile?.email || '').trim());
+
+  const openChat = useCallback(async (friend: CollaborationPeerInfo) => {
+    if (!hasCollaborationEmail) {
+      message.warning('请先在设置中填写有效邮箱，才能使用好友聊天');
+      return;
+    }
+    setChatFriend(friend);
+    setChatDraft('');
+    setChatLoading(true);
+    try {
+      const result = await window.electronAPI.listCollaborationChatMessages?.(friend.id);
+      setChatMessages(result?.success ? result.messages || [] : []);
+      if (!result?.success) message.error(result?.error || '无法加载聊天记录');
+    } finally {
+      setChatLoading(false);
+    }
+  }, [hasCollaborationEmail]);
+
+  const sendChatMessage = useCallback(async () => {
+    const content = chatDraft.trim();
+    if (!chatFriend || !content) return;
+    setChatSending(true);
+    try {
+      const result = await window.electronAPI.sendCollaborationChatMessage?.({ friendId: chatFriend.id, content });
+      if (!result?.success || !result.message) {
+        message.error(result?.error || '消息发送失败');
+        return;
+      }
+      setChatMessages(prev => [...prev, result.message!]);
+      setChatDraft('');
+    } finally {
+      setChatSending(false);
+    }
+  }, [chatDraft, chatFriend]);
+
+  const searchFriendByEmail = useCallback(async () => {
+    const email = emailSearch.trim();
+    if (!email) return;
+    setEmailSearching(true);
+    setEmailSearchResult(null);
+    try {
+      const result = await window.electronAPI.searchCollaborationFriendByEmail?.(email);
+      if (!result?.success) {
+        message.error(result?.error || '搜索失败');
+        return;
+      }
+      setEmailSearchResult(result.peer || null);
+      if (!result.peer) message.info('局域网内未发现该邮箱对应的在线设备');
+    } finally {
+      setEmailSearching(false);
+    }
+  }, [emailSearch]);
+
   useEffect(() => {
     void refreshLanFriends();
     const offPeers = window.electronAPI.onCollaborationPeersChanged?.((payload) => {
@@ -274,13 +340,20 @@ const App: React.FC = () => {
         void refreshFriendRequests();
       }
     });
+    const offChat = window.electronAPI.onCollaborationChatReceived?.((chat) => {
+      if (chatFriend?.id === chat.friendId) {
+        setChatMessages(prev => prev.some(message => message.id === chat.id) ? prev : [...prev, chat]);
+      }
+      window.electronAPI.showSystemNotification?.({ title: `收到 ${chat.senderName || '好友'} 的消息`, body: chat.content.slice(0, 80), target: 'overview' });
+    });
     return () => {
       offPeers?.();
       offFile?.();
       offTask?.();
       offFriendReq?.();
+      offChat?.();
     };
-  }, [refreshLanFriends, refreshFriendRequests]);
+  }, [chatFriend?.id, refreshLanFriends, refreshFriendRequests]);
 
   // 启动遮罩 + 并行加载优化
   useEffect(() => {
@@ -855,10 +928,14 @@ const App: React.FC = () => {
   const pendingRequestCount = friendRequests.filter(r => r.status === 'pending').length;
 
   const handleAddFriend = async (peer: CollaborationPeerInfo) => {
-    const result = await window.electronAPI.addCollaborationFriend?.({ ...peer, source: 'lan', status: 'accepted' });
+    const result = await window.electronAPI.sendFriendRequest?.({
+      targetId: peer.id,
+      targetHost: peer.host,
+      targetPort: peer.port,
+      message: `来自 ${userProfile?.nickname || 'ProjectHub 用户'} 的好友请求`,
+    });
     if (result?.success) {
-      message.success(`\u5df2\u6dfb\u52a0 ${peer.name || peer.host} \u4e3a\u597d\u53cb`);
-      setLanFriends(result.friends || []);
+      message.success(`已向 ${peer.name || peer.host} 发送好友请求`);
       setLanPeers(prev => prev.map(p => p.id === peer.id ? { ...p, added: true } : p));
     }
   };
@@ -888,6 +965,11 @@ const App: React.FC = () => {
   };
 
   const openAddFriendModal = () => {
+    if (!hasCollaborationEmail) {
+      message.warning('请先在设置 - 基础设置中填写有效邮箱，才能使用好友功能');
+      navigateToPage('settings');
+      return;
+    }
     setAddFriendOpen(true);
     setAddFriendTab('lan');
     void scanLanPeers();
@@ -918,6 +1000,7 @@ const App: React.FC = () => {
               <List.Item
                 style={{ padding: '8px 6px', borderBlockEnd: 'none', borderRadius: 7, background: friend.online ? '#f6ffed' : 'transparent', marginBottom: 3 }}
                 actions={[
+                  <Button key="chat" type="text" size="small" icon={<MessageOutlined />} disabled={!friend.online} onClick={() => void openChat(friend)}>聊天</Button>,
                   <Button key="remove" type="text" size="small" danger onClick={() => handleRemoveFriend(friend.id)}>{'\u79fb\u9664'}</Button>,
                 ]}
               >
@@ -1028,9 +1111,17 @@ const App: React.FC = () => {
 
         <Space size={8}>
           <NotificationCenter onOpenTarget={handleOpenNotificationTarget} />
-          <Popover open={friendPopoverOpen} onOpenChange={(open) => { setFriendPopoverOpen(open); if (open) void refreshLanFriends(); }} trigger="click" placement="bottomRight" content={friendPopoverContent} arrow overlayStyle={{ maxWidth: 306 }}>
+          <Popover open={friendPopoverOpen} onOpenChange={(open) => {
+            if (open && !hasCollaborationEmail) {
+              message.warning('请先在设置 - 基础设置中填写有效邮箱，才能使用好友功能');
+              navigateToPage('settings');
+              return;
+            }
+            setFriendPopoverOpen(open);
+            if (open) void refreshLanFriends();
+          }} trigger="click" placement="bottomRight" content={friendPopoverContent} arrow overlayStyle={{ maxWidth: 306 }}>
             <Badge count={onlineFriendCount + pendingRequestCount} size="small" overflowCount={9} offset={[-2, 4]}>
-              <Button icon={<TeamOutlined />} title={'\u597d\u53cb'} aria-label={'\u597d\u53cb'} onMouseDown={(event) => event.preventDefault()} />
+              <Button icon={<TeamOutlined />} title={hasCollaborationEmail ? '好友' : '请先在设置中填写邮箱'} aria-label={'\u597d\u53cb'} onMouseDown={(event) => event.preventDefault()} />
             </Badge>
           </Popover>
           <Button
@@ -1193,7 +1284,7 @@ const App: React.FC = () => {
       >
         <Tabs
           activeKey={addFriendTab}
-          onChange={(key) => setAddFriendTab(key as 'lan' | 'requests')}
+          onChange={(key) => setAddFriendTab(key as 'lan' | 'email' | 'requests')}
           items={[
             {
               key: 'lan',
@@ -1231,6 +1322,39 @@ const App: React.FC = () => {
                         )}
                       />
                     </div>
+                  )}
+                </div>
+              ),
+            },
+            {
+              key: 'email',
+              label: '邮箱搜索',
+              children: (
+                <div>
+                  <Text type="secondary" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>仅搜索当前局域网内已开启协作、且已填写相同邮箱的设备。</Text>
+                  <Input.Search
+                    value={emailSearch}
+                    onChange={(event) => setEmailSearch(event.target.value)}
+                    onSearch={() => void searchFriendByEmail()}
+                    placeholder="输入好友邮箱"
+                    enterButton={<SearchOutlined />}
+                    loading={emailSearching}
+                  />
+                  {emailSearchResult && (
+                    <List
+                      size="small"
+                      style={{ marginTop: 12 }}
+                      dataSource={[emailSearchResult]}
+                      renderItem={(peer) => (
+                        <List.Item actions={[peer.added ? <Tag color="green">已添加</Tag> : <Button type="primary" size="small" onClick={() => handleAddFriend(peer)}>添加</Button>]}>
+                          <List.Item.Meta
+                            avatar={<span style={{ width: 8, height: 8, borderRadius: '50%', background: peer.online ? '#52c41a' : '#d9d9d9', display: 'inline-block', marginTop: 7 }} />}
+                            title={<Space size={5}><Text>{peer.name || peer.host}</Text><Tag color="blue" style={{ margin: 0, fontSize: 10 }}>{peer.email}</Tag></Space>}
+                            description={<Text type="secondary" style={{ fontSize: 11 }}>{peer.deviceName ? `${peer.deviceName} · ` : ''}{peer.host}:{peer.port}</Text>}
+                          />
+                        </List.Item>
+                      )}
+                    />
                   )}
                 </div>
               ),
@@ -1295,6 +1419,35 @@ const App: React.FC = () => {
             },
           ]}
         />
+      </Modal>
+
+      <Modal
+        title={chatFriend ? `与 ${chatFriend.name || chatFriend.email || chatFriend.host} 聊天` : '好友聊天'}
+        open={Boolean(chatFriend)}
+        onCancel={() => setChatFriend(null)}
+        footer={null}
+        width={460}
+        destroyOnClose
+      >
+        <div style={{ height: 340, overflowY: 'auto', padding: '4px 2px 10px', background: '#fafcff', borderRadius: 8 }}>
+          {chatLoading ? <div style={{ padding: 24, textAlign: 'center' }}><Text type="secondary">正在加载聊天记录…</Text></div> : chatMessages.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无消息，发一句问候吧" /> : (
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              {chatMessages.map(item => {
+                const outgoing = item.direction === 'outgoing';
+                return <div key={item.id} style={{ display: 'flex', justifyContent: outgoing ? 'flex-end' : 'flex-start' }}>
+                  <div style={{ maxWidth: '78%', padding: '7px 10px', borderRadius: 10, background: outgoing ? '#e6f4ff' : '#fff', border: `1px solid ${outgoing ? '#bae0ff' : '#edf1f5'}` }}>
+                    <Text style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{item.content}</Text>
+                    <Text type="secondary" style={{ display: 'block', fontSize: 10, marginTop: 3 }}>{new Date(item.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</Text>
+                  </div>
+                </div>;
+              })}
+            </Space>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <Input.TextArea value={chatDraft} onChange={(event) => setChatDraft(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void sendChatMessage(); } }} placeholder={chatFriend?.online ? '输入消息，Enter 发送，Shift + Enter 换行' : '好友离线，暂不能发送'} autoSize={{ minRows: 2, maxRows: 4 }} disabled={!chatFriend?.online || chatSending} />
+          <Button type="primary" icon={<SendOutlined />} loading={chatSending} disabled={!chatDraft.trim() || !chatFriend?.online} onClick={() => void sendChatMessage()}>发送</Button>
+        </div>
       </Modal>
 
       {/* Ctrl+K 命令面板 */}

@@ -303,9 +303,12 @@ const BasicSettings: React.FC = () => {
               <Form.Item name="nickname" label="昵称">
                 <Input placeholder="请输入昵称" />
               </Form.Item>
-              <Form.Item name="email" label="邮箱">
-                <Input placeholder="请输入邮箱" />
+              <Form.Item name="email" label="邮箱" rules={[{ type: 'email', message: '请输入有效邮箱地址' }]}>
+                <Input placeholder="好友、局域网聊天和邮箱搜索需要有效邮箱" />
               </Form.Item>
+              <Text type="secondary" style={{ display: 'block', marginTop: -14, marginBottom: 10, fontSize: 12 }}>
+                填写后可启用局域网好友、按邮箱搜索和好友聊天；邮箱只在局域网设备发现中使用。
+              </Text>
             </div>
           </div>
           <Form.Item>

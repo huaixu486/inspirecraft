@@ -77,6 +77,7 @@ type CollaborationFriendRequest = {
   fromId: string;
   fromName: string;
   fromDeviceName?: string;
+  fromEmail?: string;
   fromHost: string;
   fromPort: number;
   targetId?: string;
@@ -89,9 +90,19 @@ type LanPeerRecord = {
   id: string;
   name: string;
   deviceName?: string;
+  email?: string;
   host: string;
   port: number;
   lastSeenAt: string;
+};
+
+type CollaborationChatMessage = {
+  id: string;
+  friendId: string;
+  direction: 'incoming' | 'outgoing';
+  content: string;
+  senderName?: string;
+  createdAt: string;
 };
 
 type CollaborationFileSendParams = {
@@ -138,20 +149,42 @@ function writeJson(res: http.ServerResponse, statusCode: number, payload: any) {
   res.end(body);
 }
 
+const normalizeCollaborationEmail = (value?: string) => String(value || '').trim().toLowerCase();
+const isValidCollaborationEmail = (value?: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeCollaborationEmail(value));
+
 function getLocalCollaborationIdentity() {
   ensureDataDir();
+  const profile = loadSettingsFromDisk().userProfile;
+  const configuredEmail = normalizeCollaborationEmail(profile?.email);
   try {
     if (fs.existsSync(collaborationIdentityFile)) {
       const saved = JSON.parse(fs.readFileSync(collaborationIdentityFile, 'utf-8'));
-      if (saved?.id) return saved as { id: string; name: string; deviceName: string };
+      if (saved?.id) {
+        const identity = {
+          ...saved,
+          name: profile?.nickname || saved.name,
+          email: configuredEmail || undefined,
+        } as { id: string; name: string; deviceName: string; email?: string };
+        fs.writeFileSync(collaborationIdentityFile, JSON.stringify(identity, null, 2), 'utf-8');
+        return identity;
+      }
     }
   } catch {}
   const identity = {
     id: 'peer-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
     name: os.userInfo().username || os.hostname() || APP_DISPLAY_NAME,
     deviceName: os.hostname() || APP_DISPLAY_NAME,
+    email: configuredEmail || undefined,
   };
   fs.writeFileSync(collaborationIdentityFile, JSON.stringify(identity, null, 2), 'utf-8');
+  return identity;
+}
+
+function requireCollaborationEmail() {
+  const identity = getLocalCollaborationIdentity();
+  if (!isValidCollaborationEmail(identity.email)) {
+    throw new Error('请先在设置 - 基础设置中填写有效邮箱，才能使用好友功能');
+  }
   return identity;
 }
 
@@ -189,6 +222,27 @@ function saveCollaborationFriendsToDisk(friends: CollaborationFriend[]) {
   fs.writeFileSync(collaborationFriendsFile, JSON.stringify(friends, null, 2), 'utf-8');
 }
 
+function loadCollaborationChatMessages(): CollaborationChatMessage[] {
+  try {
+    if (!fs.existsSync(collaborationChatsFile)) return [];
+    const messages = JSON.parse(fs.readFileSync(collaborationChatsFile, 'utf-8'));
+    return Array.isArray(messages) ? messages.filter(message => message?.id && message?.friendId && message?.content) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCollaborationChatMessages(messages: CollaborationChatMessage[]) {
+  ensureDataDir();
+  fs.writeFileSync(collaborationChatsFile, JSON.stringify(messages.slice(-3000), null, 2), 'utf-8');
+}
+
+function appendCollaborationChatMessage(message: CollaborationChatMessage) {
+  const messages = loadCollaborationChatMessages();
+  saveCollaborationChatMessages([...messages, message]);
+  return message;
+}
+
 function getCollaborationPeers() {
   const friends = loadCollaborationFriendsFromDisk();
   const friendIds = new Set(friends.map(friend => friend.id));
@@ -208,6 +262,7 @@ function getCollaborationFriends() {
       host: live?.host || friend.host,
       port: live?.port || friend.port,
       lastSeenAt: live?.lastSeenAt || friend.lastSeenAt,
+      email: live?.email || friend.email,
       online: isPeerOnline(live?.lastSeenAt || friend.lastSeenAt),
     };
   }).sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
@@ -228,6 +283,7 @@ function sendCollaborationDiscoveryBeat() {
     id: identity.id,
     name: identity.name,
     deviceName: identity.deviceName,
+    email: identity.email,
     port: collaborationPort,
     app: APP_DISPLAY_NAME,
     sentAt: new Date().toISOString(),
@@ -247,6 +303,7 @@ function startCollaborationDiscovery() {
           id: String(payload.id),
           name: String(payload.name || payload.deviceName || rinfo.address),
           deviceName: payload.deviceName ? String(payload.deviceName) : undefined,
+          email: payload.email ? normalizeCollaborationEmail(payload.email) : undefined,
           host: rinfo.address,
           port: Number(payload.port) || 39218,
           lastSeenAt: new Date().toISOString(),
@@ -422,6 +479,23 @@ function createCollaborationHttpServer() {
         const file = await saveIncomingCollaborationFile(req, requestUrl);
         return writeJson(res, 200, { success: true, file });
       }
+      if (req.method === 'POST' && requestUrl.pathname === '/chat') {
+        const payload = JSON.parse(await readRequestBody(req) || '{}');
+        const friend = getCollaborationFriends().find(item => item.id === payload.fromId && item.status === 'accepted');
+        const content = String(payload.content || '').trim().slice(0, 4000);
+        if (!friend || !content) return writeJson(res, 403, { success: false, error: 'Chat sender is not an accepted friend' });
+        const message: CollaborationChatMessage = {
+          id: String(payload.id || `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`),
+          friendId: friend.id,
+          direction: 'incoming',
+          content,
+          senderName: String(payload.senderName || friend.name),
+          createdAt: String(payload.createdAt || new Date().toISOString()),
+        };
+        appendCollaborationChatMessage(message);
+        mainWindow?.webContents.send('collaboration:chatReceived', message);
+        return writeJson(res, 200, { success: true, messageId: message.id });
+      }
       if (req.method === 'POST' && requestUrl.pathname === '/friend-request') {
         const body = await readRequestBody(req);
         const payload = JSON.parse(body || '{}');
@@ -434,6 +508,7 @@ function createCollaborationHttpServer() {
             fromId: payload.fromId,
             fromName: payload.fromName || payload.fromDeviceName || 'Unknown',
             fromDeviceName: payload.fromDeviceName,
+            fromEmail: payload.fromEmail ? normalizeCollaborationEmail(payload.fromEmail) : undefined,
             fromHost: payload.fromHost || req.socket.remoteAddress || '',
             fromPort: payload.fromPort || 0,
             message: payload.message,
@@ -443,6 +518,26 @@ function createCollaborationHttpServer() {
           saveFriendRequestsToDisk([request, ...requests]);
           mainWindow?.webContents.send('collaboration:friendRequestReceived', request);
         }
+        return writeJson(res, 200, { success: true });
+      }
+      if (req.method === 'POST' && requestUrl.pathname === '/friend-accepted') {
+        const payload = JSON.parse(await readRequestBody(req) || '{}');
+        if (!payload.id || !payload.host || !payload.port) return writeJson(res, 400, { success: false, error: 'Invalid accepted friend payload' });
+        const friends = loadCollaborationFriendsFromDisk();
+        const friend: CollaborationFriend = {
+          id: String(payload.id),
+          name: String(payload.name || payload.deviceName || payload.host),
+          email: payload.email ? normalizeCollaborationEmail(payload.email) : undefined,
+          deviceName: payload.deviceName ? String(payload.deviceName) : undefined,
+          host: String(payload.host),
+          port: Number(payload.port),
+          source: 'invite',
+          status: 'accepted',
+          addedAt: new Date().toISOString(),
+          lastSeenAt: new Date().toISOString(),
+        };
+        saveCollaborationFriendsToDisk([friend, ...friends.filter(item => item.id !== friend.id)]);
+        emitCollaborationPeersChanged();
         return writeJson(res, 200, { success: true });
       }
       if (req.method !== 'POST' || !String(req.url || '').startsWith('/tasks')) {
@@ -609,6 +704,7 @@ const tasksFile = path.join(dataDir, 'tasks.json');
 const collaborationFriendsFile = path.join(dataDir, 'collaboration-friends.json');
 const collaborationRequestsFile = path.join(dataDir, 'collaboration-requests.json');
 const collaborationIdentityFile = path.join(dataDir, 'collaboration-identity.json');
+const collaborationChatsFile = path.join(dataDir, 'collaboration-chats.json');
 const settingsFile = path.join(dataDir, 'settings.json');
 const projectDocsFile = path.join(dataDir, 'project-documents.json');
 const stageMemoriesFile = path.join(dataDir, 'stage-memories.json');
@@ -4491,6 +4587,7 @@ ipcMain.handle('task:loadAll', async () => {
 
 ipcMain.handle('collaboration:startReceiver', async (_event: any, params?: { port?: number }) => {
   try {
+    requireCollaborationEmail();
     return await startCollaborationServer(params?.port || 39218);
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
@@ -4511,6 +4608,7 @@ ipcMain.handle('collaboration:getStatus', async () => ({
 
 ipcMain.handle('collaboration:sendTask', async (_event: any, params: { endpoint?: string; friendId?: string; task: TaskItem; projectName?: string; senderName?: string }) => {
   try {
+    requireCollaborationEmail();
     const endpoint = resolveCollaborationTarget(params).toString();
     const result = await postJsonToPeer(endpoint, {
       task: params.task,
@@ -4530,13 +4628,27 @@ ipcMain.handle('collaboration:listPeers', async () => ({
   friends: getCollaborationFriends(),
 }));
 
+ipcMain.handle('collaboration:searchByEmail', async (_event: any, email: string) => {
+  try {
+    requireCollaborationEmail();
+    const normalized = normalizeCollaborationEmail(email);
+    if (!isValidCollaborationEmail(normalized)) throw new Error('请输入有效邮箱');
+    const peer = getCollaborationPeers().find(item => normalizeCollaborationEmail(item.email) === normalized);
+    return { success: true, peer: peer || null };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
 ipcMain.handle('collaboration:addFriend', async (_event: any, peer: Partial<LanPeerRecord> & { source?: string; status?: string }) => {
   try {
+    requireCollaborationEmail();
     if (!peer?.id || !peer.host || !peer.port) throw new Error('Invalid peer');
     const friends = loadCollaborationFriendsFromDisk();
     const next: CollaborationFriend = {
       id: String(peer.id),
       name: String(peer.name || peer.deviceName || peer.host),
+      email: peer.email ? normalizeCollaborationEmail(peer.email) : undefined,
       deviceName: peer.deviceName ? String(peer.deviceName) : undefined,
       host: String(peer.host),
       port: Number(peer.port),
@@ -4554,19 +4666,60 @@ ipcMain.handle('collaboration:addFriend', async (_event: any, peer: Partial<LanP
 });
 
 ipcMain.handle('collaboration:removeFriend', async (_event: any, friendId: string) => {
+  requireCollaborationEmail();
   const friends = loadCollaborationFriendsFromDisk().filter(item => item.id !== friendId);
   saveCollaborationFriendsToDisk(friends);
   emitCollaborationPeersChanged();
   return { success: true, friends: getCollaborationFriends() };
 });
 
-ipcMain.handle('collaboration:listFriends', async () => ({
-  success: true,
-  friends: getCollaborationFriends(),
-}));
+ipcMain.handle('collaboration:listFriends', async () => {
+  try {
+    requireCollaborationEmail();
+    return { success: true, friends: getCollaborationFriends() };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error), friends: [] };
+  }
+});
+
+ipcMain.handle('collaboration:listChatMessages', async (_event: any, friendId: string) => {
+  try {
+    requireCollaborationEmail();
+    return { success: true, messages: loadCollaborationChatMessages().filter(message => message.friendId === friendId).slice(-500) };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error), messages: [] };
+  }
+});
+
+ipcMain.handle('collaboration:sendChatMessage', async (_event: any, params: { friendId: string; content: string }) => {
+  try {
+    const identity = requireCollaborationEmail();
+    const friend = getCollaborationFriends().find(item => item.id === params.friendId && item.status === 'accepted');
+    const content = String(params.content || '').trim().slice(0, 4000);
+    if (!friend) throw new Error('好友不存在或尚未确认');
+    if (!friend.online) throw new Error('好友当前离线');
+    if (!content) throw new Error('消息不能为空');
+    const message: CollaborationChatMessage = {
+      id: `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      friendId: friend.id,
+      direction: 'outgoing',
+      content,
+      senderName: identity.name,
+      createdAt: new Date().toISOString(),
+    };
+    const url = resolveCollaborationTarget({ friendId: friend.id });
+    url.pathname = '/chat';
+    await postJsonToPeer(url.toString(), { id: message.id, fromId: identity.id, senderName: identity.name, content, createdAt: message.createdAt });
+    appendCollaborationChatMessage(message);
+    return { success: true, message };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
 
 ipcMain.handle('collaboration:sendFile', async (_event: any, params: CollaborationFileSendParams) => {
   try {
+    requireCollaborationEmail();
     const result = await sendFileToPeer(params);
     return { success: true, result };
   } catch (error: any) {
@@ -4591,7 +4744,7 @@ function saveFriendRequestsToDisk(requests: CollaborationFriendRequest[]) {
 
 ipcMain.handle('collaboration:sendFriendRequest', async (_event: any, params: { targetId: string; targetHost: string; targetPort: number; message?: string }) => {
   try {
-    const identity = getLocalCollaborationIdentity();
+    const identity = requireCollaborationEmail();
     const requests = loadFriendRequestsFromDisk();
     const existing = requests.find(r => r.fromId === identity.id && r.targetId === params.targetId && r.status === 'pending');
     if (existing) return { success: false, error: '已发送过好友请求，等待对方确认' };
@@ -4602,6 +4755,7 @@ ipcMain.handle('collaboration:sendFriendRequest', async (_event: any, params: { 
       fromId: identity.id,
       fromName: identity.name,
       fromDeviceName: identity.deviceName,
+      fromEmail: identity.email,
       fromHost: getLanAddresses()[0] || '127.0.0.1',
       fromPort: collaborationPort,
       message: params.message || '',
@@ -4617,6 +4771,7 @@ ipcMain.handle('collaboration:sendFriendRequest', async (_event: any, params: { 
       fromId: identity.id,
       fromName: identity.name,
       fromDeviceName: identity.deviceName,
+      fromEmail: identity.email,
       fromHost: payload.fromHost,
       fromPort: payload.fromPort,
       targetId: params.targetId,
@@ -4638,6 +4793,7 @@ ipcMain.handle('collaboration:listFriendRequests', async () => ({
 
 ipcMain.handle('collaboration:acceptFriendRequest', async (_event: any, requestId: string) => {
   try {
+    requireCollaborationEmail();
     const requests = loadFriendRequestsFromDisk();
     const req = requests.find(r => r.id === requestId);
     if (!req) return { success: false, error: '请求不存在' };
@@ -4653,6 +4809,7 @@ ipcMain.handle('collaboration:acceptFriendRequest', async (_event: any, requestI
       const friend: CollaborationFriend = {
         id: req.fromId,
         name: req.fromName,
+        email: req.fromEmail,
         deviceName: req.fromDeviceName,
         host: req.fromHost,
         port: req.fromPort,
@@ -4661,6 +4818,20 @@ ipcMain.handle('collaboration:acceptFriendRequest', async (_event: any, requestI
         addedAt: new Date().toISOString(),
       };
       saveCollaborationFriendsToDisk([friend, ...friends]);
+    }
+    const identity = requireCollaborationEmail();
+    try {
+      await postJsonToPeer(`http://${req.fromHost}:${req.fromPort}/friend-accepted`, {
+        id: identity.id,
+        name: identity.name,
+        email: identity.email,
+        deviceName: identity.deviceName,
+        host: getLanAddresses()[0] || '127.0.0.1',
+        port: collaborationPort,
+      });
+    } catch {
+      // The sender may be offline after issuing the request. Its next request
+      // can retry the handshake; the accepted side still keeps the friend.
     }
     emitCollaborationPeersChanged();
     return { success: true, friends: getCollaborationFriends() };

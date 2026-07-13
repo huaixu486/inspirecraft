@@ -18,11 +18,20 @@ interface CollaborationFriendRequest {
   fromId: string;
   fromName: string;
   fromDeviceName?: string;
+  fromEmail?: string;
   fromHost: string;
   fromPort: number;
   message?: string;
   createdAt: string;
   status: 'pending' | 'accepted' | 'rejected';
+}
+interface CollaborationChatMessage {
+  id: string;
+  friendId: string;
+  direction: 'incoming' | 'outgoing';
+  content: string;
+  senderName?: string;
+  createdAt: string;
 }
 interface ElectronAPI {
   // 文件操作
@@ -119,12 +128,16 @@ interface ElectronAPI {
   sendCollaborationTask?: (params: { endpoint?: string; friendId?: string; task: any; projectName?: string; senderName?: string }) => Promise<{ success: boolean; result?: any; error?: string }>;
   listCollaborationPeers?: () => Promise<{ success: boolean; peers?: CollaborationPeerInfo[]; friends?: CollaborationPeerInfo[]; error?: string }>;
   listCollaborationFriends?: () => Promise<{ success: boolean; friends?: CollaborationPeerInfo[]; error?: string }>;
+  searchCollaborationFriendByEmail?: (email: string) => Promise<{ success: boolean; peer?: CollaborationPeerInfo | null; error?: string }>;
+  listCollaborationChatMessages?: (friendId: string) => Promise<{ success: boolean; messages?: CollaborationChatMessage[]; error?: string }>;
+  sendCollaborationChatMessage?: (params: { friendId: string; content: string }) => Promise<{ success: boolean; message?: CollaborationChatMessage; error?: string }>;
   addCollaborationFriend?: (peer: CollaborationPeerInfo) => Promise<{ success: boolean; friend?: CollaborationPeerInfo; friends?: CollaborationPeerInfo[]; error?: string }>;
   removeCollaborationFriend?: (friendId: string) => Promise<{ success: boolean; friends?: CollaborationPeerInfo[]; error?: string }>;
   sendCollaborationFile?: (params: { endpoint?: string; friendId?: string; filePath: string; projectName?: string; senderName?: string }) => Promise<{ success: boolean; result?: any; error?: string }>;
   onCollaborationPeersChanged?: (callback: (payload: { peers?: CollaborationPeerInfo[]; friends?: CollaborationPeerInfo[] }) => void) => () => void;
   onCollaborationFileReceived?: (callback: (payload: { filePath?: string; fileName?: string; size?: number; senderName?: string; projectName?: string; receivedAt?: string }) => void) => () => void;
   onCollaborationTaskReceived?: (callback: (payload: { task?: any; projectName?: string; senderName?: string; sentAt?: string }) => void) => () => void;
+  onCollaborationChatReceived?: (callback: (message: CollaborationChatMessage) => void) => () => void;
   sendFriendRequest?: (params: { targetId: string; targetHost: string; targetPort: number; message?: string }) => Promise<{ success: boolean; request?: any; error?: string }>;
   listFriendRequests?: () => Promise<{ success: boolean; requests?: CollaborationFriendRequest[]; error?: string }>;
   acceptFriendRequest?: (requestId: string) => Promise<{ success: boolean; friends?: CollaborationPeerInfo[]; error?: string }>;

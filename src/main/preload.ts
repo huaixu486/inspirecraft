@@ -108,6 +108,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendCollaborationTask: (params: { endpoint?: string; friendId?: string; task: any; projectName?: string; senderName?: string }) => ipcRenderer.invoke('collaboration:sendTask', params),
   listCollaborationPeers: () => ipcRenderer.invoke('collaboration:listPeers'),
   listCollaborationFriends: () => ipcRenderer.invoke('collaboration:listFriends'),
+  searchCollaborationFriendByEmail: (email: string) => ipcRenderer.invoke('collaboration:searchByEmail', email),
+  listCollaborationChatMessages: (friendId: string) => ipcRenderer.invoke('collaboration:listChatMessages', friendId),
+  sendCollaborationChatMessage: (params: { friendId: string; content: string }) => ipcRenderer.invoke('collaboration:sendChatMessage', params),
   addCollaborationFriend: (peer: any) => ipcRenderer.invoke('collaboration:addFriend', peer),
   removeCollaborationFriend: (friendId: string) => ipcRenderer.invoke('collaboration:removeFriend', friendId),
   sendCollaborationFile: (params: { endpoint?: string; friendId?: string; filePath: string; projectName?: string; senderName?: string }) => ipcRenderer.invoke('collaboration:sendFile', params),
@@ -129,6 +132,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = (_event: Electron.IpcRendererEvent, payload: any) => callback(payload);
     ipcRenderer.on('collaboration:taskReceived', listener);
     return () => ipcRenderer.removeListener('collaboration:taskReceived', listener);
+  },
+  onCollaborationChatReceived: (callback: (message: any) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, message: any) => callback(message);
+    ipcRenderer.on('collaboration:chatReceived', listener);
+    return () => ipcRenderer.removeListener('collaboration:chatReceived', listener);
   },
   onFriendRequestReceived: (callback: (payload: any) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: any) => callback(payload);
