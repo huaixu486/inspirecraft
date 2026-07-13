@@ -181,7 +181,7 @@ const WorkbenchContextBar: React.FC<Props> = ({ globalPage, embedded = false, hi
         )}
       </div>
 
-      {showQuickActions && (
+      {showNavigation && (
         <div className="workbench-context-nav">
           <Space size={mode === 'nav' ? 6 : 4} wrap>
             {navItems.map(item => {
@@ -206,7 +206,7 @@ const WorkbenchContextBar: React.FC<Props> = ({ globalPage, embedded = false, hi
         </div>
       )}
 
-      {showNavigation && (
+      {showQuickActions && (
         <div className="workbench-context-quick-actions">
           <Dropdown
             menu={{
