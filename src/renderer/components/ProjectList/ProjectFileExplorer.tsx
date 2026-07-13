@@ -8,7 +8,7 @@ import {
   FileExcelOutlined, FilePptOutlined, ArrowLeftOutlined, PlusOutlined,
   ReloadOutlined, FileWordOutlined, DeleteOutlined, FolderOpenOutlined, UndoOutlined,
   ImportOutlined, FolderAddOutlined, SearchOutlined, EditOutlined, CheckCircleOutlined,
-  ExperimentOutlined, SendOutlined, CopyOutlined, ExportOutlined,
+  SendOutlined, CopyOutlined, ExportOutlined,
 } from '@ant-design/icons';
 import { Project, ProjectDocument, WorkbenchFocus } from '../../../shared/types';
 import { useTemplateStore } from '../../stores/templateStore';
@@ -685,7 +685,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
     return document;
   };
 
-  const handleSendToWorkbench = async (item: FileItem, target: 'team' | 'review' | 'report') => {
+  const handleSendToWorkbench = async (item: FileItem, target: 'team' | 'review') => {
     if (item.isDirectory) return;
     try {
       const document = await ensureProjectDocument(item);
@@ -756,7 +756,6 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
       !item.isDirectory && { type: 'divider' as const },
       !item.isDirectory && { key: 'writing', icon: <EditOutlined />, label: '发送到团队写作', onClick: () => void handleSendToWorkbench(item, 'team') },
       !item.isDirectory && { key: 'review', icon: <CheckCircleOutlined />, label: '发送到审阅', onClick: () => void handleSendToWorkbench(item, 'review') },
-      !item.isDirectory && { key: 'report', icon: <ExperimentOutlined />, label: '发送到报告工作台', onClick: () => void handleSendToWorkbench(item, 'report') },
       !item.isDirectory && { key: 'share', icon: <SendOutlined />, label: '发送给好友…', onClick: () => void handleOpenShareModal(item) },
     ].filter(Boolean) as any[],
   });
