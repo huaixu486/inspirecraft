@@ -145,6 +145,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('collaboration:friendRequestReceived', listener);
     return () => ipcRenderer.removeListener('collaboration:friendRequestReceived', listener);
   },
+  loadMessageCenterState: () => ipcRenderer.invoke('communication:loadMessageCenterState'),
+  saveMessageCenterState: (state: any) => ipcRenderer.invoke('communication:saveMessageCenterState', state),
 
   // 设置操作
   loadSettings: () => ipcRenderer.invoke('settings:load'),

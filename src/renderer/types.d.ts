@@ -145,6 +145,8 @@ interface ElectronAPI {
   acceptFriendRequest?: (requestId: string) => Promise<{ success: boolean; friends?: CollaborationPeerInfo[]; error?: string }>;
   rejectFriendRequest?: (requestId: string) => Promise<{ success: boolean; error?: string }>;
   onFriendRequestReceived?: (callback: (payload: CollaborationFriendRequest) => void) => () => void;
+  loadMessageCenterState?: () => Promise<{ success: boolean; state?: { dismissedIds?: string[]; replies?: Array<{ id: string; messageId: string; content: string; createdAt: string }> } | null; error?: string }>;
+  saveMessageCenterState?: (state: { dismissedIds: string[]; replies: Array<{ id: string; messageId: string; content: string; createdAt: string }> }) => Promise<{ success: boolean; error?: string }>;
 
   // 设置操作
   loadSettings: () => Promise<{ workspacePath: string; workspaceCapacity: number; recycleBinRetentionDays?: number; userProfile?: { nickname: string; email: string; avatar?: string }; customStages?: any[]; compositionWeights?: import('../shared/types').CompositionWeightConfig; enableSystemNotifications?: boolean; autoProjectDescriptionEnabled?: boolean; holidayDataSource?: 'auto' | 'local' | 'online'; holidayApiUrl?: string; calendarDayRecords?: import('../shared/types').CalendarDayRecord[]; calendarItineraries?: import('../shared/types').CalendarItinerary[] } | null>;

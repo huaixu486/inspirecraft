@@ -178,6 +178,31 @@ const FriendChatWorkspace = ({
   const [systemDraft, setSystemDraft] = useState('');
   const messageEndRef = useRef<HTMLDivElement>(null);
 
+  const persistMessageCenterState = (nextDismissedIds: string[], nextReplies: LocalReply[]) => {
+    saveLocal(DISMISSED_KEY, nextDismissedIds);
+    saveLocal(REPLIES_KEY, nextReplies);
+    void window.electronAPI.saveMessageCenterState?.({ dismissedIds: nextDismissedIds, replies: nextReplies });
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.electronAPI.loadMessageCenterState?.().then(result => {
+      if (cancelled || !result?.success) return;
+      if (result.state) {
+        const nextDismissedIds = Array.isArray(result.state.dismissedIds) ? result.state.dismissedIds : [];
+        const nextReplies = Array.isArray(result.state.replies) ? result.state.replies as LocalReply[] : [];
+        setDismissedIds(nextDismissedIds);
+        setReplies(nextReplies);
+      } else {
+        persistMessageCenterState(dismissedIds, replies);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  // Read once per workspace-mounted message center. The main process owns the
+  // workspace path, while localStorage is only a migration fallback.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const systemMessages = useMemo(
     () => buildSystemMessages(projects, projectDocs, reviews).filter(item => !dismissedIds.includes(item.id)),
     [dismissedIds, projectDocs, projects, reviews],
@@ -204,7 +229,7 @@ const FriendChatWorkspace = ({
   const dismissSystem = (id: string) => {
     const next = [...new Set([...dismissedIds, id])].slice(-400);
     setDismissedIds(next);
-    saveLocal(DISMISSED_KEY, next);
+    persistMessageCenterState(next, replies);
   };
   const replyToSystem = () => {
     const content = systemDraft.trim();
@@ -212,7 +237,7 @@ const FriendChatWorkspace = ({
     const reply: LocalReply = { id: `reply-${Date.now()}`, messageId: 'system-reply', content, createdAt: new Date().toISOString() };
     const next = [...replies, reply].slice(-300);
     setReplies(next);
-    saveLocal(REPLIES_KEY, next);
+    persistMessageCenterState(dismissedIds, next);
     setSystemDraft('');
   };
 
@@ -262,7 +287,7 @@ const FriendChatWorkspace = ({
 
         <section className="message-center-chat">
           {activeKey === 'system' && <>
-            <header className="message-center-chat-head"><Space><Avatar style={{ background: '#e6f4ff', color: '#1677ff' }} icon={<BellOutlined />} /><div><Text strong>系统消息</Text><Text type="secondary">项目报告、审查与截止提醒</Text></div></Space><Button size="small" onClick={() => dismissedIds.length && (setDismissedIds([]), saveLocal(DISMISSED_KEY, []))}>恢复已删除</Button></header>
+            <header className="message-center-chat-head"><Space><Avatar style={{ background: '#e6f4ff', color: '#1677ff' }} icon={<BellOutlined />} /><div><Text strong>系统消息</Text><Text type="secondary">项目报告、审查与截止提醒</Text></div></Space><Button size="small" onClick={() => { if (!dismissedIds.length) return; setDismissedIds([]); persistMessageCenterState([], replies); }}>恢复已删除</Button></header>
             <div className="message-center-thread">
               {systemMessages.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无系统消息" style={{ marginTop: 110 }} /> : systemMessages.map(item => <div className="message-bubble-row" key={item.id}>
                 <Avatar size={30} style={{ background: item.severity === 'high' ? '#fff1f0' : item.severity === 'medium' ? '#fff7e6' : '#e6f4ff', color: item.severity === 'high' ? '#ff4d4f' : item.severity === 'medium' ? '#fa8c16' : '#1677ff' }} icon={<BellOutlined />} />

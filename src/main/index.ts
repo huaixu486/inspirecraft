@@ -247,11 +247,54 @@ function isPeerOnline(lastSeenAt?: string) {
   return Date.now() - new Date(lastSeenAt).getTime() < COLLABORATION_PEER_TTL_MS;
 }
 
-function loadCollaborationFriendsFromDisk(): CollaborationFriend[] {
-  ensureDataDir();
-  if (!fs.existsSync(collaborationFriendsFile)) return [];
+// Communication data belongs to the active workspace so messages and friend
+// state are included in its capacity calculation and travel with the workspace.
+// The device identity deliberately remains application-level: it identifies the
+// same installation when a user switches workspaces.
+const COLLABORATION_WORKSPACE_DIR = '.projecthub';
+const COLLABORATION_STORAGE_DIR = 'communication';
+
+function getCollaborationWorkspaceDir(workspacePath?: string) {
+  const configured = String(workspacePath || loadSettingsFromDisk().workspacePath || '').trim();
+  if (!configured) return '';
+  return path.join(path.resolve(configured), COLLABORATION_WORKSPACE_DIR, COLLABORATION_STORAGE_DIR);
+}
+
+function getCollaborationStorageFile(fileName: string, legacyFile: string) {
+  const dir = getCollaborationWorkspaceDir();
+  if (!dir) return legacyFile;
   try {
-    const rows = JSON.parse(fs.readFileSync(collaborationFriendsFile, 'utf-8'));
+    fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, fileName);
+    // One-time non-destructive migration from the former user-data location.
+    if (!fs.existsSync(target) && fs.existsSync(legacyFile)) fs.copyFileSync(legacyFile, target);
+    return target;
+  } catch {
+    return legacyFile;
+  }
+}
+
+function copyCollaborationWorkspaceData(sourceWorkspacePath?: string, targetWorkspacePath?: string) {
+  const sourceDir = getCollaborationWorkspaceDir(sourceWorkspacePath);
+  const targetDir = getCollaborationWorkspaceDir(targetWorkspacePath);
+  if (!sourceDir || !targetDir || path.resolve(sourceDir) === path.resolve(targetDir) || !fs.existsSync(sourceDir)) return;
+  try {
+    fs.mkdirSync(targetDir, { recursive: true });
+    for (const fileName of ['friends.json', 'requests.json', 'chats.json', 'message-center.json']) {
+      const source = path.join(sourceDir, fileName);
+      const target = path.join(targetDir, fileName);
+      if (fs.existsSync(source) && !fs.existsSync(target)) fs.copyFileSync(source, target);
+    }
+  } catch (error) {
+    console.warn('Failed to migrate collaboration workspace data:', error);
+  }
+}
+
+function loadCollaborationFriendsFromDisk(): CollaborationFriend[] {
+  const filePath = getCollaborationStorageFile('friends.json', collaborationFriendsFile);
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const rows = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     if (!Array.isArray(rows)) return [];
     return rows.filter(item => item?.id && item?.host && item?.port).map(item => ({
       id: String(item.id),
@@ -272,14 +315,15 @@ function loadCollaborationFriendsFromDisk(): CollaborationFriend[] {
 }
 
 function saveCollaborationFriendsToDisk(friends: CollaborationFriend[]) {
-  ensureDataDir();
-  fs.writeFileSync(collaborationFriendsFile, JSON.stringify(friends, null, 2), 'utf-8');
+  const filePath = getCollaborationStorageFile('friends.json', collaborationFriendsFile);
+  fs.writeFileSync(filePath, JSON.stringify(friends, null, 2), 'utf-8');
 }
 
 function loadCollaborationChatMessages(): CollaborationChatMessage[] {
   try {
-    if (!fs.existsSync(collaborationChatsFile)) return [];
-    const messages = JSON.parse(fs.readFileSync(collaborationChatsFile, 'utf-8'));
+    const filePath = getCollaborationStorageFile('chats.json', collaborationChatsFile);
+    if (!fs.existsSync(filePath)) return [];
+    const messages = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     return Array.isArray(messages) ? messages.filter(message => message?.id && message?.friendId && message?.content) : [];
   } catch {
     return [];
@@ -287,8 +331,8 @@ function loadCollaborationChatMessages(): CollaborationChatMessage[] {
 }
 
 function saveCollaborationChatMessages(messages: CollaborationChatMessage[]) {
-  ensureDataDir();
-  fs.writeFileSync(collaborationChatsFile, JSON.stringify(messages.slice(-3000), null, 2), 'utf-8');
+  const filePath = getCollaborationStorageFile('chats.json', collaborationChatsFile);
+  fs.writeFileSync(filePath, JSON.stringify(messages.slice(-3000), null, 2), 'utf-8');
 }
 
 function appendCollaborationChatMessage(message: CollaborationChatMessage) {
@@ -574,7 +618,7 @@ function sendFolderFileToPeer(url: URL, transferId: string, entry: Collaboration
 }
 
 async function sendFolderToPeer(params: CollaborationFileSendParams) {
-  const identity = requireCollaborationEmail();
+  const identity = getLocalCollaborationIdentity();
   const entries = collectFolderTransferEntries(params.filePath);
   const baseUrl = resolveCollaborationTarget(params);
   const initUrl = new URL(baseUrl.toString());
@@ -1354,6 +1398,11 @@ async function movePathToRecycleBin(filePath: string): Promise<RecycleBinEntry> 
 // 保存设置
 function saveSettingsToDisk(settings: AppSettings) {
   ensureDataDir();
+  const previousWorkspacePath = String(loadSettingsFromDisk().workspacePath || '').trim();
+  const nextWorkspacePath = String(settings.workspacePath || '').trim();
+  if (previousWorkspacePath && nextWorkspacePath && path.resolve(previousWorkspacePath) !== path.resolve(nextWorkspacePath)) {
+    copyCollaborationWorkspaceData(previousWorkspacePath, nextWorkspacePath);
+  }
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), 'utf-8');
 }
 
@@ -4936,7 +4985,7 @@ ipcMain.handle('task:loadAll', async () => {
 
 ipcMain.handle('collaboration:startReceiver', async (_event: any, params?: { port?: number }) => {
   try {
-    requireCollaborationEmail();
+    getLocalCollaborationIdentity();
     return await startCollaborationServer(params?.port || 39218);
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
@@ -4957,7 +5006,7 @@ ipcMain.handle('collaboration:getStatus', async () => ({
 
 ipcMain.handle('collaboration:sendTask', async (_event: any, params: { endpoint?: string; friendId?: string; task: TaskItem; projectName?: string; senderName?: string }) => {
   try {
-    requireCollaborationEmail();
+    getLocalCollaborationIdentity();
     const endpoint = resolveCollaborationTarget(params).toString();
     const result = await postJsonToPeer(endpoint, {
       task: params.task,
@@ -5015,7 +5064,6 @@ ipcMain.handle('collaboration:addFriend', async (_event: any, peer: Partial<LanP
 });
 
 ipcMain.handle('collaboration:removeFriend', async (_event: any, friendId: string) => {
-  requireCollaborationEmail();
   const friends = loadCollaborationFriendsFromDisk().filter(item => item.id !== friendId);
   saveCollaborationFriendsToDisk(friends);
   emitCollaborationPeersChanged();
@@ -5024,7 +5072,6 @@ ipcMain.handle('collaboration:removeFriend', async (_event: any, friendId: strin
 
 ipcMain.handle('collaboration:listFriends', async () => {
   try {
-    requireCollaborationEmail();
     return { success: true, friends: getCollaborationFriends() };
   } catch (error: any) {
     return { success: false, error: error?.message || String(error), friends: [] };
@@ -5033,7 +5080,6 @@ ipcMain.handle('collaboration:listFriends', async () => {
 
 ipcMain.handle('collaboration:listChatMessages', async (_event: any, friendId: string) => {
   try {
-    requireCollaborationEmail();
     return { success: true, messages: loadCollaborationChatMessages().filter(message => message.friendId === friendId).slice(-500) };
   } catch (error: any) {
     return { success: false, error: error?.message || String(error), messages: [] };
@@ -5042,7 +5088,7 @@ ipcMain.handle('collaboration:listChatMessages', async (_event: any, friendId: s
 
 ipcMain.handle('collaboration:sendChatMessage', async (_event: any, params: { friendId: string; content: string }) => {
   try {
-    const identity = requireCollaborationEmail();
+    const identity = getLocalCollaborationIdentity();
     const friend = getCollaborationFriends().find(item => item.id === params.friendId && item.status === 'accepted');
     const content = String(params.content || '').trim().slice(0, 4000);
     if (!friend) throw new Error('好友不存在或尚未确认');
@@ -5068,7 +5114,6 @@ ipcMain.handle('collaboration:sendChatMessage', async (_event: any, params: { fr
 
 ipcMain.handle('collaboration:sendFile', async (_event: any, params: CollaborationFileSendParams) => {
   try {
-    requireCollaborationEmail();
     const result = await sendFileToPeer(params);
     return { success: true, result };
   } catch (error: any) {
@@ -5080,16 +5125,40 @@ ipcMain.handle('collaboration:sendFile', async (_event: any, params: Collaborati
 
 function loadFriendRequestsFromDisk(): CollaborationFriendRequest[] {
   try {
-    if (!fs.existsSync(collaborationRequestsFile)) return [];
-    return JSON.parse(fs.readFileSync(collaborationRequestsFile, 'utf-8'));
+    const filePath = getCollaborationStorageFile('requests.json', collaborationRequestsFile);
+    if (!fs.existsSync(filePath)) return [];
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
   } catch {
     return [];
   }
 }
 
 function saveFriendRequestsToDisk(requests: CollaborationFriendRequest[]) {
-  fs.writeFileSync(collaborationRequestsFile, JSON.stringify(requests, null, 2), 'utf-8');
+  const filePath = getCollaborationStorageFile('requests.json', collaborationRequestsFile);
+  fs.writeFileSync(filePath, JSON.stringify(requests, null, 2), 'utf-8');
 }
+
+ipcMain.handle('communication:loadMessageCenterState', async () => {
+  try {
+    const filePath = getCollaborationStorageFile('message-center.json', path.join(dataDir, 'message-center.json'));
+    if (!fs.existsSync(filePath)) return { success: true, state: null };
+    return { success: true, state: JSON.parse(fs.readFileSync(filePath, 'utf-8')) };
+  } catch (error: any) {
+    return { success: false, state: null, error: error?.message || String(error) };
+  }
+});
+
+ipcMain.handle('communication:saveMessageCenterState', async (_event: any, state: any) => {
+  try {
+    const dismissedIds = Array.isArray(state?.dismissedIds) ? state.dismissedIds.map(String).slice(-400) : [];
+    const replies = Array.isArray(state?.replies) ? state.replies.slice(-300) : [];
+    const filePath = getCollaborationStorageFile('message-center.json', path.join(dataDir, 'message-center.json'));
+    fs.writeFileSync(filePath, JSON.stringify({ dismissedIds, replies }, null, 2), 'utf-8');
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
 
 ipcMain.handle('collaboration:sendFriendRequest', async (_event: any, params: { targetId: string; targetHost: string; targetPort: number; message?: string }) => {
   try {
@@ -5682,7 +5751,7 @@ ipcMain.handle('workspace:listFolders', async (_event: any, dirPath: string) => 
   try {
     if (!fs.existsSync(dirPath)) return { success: true, folders: [] };
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    const folders = entries.filter(e => e.isDirectory()).map(e => e.name);
+    const folders = entries.filter(e => e.isDirectory() && e.name !== COLLABORATION_WORKSPACE_DIR).map(e => e.name);
     return { success: true, folders };
   } catch (error: any) {
     return { success: false, folders: [], error: error.message };
