@@ -124,12 +124,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             await get().executeAITask(taskId, content, instruction);
           },
         },
-        async ({ setProgress, throwIfCancelled }) => {
+        async ({ jobId, setProgress, throwIfCancelled }) => {
           setProgress(35);
           const value = await window.electronAPI.executeAITask({
             taskId,
             content,
             instruction,
+            usageRequestId: jobId,
           });
           throwIfCancelled();
           setProgress(85);

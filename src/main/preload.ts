@@ -26,6 +26,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('system:notification-click', listener);
     return () => ipcRenderer.removeListener('system:notification-click', listener);
   },
+  onAIActivity: (callback: (activity: any) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, activity: any) => callback(activity);
+    ipcRenderer.on('ai:activity', listener);
+    return () => ipcRenderer.removeListener('ai:activity', listener);
+  },
   parseWordDocument: (filePath: string) => ipcRenderer.invoke('file:parseWord', filePath),
   parseDocument: (filePath: string) => ipcRenderer.invoke('file:parseDocument', filePath),
   replaceDocumentText: (params: { filePath: string; originalText: string; replacementText: string }) => ipcRenderer.invoke('file:replaceDocumentText', params),

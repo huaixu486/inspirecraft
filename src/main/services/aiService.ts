@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import { net } from 'electron';
 import { AIConfig, AIModelConfig } from '../types';
 import { aiConfigFile, aiLogFile, logsDir } from '../shared/paths';
-import { recordAIUsage, TokenUsage } from './aiUsageService';
+import { emitAIActivity, recordAIUsage, TokenUsage } from './aiUsageService';
 
 // ─── AI 日志 ────────────────────────────────────────────
 
@@ -420,12 +420,26 @@ async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<str
 }
 
 export async function callAIModel(config: AIModelConfig, prompt: string): Promise<string> {
-  if (config.provider === 'claude') return callClaudeAPI(config, prompt);
-  if (config.provider === 'custom' && /\/anthropic(?:\/|$)/i.test(config.endpoint || '')) {
-    return callClaudeAPI(config, prompt);
+  const id = `ai-call-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const modelName = config.name || config.model;
+  emitAIActivity({ id, status: 'started', modelName, model: config.model });
+  try {
+    let result: string;
+    if (config.provider === 'claude') {
+      result = await callClaudeAPI(config, prompt);
+    } else if (config.provider === 'custom' && /\/anthropic(?:\/|$)/i.test(config.endpoint || '')) {
+      result = await callClaudeAPI(config, prompt);
+    } else if (config.provider === 'openai' || config.provider === 'custom') {
+      result = await callOpenAIAPI(config, prompt);
+    } else {
+      throw new Error('不支持的 AI 提供商');
+    }
+    emitAIActivity({ id, status: 'completed', modelName, model: config.model });
+    return result;
+  } catch (error: any) {
+    emitAIActivity({ id, status: 'failed', modelName, model: config.model, error: String(error?.message || error || '未知错误').slice(0, 220) });
+    throw error;
   }
-  if (config.provider === 'openai' || config.provider === 'custom') return callOpenAIAPI(config, prompt);
-  throw new Error('不支持的 AI 提供商');
 }
 
 export async function callDefaultAI(prompt: string, modelId?: string): Promise<string> {

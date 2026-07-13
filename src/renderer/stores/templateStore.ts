@@ -92,12 +92,13 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
             await get().executeReview(versionId, templateId, config);
           },
         },
-        async ({ setProgress, throwIfCancelled }) => {
+        async ({ jobId, setProgress, throwIfCancelled }) => {
           setProgress(35);
           const value = await window.electronAPI.executeReview({
             versionId,
             templateId,
             config,
+            usageRequestId: jobId,
           });
           throwIfCancelled();
           setProgress(85);

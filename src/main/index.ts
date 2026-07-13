@@ -29,7 +29,7 @@ import {
   callParallelAIDetails,
   callAIModel,
 } from './services/aiService';
-import { getAIUsageRecords, getAIUsageStatistics, runWithAIUsageContext, sumAIUsage } from './services/aiUsageService';
+import { getAIUsageRecords, getAIUsageStatistics, onAIActivity, runWithAIUsageContext, sumAIUsage } from './services/aiUsageService';
 import { composePromptMain } from './shared/promptComposer';
 import * as mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
@@ -780,6 +780,44 @@ function loadSettingsFromDisk(): AppSettings {
     return { workspacePath: defaultWorkspacePath, workspaceCapacity: 10 };
   }
 }
+
+// Every model call, including calls made outside the task planner, reports a
+// single lifecycle to both the renderer task center and Windows notifications.
+// No prompt or document content is ever included in the notification body.
+onAIActivity((activity) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ai:activity', activity);
+  }
+
+  const settings = loadSettingsFromDisk();
+  if (settings.enableSystemNotifications === false || !Notification.isSupported()) return;
+  if (!didEnsureWindowsNotificationShortcut) ensureWindowsNotificationShortcut();
+
+  const title = activity.status === 'started'
+    ? `AI 正在处理：${activity.modelName}`
+    : activity.status === 'completed'
+      ? `AI 已完成：${activity.modelName}`
+      : `AI 任务失败：${activity.modelName}`;
+  const body = activity.status === 'started'
+    ? '任务已加入 AI 任务中心，可在应用右上角查看进度。'
+    : activity.status === 'completed'
+      ? '任务处理完成，结果已返回到当前工作区。'
+      : `处理未完成：${activity.error || '请检查模型配置或网络后重试。'}`;
+  try {
+    const notification = new Notification({ title, body });
+    notification.on('click', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      }
+      app.focus({ steal: true });
+    });
+    notification.show();
+  } catch (error) {
+    console.warn('[AI] Failed to show Windows notification:', error);
+  }
+});
 
 // 递归计算目录大小（字节）
 async function getDirSize(dirPath: string): Promise<number> {
@@ -3787,6 +3825,7 @@ ipcMain.handle('review:execute', async (_event: any, params: {
   versionId: string;
   templateId: string;
   config: ReviewConfig;
+  usageRequestId?: string;
 }) => {
   const versions = loadVersionsFromDisk();
   const templates = loadTemplatesFromDisk();
@@ -3927,7 +3966,9 @@ ipcMain.handle('review:execute', async (_event: any, params: {
         issueText,
         content: content.slice(0, 6000),
       });
-      aiSuggestions = await callDefaultAI(reviewPrompt);
+      aiSuggestions = params.usageRequestId
+        ? await runWithAIUsageContext(params.usageRequestId, () => callDefaultAI(reviewPrompt))
+        : await callDefaultAI(reviewPrompt);
     } catch (error) {
       console.warn('AI review suggestion failed:', error);
     }
@@ -4651,14 +4692,14 @@ ipcMain.handle('task:delete', async (_event: any, taskId: string) => {
 });
 
 // AI 执行任务
-ipcMain.handle('task:executeAI', async (_event: any, params: { taskId: string; content: string; instruction: string }) => {
+ipcMain.handle('task:executeAI', async (_event: any, params: { taskId: string; content: string; instruction: string; usageRequestId?: string }) => {
   const prompt = composePromptMain('taskExecute', {
     instruction: params.instruction,
     content: params.content.substring(0, 3000),
   });
 
   try {
-    const usageRequestId = `task:${params.taskId}:${Date.now()}`;
+    const usageRequestId = params.usageRequestId || `task:${params.taskId}:${Date.now()}`;
     const result = await runWithAIUsageContext(usageRequestId, () => callConfiguredAI(prompt));
     const usage = sumAIUsage(getAIUsageRecords(usageRequestId));
 

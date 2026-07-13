@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { message } from 'antd';
 import type { AIJob, AIJobScene } from '../../shared/types';
 
 export class AIJobCancelledError extends Error {
@@ -36,6 +37,16 @@ type AIJobRunOptions<T> = {
   retry?: () => Promise<void>;
 };
 
+type AIActivity = {
+  id: string;
+  status: 'started' | 'completed' | 'failed';
+  createdAt: string;
+  modelName: string;
+  model: string;
+  requestId?: string;
+  error?: string;
+};
+
 interface AIJobState {
   jobs: AIJob[];
   updateJob: (id: string, updates: Partial<AIJob>) => void;
@@ -43,6 +54,7 @@ interface AIJobState {
   retryJob: (id: string) => Promise<boolean>;
   clearFinished: () => void;
   clearJob: (id: string) => void;
+  syncExternalActivity: (activity: AIActivity) => void;
   runAIJob: <T>(options: AIJobRunOptions<T>, executor: (helpers: AIJobRunHelpers) => Promise<T>) => Promise<T>;
 }
 
@@ -72,6 +84,15 @@ const defaultPreview = (value: unknown) => {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
   return text.replace(/\s+/g, ' ').trim().slice(0, 120);
 };
+
+const notifyJob = (kind: 'loading' | 'success' | 'error', key: string, content: string) => {
+  if (typeof document === 'undefined') return;
+  message[kind]({ key, content, duration: kind === 'loading' ? 0 : 5 });
+};
+
+const formatTokenUsage = (usage?: AIJob['tokenUsage']) => usage && usage.totalTokens > 0
+  ? `（输入 ${usage.inputTokens.toLocaleString()} / 输出 ${usage.outputTokens.toLocaleString()}，共 ${usage.totalTokens.toLocaleString()} Token${usage.source === 'estimated' ? '，估算' : ''}）`
+  : '';
 
 /** 生成去重 key：scene + projectId + docId + inputHash */
 const buildDedupeKey = (options: { scene: string; projectId?: string; docId?: string; inputHash?: string }) =>
@@ -140,6 +161,41 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
     }));
   },
 
+  syncExternalActivity: (activity) => {
+    const localJob = activity.requestId ? get().jobs.find(job => job.id === activity.requestId) : undefined;
+    if (localJob) {
+      if (activity.status === 'completed') {
+        get().updateJob(localJob.id, { progress: Math.max(localJob.progress, 90), resultPreview: '模型已返回，正在整理结果…' });
+      } else if (activity.status === 'failed') {
+        get().updateJob(localJob.id, { error: activity.error || 'AI 调用失败' });
+      }
+      return;
+    }
+
+    const id = `external:${activity.id}`;
+    const existing = get().jobs.find(job => job.id === id);
+    if (activity.status === 'started') {
+      if (existing) return;
+      const job: AIJob = {
+        id,
+        scene: 'general',
+        title: `AI 处理：${activity.modelName}`,
+        status: 'running',
+        progress: 35,
+        dedupeKey: id,
+        createdAt: activity.createdAt,
+        updatedAt: activity.createdAt,
+        startedAt: activity.createdAt,
+      };
+      set(state => ({ jobs: [job, ...state.jobs].slice(0, MAX_JOBS) }));
+      return;
+    }
+    if (!existing) return;
+    get().updateJob(id, activity.status === 'completed'
+      ? { status: 'completed', progress: 100, resultPreview: `模型 ${activity.modelName} 已完成`, finishedAt: activity.createdAt }
+      : { status: 'failed', progress: 100, error: activity.error || 'AI 调用失败', finishedAt: activity.createdAt });
+  },
+
   runAIJob: async (options, executor) => {
     // 去重检查：如果已有相同 dedupeKey 的 queued/running 任务，直接复用
     const dedupeKey = options.dedupeKey || buildDedupeKey(options);
@@ -201,6 +257,7 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
 
     try {
       get().updateJob(id, { status: 'running', progress: 10, startedAt: nowIso() });
+      notifyJob('loading', id, `AI 正在处理：${options.title}`);
       throwIfCancelled();
       const result = await executor({ jobId: id, signal: controller.signal, setProgress, isCancelled, throwIfCancelled });
       throwIfCancelled();
@@ -218,6 +275,7 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
         canRetry: false,
         tokenUsage: tokenUsage && tokenUsage.totalTokens > 0 ? tokenUsage : undefined,
       });
+      notifyJob('success', id, `AI 已完成：${options.title}${formatTokenUsage(tokenUsage)}`);
       return result;
     } catch (error: any) {
       if (isAIJobCancelledError(error) || isCancelled()) {
@@ -237,6 +295,7 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
         finishedAt: nowIso(),
         canRetry: Boolean(options.retry),
       });
+      notifyJob('error', id, `AI 任务失败：${options.title}。${error?.message || '请稍后重试。'}`);
       throw error;
     } finally {
       activeControllers.delete(id);

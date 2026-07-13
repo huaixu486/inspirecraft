@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AsyncLocalStorage } from 'async_hooks';
+import { EventEmitter } from 'events';
 import { AIModelConfig } from '../types';
 import { aiUsageFile } from '../shared/paths';
 
@@ -25,6 +26,19 @@ export interface AIUsageRecord extends TokenUsage {
 
 const MAX_RECORDS = 20000;
 const requestContext = new AsyncLocalStorage<string>();
+const activityEvents = new EventEmitter();
+
+export type AIActivityStatus = 'started' | 'completed' | 'failed';
+
+export interface AIActivity {
+  id: string;
+  status: AIActivityStatus;
+  createdAt: string;
+  modelName: string;
+  model: string;
+  requestId?: string;
+  error?: string;
+}
 
 const safeNumber = (value: unknown) => {
   const number = Number(value);
@@ -67,6 +81,21 @@ function saveRecords(records: AIUsageRecord[]) {
 
 export function runWithAIUsageContext<T>(requestId: string, callback: () => Promise<T>): Promise<T> {
   return requestContext.run(requestId, callback);
+}
+
+export const getAIUsageContext = () => requestContext.getStore();
+
+export function emitAIActivity(activity: Omit<AIActivity, 'createdAt' | 'requestId'>) {
+  activityEvents.emit('activity', {
+    ...activity,
+    createdAt: new Date().toISOString(),
+    requestId: requestContext.getStore(),
+  } satisfies AIActivity);
+}
+
+export function onAIActivity(listener: (activity: AIActivity) => void) {
+  activityEvents.on('activity', listener);
+  return () => activityEvents.off('activity', listener);
 }
 
 export function recordAIUsage(model: AIModelConfig, usage: Partial<TokenUsage>): AIUsageRecord {

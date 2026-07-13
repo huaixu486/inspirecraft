@@ -45,6 +45,7 @@ interface ElectronAPI {
   showSystemNotification?: (params: { title: string; body?: string; silent?: boolean; target?: string; projectId?: string }) => Promise<{ success: boolean; error?: string; shortcut?: any; appUserModelId?: string }>;
   getSystemNotificationStatus?: () => Promise<{ supported: boolean; shortcut?: any; appUserModelId?: string }>;
   onSystemNotificationClick?: (callback: (payload: { target?: string; projectId?: string }) => void) => () => void;
+  onAIActivity?: (callback: (activity: { id: string; status: 'started' | 'completed' | 'failed'; createdAt: string; modelName: string; model: string; requestId?: string; error?: string }) => void) => () => void;
   parseWordDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; error?: string }>;
   parseDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; convertedFilePath?: string; error?: string }>;
   replaceDocumentText: (params: { filePath: string; originalText: string; replacementText: string }) => Promise<{ success: boolean; replacedCount?: number; backupPath?: string; matchMode?: 'exact' | 'compact'; error?: string }>;
@@ -108,7 +109,7 @@ interface ElectronAPI {
   saveTask: (task: any) => Promise<void>;
   loadTasks: () => Promise<any[]>;
   deleteTask: (taskId: string) => Promise<void>;
-  executeAITask: (params: { taskId: string; content: string; instruction: string }) => Promise<{ success: boolean; result?: string; usage?: import('../shared/types').AITokenUsage; error?: string }>;
+  executeAITask: (params: { taskId: string; content: string; instruction: string; usageRequestId?: string }) => Promise<{ success: boolean; result?: string; usage?: import('../shared/types').AITokenUsage; error?: string }>;
 
 
   // LAN collaboration
