@@ -107,19 +107,24 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => 
   const openProjectFromRow = (project: Project, initialTab?: string, row?: HTMLElement | null) => {
     cancelPendingSingleClickOpen();
     if (initialTab === 'files') {
+      setHighlightedProjectId(null);
+      setRowHighlight(prev => ({ ...prev, visible: false }));
       onEnterProject(project, 'files');
       return;
     }
 
-    // 等待系统判定单击：若随后收到 dblclick，此回调会被取消，
-    // 因此双击只进入文件页，不会先闪出项目侧边窗。
+    // Highlight selection immediately. Only opening the detail rail waits for
+    // the double-click window, so visual feedback never feels delayed.
+    flushSync(() => {
+      showRowHighlight(row || null, 'preview');
+      setHighlightedProjectId(project.id);
+    });
+
+    // Wait only for the side-panel open: if a dblclick follows, this callback
+    // is cancelled and the row goes straight to the file view.
     singleClickTimerRef.current = window.setTimeout(() => {
       singleClickTimerRef.current = 0;
-      flushSync(() => {
-        showRowHighlight(row || null, 'preview');
-        setHighlightedProjectId(project.id);
-        onPreviewProject?.(project);
-      });
+      onPreviewProject?.(project);
     }, PROJECT_TABLE_SINGLE_CLICK_DELAY_MS);
   };
 

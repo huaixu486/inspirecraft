@@ -960,6 +960,9 @@ function ensureWindowsNotificationShortcut() {
 
 // 文件夹监听器
 const folderWatchers: Map<string, fs.FSWatcher> = new Map();
+// Prevent delayed background saves (folder scans, metadata refreshes) from
+// accidentally recreating a project that has just been moved to the recycle bin.
+const deletedProjectIds = new Set<string>();
 
 // 数据存储路径
 const userDataPath = app.getPath('userData');
@@ -2792,12 +2795,16 @@ ipcMain.handle('system:notificationStatus', async () => {
 ipcMain.handle('project:save', async (_event: any, project: Project) => {
   const projects = loadProjectsFromDisk();
   const index = projects.findIndex(p => p.id === project.id);
+  if (index < 0 && deletedProjectIds.has(project.id)) {
+    return { success: false, error: 'Project has been deleted' };
+  }
   if (index >= 0) {
     projects[index] = project;
   } else {
     projects.push(project);
   }
   saveProjectsToDisk(projects);
+  return { success: true };
 });
 
 function getLatestProjectFolderModifiedAt(folderPath: string): string | undefined {
@@ -2856,7 +2863,17 @@ ipcMain.handle('project:refreshFolderModifiedAt', async (_event: any, projectIds
       if (idx >= 0) projects[idx].folderModifiedAt = folderModifiedAt;
     }
   }
-  if (updates.length > 0) saveProjectsToDisk(projects);
+  if (updates.length > 0) {
+    // Re-read before persisting. The project may have been deleted while this
+    // lightweight metadata refresh was running; never write a stale list back.
+    const updatesById = new Map(updates.map(update => [update.id, update.folderModifiedAt]));
+    const latestProjects = loadProjectsFromDisk();
+    const merged = latestProjects.map(project => {
+      const folderModifiedAt = updatesById.get(project.id);
+      return folderModifiedAt ? { ...project, folderModifiedAt } : project;
+    });
+    saveProjectsToDisk(merged);
+  }
   return updates;
 });
 
@@ -2865,6 +2882,7 @@ ipcMain.handle('project:delete', async (_event: any, projectId: string) => {
     const projects = loadProjectsFromDisk();
     const project = projects.find(item => item.id === projectId);
     if (!project) return { success: false, error: 'Project not found' };
+    deletedProjectIds.add(projectId);
 
     const snapshot = {
       project,
@@ -2902,6 +2920,7 @@ ipcMain.handle('project:delete', async (_event: any, projectId: string) => {
     saveReferenceMaterialsToDisk(loadReferenceMaterialsFromDisk().filter(item => item.projectId !== projectId));
     return { success: true, recycleEntry };
   } catch (error: any) {
+    deletedProjectIds.delete(projectId);
     return { success: false, error: error?.message || String(error) };
   }
 });
