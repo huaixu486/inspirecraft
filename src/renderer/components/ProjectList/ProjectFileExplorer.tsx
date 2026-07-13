@@ -1911,6 +1911,11 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
               选择模板后文件类型使用该模板的创建类型
             </Text>
           )}
+          {!selectedTemplateId && (
+            <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>
+              未选择模板时会创建真正的空白文件，不会写入默认标题或示例内容。
+            </Text>
+          )}
         </div>
         <div style={{ marginBottom: 14 }}>
           <Text strong style={{ display: 'block', marginBottom: 6 }}>文件名</Text>
