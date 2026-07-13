@@ -2799,6 +2799,18 @@ ipcMain.handle('project:save', async (_event: any, project: Project) => {
     return { success: false, error: 'Project has been deleted' };
   }
   if (index >= 0) {
+    const persistedUpdatedAt = Date.parse(projects[index].updatedAt || '');
+    const incomingUpdatedAt = Date.parse(project.updatedAt || '');
+    // Renderer work such as a file scan can finish after the user has edited
+    // the detail rail.  Those callbacks still hold an older full Project
+    // object, so accepting it would bring a cleared description back.
+    if (
+      Number.isFinite(persistedUpdatedAt)
+      && Number.isFinite(incomingUpdatedAt)
+      && incomingUpdatedAt < persistedUpdatedAt
+    ) {
+      return { success: false, error: 'A newer project update already exists' };
+    }
     projects[index] = project;
   } else {
     projects.push(project);

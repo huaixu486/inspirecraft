@@ -512,7 +512,12 @@ const DetailPanelSkeleton = () => (
 const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = false, isSwitching, initialTab = 'overview', onOpenDetail, onClose }) => {
   const projects = useProjectStore(s => s.projects);
   const setCurrentProject = useProjectStore(s => s.setCurrentProject);
-  const currentProject = project; // 内部使用 currentProject 保持兼容
+  // The rail keeps `project` during its closing animation.  While it is open,
+  // always render the newest store record instead of that animation snapshot,
+  // otherwise an emptied description can remain visibly stale.
+  const currentProject = project
+    ? projects.find(item => item.id === project.id) || project
+    : null;
   const versions = useProjectStore(s => s.versions);
   const setCurrentStageName = useProjectStore(s => s.setCurrentStageName);
   const setPendingReportDocId = useProjectStore(s => s.setPendingReportDocId);

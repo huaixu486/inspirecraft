@@ -78,7 +78,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const newProjects = [...prev, project];
     set({ projects: newProjects });
     try {
-      await window.electronAPI.saveProject(project);
+      const result = await window.electronAPI.saveProject(project);
+      if (result && result.success === false) throw new Error(result.error || '保存项目失败');
     } catch (error) {
       console.error('Failed to save project:', error);
       set({ projects: prev });
@@ -98,23 +99,34 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   updateProject: async (id, updates) => {
     const prev = get().projects;
+    const updatedAt = new Date().toISOString();
     const projects = prev.map((p) =>
-      p.id === id ? { ...p, ...updates, updatedAt: new Date().toISOString() } : p
+      p.id === id ? { ...p, ...updates, updatedAt } : p
     );
     const currentProject = get().currentProject;
     set({
       projects,
       currentProject: currentProject?.id === id
-        ? { ...currentProject, ...updates, updatedAt: new Date().toISOString() }
+        ? { ...currentProject, ...updates, updatedAt }
         : currentProject,
     });
     const updatedProject = projects.find(p => p.id === id);
     if (updatedProject) {
       try {
-        await window.electronAPI.saveProject(updatedProject);
+        const result = await window.electronAPI.saveProject(updatedProject);
+        if (result && result.success === false) throw new Error(result.error || '保存项目失败');
       } catch (error) {
         console.error('Failed to update project:', error);
-        set({ projects: prev });
+        // Do not roll back a newer local edit made while this save was pending.
+        set((state) => ({
+          projects: state.projects.map((project) => {
+            if (project.id !== id || project.updatedAt !== updatedAt) return project;
+            return prev.find(item => item.id === id) || project;
+          }),
+          currentProject: state.currentProject?.id === id && state.currentProject.updatedAt === updatedAt
+            ? (prev.find(item => item.id === id) || state.currentProject)
+            : state.currentProject,
+        }));
       }
     }
   },

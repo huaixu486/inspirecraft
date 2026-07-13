@@ -66,7 +66,7 @@ interface ElectronAPI {
   parsePdfDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; error?: string }>;
 
   // 项目操作
-  saveProject: (project: any) => Promise<void>;
+  saveProject: (project: any) => Promise<{ success: boolean; error?: string }>;
   loadProjects: () => Promise<any[]>;
   deleteProject: (projectId: string) => Promise<{ success: boolean; recycleEntry?: { id: string; name?: string }; error?: string }>;
   refreshProjectFolderModifiedAt: (projectIds: string[]) => Promise<{ id: string; folderModifiedAt: string }[]>;
