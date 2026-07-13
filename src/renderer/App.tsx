@@ -1,5 +1,5 @@
 ﻿import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Badge, Button, Empty, Input, List, Modal, Popover, Space, Tabs, Tag, Typography, message } from 'antd';
+import { Badge, Button, Empty, Input, List, Modal, Space, Tabs, Tag, Typography, message } from 'antd';
 import {
   CalendarOutlined,
   FileTextOutlined,
@@ -10,9 +10,7 @@ import {
   CloseOutlined,
   ReloadOutlined,
   DeleteOutlined,
-  MessageOutlined,
   SearchOutlined,
-  SendOutlined,
 } from '@ant-design/icons';
 import Overview from './components/Overview/Overview';
 import NotificationCenter from './components/Notifications/NotificationCenter';
@@ -25,6 +23,7 @@ import { useProjectDocStore } from './stores/projectDocStore';
 import { useNavigationStore } from './stores/navigationStore';
 import { Project, WorkbenchFocus, WorkbenchPage } from '../shared/types';
 import WorkbenchContextBar from './components/Workbench/WorkbenchContextBar';
+import FriendChatWorkspace from './components/Collaboration/FriendChatWorkspace';
 import dayjs from 'dayjs';
 
 const { Title, Text } = Typography;
@@ -93,7 +92,7 @@ class ErrorBoundary extends React.Component<
 const App: React.FC = () => {
   const [globalPage, setGlobalPage] = useState<GlobalPage>('overview');
   const [panelInitialTab, setPanelInitialTab] = useState('overview');
-  const [friendPopoverOpen, setFriendPopoverOpen] = useState(false);
+  const [friendWorkspaceOpen, setFriendWorkspaceOpen] = useState(false);
   const [lanFriends, setLanFriends] = useState<CollaborationPeerInfo[]>([]);
   const [addFriendOpen, setAddFriendOpen] = useState(false);
   const [addFriendTab, setAddFriendTab] = useState<'lan' | 'email' | 'requests'>('lan');
@@ -108,6 +107,7 @@ const App: React.FC = () => {
   const [chatDraft, setChatDraft] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const [chatSending, setChatSending] = useState(false);
+  const [chatFileSending, setChatFileSending] = useState(false);
   const [bootDone, setBootDone] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const lastNonOverviewPageRef = useRef<GlobalPage | null>(null);
@@ -283,6 +283,65 @@ const App: React.FC = () => {
       setChatSending(false);
     }
   }, [chatDraft, chatFriend]);
+
+  const sendChatFile = useCallback(async () => {
+    if (!chatFriend) {
+      message.warning('请先选择一位好友');
+      return;
+    }
+    if (!chatFriend.online) {
+      message.warning('好友当前离线，暂不能发送文件');
+      return;
+    }
+    const filePath = await window.electronAPI.openFile([{ name: '所有文件', extensions: ['*'] }]);
+    if (!filePath) return;
+
+    setChatFileSending(true);
+    try {
+      const result = await window.electronAPI.sendCollaborationFile?.({
+        friendId: chatFriend.id,
+        filePath,
+        projectName: currentProject?.name,
+        senderName: userProfile?.nickname || 'ProjectHub 用户',
+      });
+      if (!result?.success) {
+        message.error(result?.error || '文件发送失败');
+        return;
+      }
+      message.success('文件已发送给好友');
+    } finally {
+      setChatFileSending(false);
+    }
+  }, [chatFriend, currentProject?.name, userProfile?.nickname]);
+
+  const shareCurrentProjectToChat = useCallback(async () => {
+    if (!chatFriend) {
+      message.warning('请先选择一位好友');
+      return;
+    }
+    if (!currentProject) {
+      message.info('请先进入一个项目后再分享项目进度');
+      return;
+    }
+    if (!chatFriend.online) {
+      message.warning('好友当前离线，暂不能分享项目');
+      return;
+    }
+    const description = String(currentProject.description || '').trim().replace(/\s+/g, ' ').slice(0, 180);
+    const content = `邀请你协作项目《${currentProject.name}》\n当前进度：${currentProject.progress || 0}%${description ? `\n项目概述：${description}` : ''}`;
+    setChatSending(true);
+    try {
+      const result = await window.electronAPI.sendCollaborationChatMessage?.({ friendId: chatFriend.id, content });
+      if (!result?.success || !result.message) {
+        message.error(result?.error || '项目分享失败');
+        return;
+      }
+      setChatMessages(prev => [...prev, result.message!]);
+      message.success('项目进度已发送到会话');
+    } finally {
+      setChatSending(false);
+    }
+  }, [chatFriend, currentProject]);
 
   const searchFriendByEmail = useCallback(async () => {
     const email = emailSearch.trim();
@@ -976,46 +1035,6 @@ const App: React.FC = () => {
     void refreshFriendRequests();
   };
 
-  const friendPopoverContent = (
-    <div style={{ width: 276, maxWidth: 'calc(100vw - 48px)', userSelect: 'none' }} onWheel={(event) => event.stopPropagation()}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-        <Space size={6}>
-          <Text strong>{'\u5c40\u57df\u7f51\u597d\u53cb'}</Text>
-          <Tag color={onlineFriendCount > 0 ? 'green' : 'default'} style={{ margin: 0 }}>{onlineFriendCount} {'\u5728\u7ebf'}</Tag>
-          {pendingRequestCount > 0 && <Tag color="orange" style={{ margin: 0 }}>{pendingRequestCount} {'\u8bf7\u6c42'}</Tag>}
-        </Space>
-        <Space size={4}>
-          <Button size="small" type="text" icon={<UserAddOutlined />} onClick={openAddFriendModal}>{'\u6dfb\u52a0'}</Button>
-          <Button size="small" type="text" onClick={refreshLanFriends}>{'\u5237\u65b0'}</Button>
-        </Space>
-      </div>
-      {lanFriends.length === 0 ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={'\u6682\u65e0\u597d\u53cb\uff0c\u70b9\u51fb"\u6dfb\u52a0"\u641c\u7d22\u5c40\u57df\u7f51\u8bbe\u5907'} />
-      ) : (
-        <div style={{ maxHeight: 300, overflowY: 'auto', overscrollBehavior: 'contain', paddingRight: 4 }}>
-          <List
-            size="small"
-            dataSource={lanFriends}
-            renderItem={(friend) => (
-              <List.Item
-                style={{ padding: '8px 6px', borderBlockEnd: 'none', borderRadius: 7, background: friend.online ? '#f6ffed' : 'transparent', marginBottom: 3 }}
-                actions={[
-                  <Button key="chat" type="text" size="small" icon={<MessageOutlined />} disabled={!friend.online} onClick={() => void openChat(friend)}>聊天</Button>,
-                  <Button key="remove" type="text" size="small" danger onClick={() => handleRemoveFriend(friend.id)}>{'\u79fb\u9664'}</Button>,
-                ]}
-              >
-                <List.Item.Meta
-                  avatar={<span style={{ width: 8, height: 8, borderRadius: '50%', background: friend.online ? '#52c41a' : '#d9d9d9', display: 'inline-block', marginTop: 7 }} />}
-                  title={<Space size={5}><Text style={{ maxWidth: 130 }} ellipsis={{ tooltip: friend.name || friend.host }}>{friend.name || friend.host}</Text><Tag color={friend.online ? 'green' : 'default'} style={{ margin: 0, fontSize: 10 }}>{friend.online ? '\u5728\u7ebf' : '\u79bb\u7ebf'}</Tag></Space>}
-                  description={<Text type="secondary" style={{ fontSize: 11 }}>{friend.host}:{friend.port}</Text>}
-                />
-              </List.Item>
-            )}
-          />
-        </div>
-      )}
-    </div>
-  );
   // 从 navigationStore 取最近一次 focus 传递给目标页面
   const lastFocusRef = useRef<WorkbenchFocus | null>(null);
   useEffect(() => {
@@ -1111,19 +1130,23 @@ const App: React.FC = () => {
 
         <Space size={8}>
           <NotificationCenter onOpenTarget={handleOpenNotificationTarget} />
-          <Popover open={friendPopoverOpen} onOpenChange={(open) => {
-            if (open && !hasCollaborationEmail) {
-              message.warning('请先在设置 - 基础设置中填写有效邮箱，才能使用好友功能');
-              navigateToPage('settings');
-              return;
-            }
-            setFriendPopoverOpen(open);
-            if (open) void refreshLanFriends();
-          }} trigger="click" placement="bottomRight" content={friendPopoverContent} arrow overlayStyle={{ maxWidth: 306 }}>
-            <Badge count={onlineFriendCount + pendingRequestCount} size="small" overflowCount={9} offset={[-2, 4]}>
-              <Button icon={<TeamOutlined />} title={hasCollaborationEmail ? '好友' : '请先在设置中填写邮箱'} aria-label={'\u597d\u53cb'} onMouseDown={(event) => event.preventDefault()} />
-            </Badge>
-          </Popover>
+          <Badge count={onlineFriendCount + pendingRequestCount} size="small" overflowCount={9} offset={[-1, 3]}>
+            <Button
+              icon={<TeamOutlined />}
+              title={hasCollaborationEmail ? '好友消息' : '请先在设置中填写邮箱'}
+              aria-label={'好友消息'}
+              onClick={() => {
+                if (!hasCollaborationEmail) {
+                  message.warning('请先在设置 - 基础设置中填写有效邮箱，才能使用好友功能');
+                  navigateToPage('settings');
+                  return;
+                }
+                setFriendWorkspaceOpen(true);
+                void refreshLanFriends();
+                void refreshFriendRequests();
+              }}
+            />
+          </Badge>
           <Button
             icon={<FileTextOutlined />}
             onClick={() => navigateToPage('project-templates')}
@@ -1421,34 +1444,29 @@ const App: React.FC = () => {
         />
       </Modal>
 
-      <Modal
-        title={chatFriend ? `与 ${chatFriend.name || chatFriend.email || chatFriend.host} 聊天` : '好友聊天'}
-        open={Boolean(chatFriend)}
-        onCancel={() => setChatFriend(null)}
-        footer={null}
-        width={460}
-        destroyOnClose
-      >
-        <div style={{ height: 340, overflowY: 'auto', padding: '4px 2px 10px', background: '#fafcff', borderRadius: 8 }}>
-          {chatLoading ? <div style={{ padding: 24, textAlign: 'center' }}><Text type="secondary">正在加载聊天记录…</Text></div> : chatMessages.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无消息，发一句问候吧" /> : (
-            <Space direction="vertical" size={8} style={{ width: '100%' }}>
-              {chatMessages.map(item => {
-                const outgoing = item.direction === 'outgoing';
-                return <div key={item.id} style={{ display: 'flex', justifyContent: outgoing ? 'flex-end' : 'flex-start' }}>
-                  <div style={{ maxWidth: '78%', padding: '7px 10px', borderRadius: 10, background: outgoing ? '#e6f4ff' : '#fff', border: `1px solid ${outgoing ? '#bae0ff' : '#edf1f5'}` }}>
-                    <Text style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{item.content}</Text>
-                    <Text type="secondary" style={{ display: 'block', fontSize: 10, marginTop: 3 }}>{new Date(item.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</Text>
-                  </div>
-                </div>;
-              })}
-            </Space>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <Input.TextArea value={chatDraft} onChange={(event) => setChatDraft(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void sendChatMessage(); } }} placeholder={chatFriend?.online ? '输入消息，Enter 发送，Shift + Enter 换行' : '好友离线，暂不能发送'} autoSize={{ minRows: 2, maxRows: 4 }} disabled={!chatFriend?.online || chatSending} />
-          <Button type="primary" icon={<SendOutlined />} loading={chatSending} disabled={!chatDraft.trim() || !chatFriend?.online} onClick={() => void sendChatMessage()}>发送</Button>
-        </div>
-      </Modal>
+      <FriendChatWorkspace
+        open={friendWorkspaceOpen}
+        friends={lanFriends}
+        selectedFriend={chatFriend}
+        messages={chatMessages}
+        loadingMessages={chatLoading}
+        draft={chatDraft}
+        sending={chatSending}
+        sendingFile={chatFileSending}
+        pendingRequestCount={pendingRequestCount}
+        onClose={() => setFriendWorkspaceOpen(false)}
+        onSelectFriend={(friend) => void openChat(friend)}
+        onDraftChange={setChatDraft}
+        onSendMessage={() => void sendChatMessage()}
+        onSendFile={() => void sendChatFile()}
+        onShareProject={() => void shareCurrentProjectToChat()}
+        onOpenAddFriend={openAddFriendModal}
+        onRefresh={() => {
+          void refreshLanFriends();
+          void refreshFriendRequests();
+        }}
+        onRemoveFriend={(friendId) => void handleRemoveFriend(friendId)}
+      />
 
       {/* Ctrl+K 命令面板 */}
       <LazyCommandPalette
