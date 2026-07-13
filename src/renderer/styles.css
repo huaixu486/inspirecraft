@@ -989,6 +989,14 @@ body.template-editor-modal-open {
   background: transparent !important;
 }
 
+/* The homepage table is selected by click, not hover. Ant Design also adds
+   this class directly to cells during pointer movement, so neutralize both
+   paths and avoid a repaint for every row the cursor crosses. */
+.overview-project-table .ant-table-tbody > tr.ant-table-row:hover > td,
+.overview-project-table .ant-table-tbody > tr > td.ant-table-cell-row-hover {
+  background: transparent !important;
+}
+
 .overview-project-table .overview-project-row-preview > td,
 .overview-project-table .overview-project-row-selected > td {
   background: transparent !important;
@@ -2458,7 +2466,7 @@ body.template-editor-modal-open {
 /* --- Project table row transitions --- */
 .overview-project-table .ant-table-tbody > tr:not(.ant-table-measure-row) {
   height: 58px;
-  transition: background-color 100ms cubic-bezier(0.2, 0, 0, 1);
+  transition: none;
 }
 
 .overview-project-table .ant-table-tbody > tr:not(.ant-table-measure-row) > td {
@@ -2468,9 +2476,7 @@ body.template-editor-modal-open {
   padding-bottom: 0 !important;
   box-sizing: border-box;
   vertical-align: middle;
-  transition:
-    background-color 100ms cubic-bezier(0.2, 0, 0, 1),
-    box-shadow 100ms cubic-bezier(0.2, 0, 0, 1);
+  transition: none;
 }
 
 /* Ant Design adds a hidden row to measure column widths.  It must not inherit
