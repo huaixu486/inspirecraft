@@ -2925,10 +2925,6 @@ body.template-editor-modal-open {
   will-change: transform;
 }
 
-.gantt-time-layer {
-  transform: translate3d(0, 0, 0);
-}
-
 .gantt-scroll-area {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -2945,6 +2941,12 @@ body.template-editor-modal-open {
 
 .gantt-modal-loading {
   contain: layout paint;
+}
+
+/* Avoid creating a separate compositor layer for every row while idle.
+   The transform layer is applied only during an active horizontal pan above. */
+.gantt-timeline-modal .gantt-scroll-area {
+  contain: paint;
 }
 
 .gantt-bars-entering .gantt-bar {

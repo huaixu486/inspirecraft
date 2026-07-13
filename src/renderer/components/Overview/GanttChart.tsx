@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { Card, Modal, Typography } from 'antd';
 import { WarningOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
@@ -172,7 +173,13 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
   const zoomArmedRef = useRef(false);
   const [zoomArmed, setZoomArmed] = useState(false);
   const flushPendingView = useCallback(() => {
-    if (pendingViewRef.current) { setView(pendingViewRef.current); pendingViewRef.current = null; }
+    if (pendingViewRef.current) {
+      const nextView = pendingViewRef.current;
+      pendingViewRef.current = null;
+      // A zoom can change many bars.  Keep it interruptible so native scroll,
+      // drag and modal controls stay responsive even with a large project list.
+      startTransition(() => setView(nextView));
+    }
     rafRef.current = 0;
   }, []);
   const scheduleViewUpdate = useCallback((updater: (prev: { start: number; span: number }) => { start: number; span: number }) => {
@@ -231,7 +238,8 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
     };
   }, [updateViewportWidth]);
 
-  // 滚轮缩放
+  // 仅 Ctrl + 滚轮缩放。展开视图的普通滚轮必须保留给原生纵向滚动，
+  // 紧凑视图也不会再因误触滚轮改变时间尺度。
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -241,9 +249,7 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       const plotWidth = Math.max(240, scrollRect.width - PROJECT_COL - STAGE_COL);
       const inPlot = e.clientX >= plotLeft && e.clientX <= plotLeft + plotWidth;
       if (!inPlot) return;
-      // Compact cards should stay easy to browse. Zooming requires a deliberate
-      // long press so ordinary wheel scrolling never changes the timeline scale.
-      if (compact && !zoomArmedRef.current) return;
+      if (!e.ctrlKey) return;
       e.stopPropagation();
       e.preventDefault();
       const mousePct = clamp((e.clientX - plotLeft) / plotWidth, 0, 1);
@@ -324,7 +330,8 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
           if (!current.active || current.pointerId !== e.pointerId || current.dragging) return;
           zoomArmedRef.current = true;
           setZoomArmed(true);
-          // A long press is an interaction, not the compact card's open click.
+          // Long-press keeps the compact timeline's free panning interaction.
+          // It is also an interaction rather than an open click.
           onDraggingChange?.(true);
           longPressTimerRef.current = 0;
         }, 360);
@@ -339,6 +346,14 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       const totalDx = e.clientX - pan.startX;
       const totalDy = e.clientY - pan.startY;
       if (!pan.dragging && Math.hypot(totalDx, totalDy) < 4) return;
+      // In the compact card, a long press deliberately enters free panning.
+      // Moving before the hold threshold neither pans nor opens the modal.
+      if (compact && !zoomArmedRef.current) {
+        clearLongPress();
+        panRef.current = { ...pan, active: false };
+        onDraggingChange?.(true);
+        return;
+      }
       if (!pan.dragging) {
         clearLongPress();
         panRef.current = { ...pan, dragging: true };
@@ -421,7 +436,7 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       {/* 时间头 */}
       <div style={{ display: 'grid', gridTemplateColumns: `${PROJECT_COL + STAGE_COL}px minmax(0, 1fr)`, height: 30, overflow: 'hidden' }}>
         <div />
-        <div ref={timeAreaRef} className={`gantt-time-header${isPanning ? ' gantt-panning' : ''}${zoomArmed ? ' gantt-zoom-armed' : ''}`} style={{ position: 'relative', overflow: 'hidden', cursor: isPanning ? 'grabbing' : zoomArmed ? 'zoom-in' : 'grab' }}>
+        <div ref={timeAreaRef} className={`gantt-time-header${isPanning ? ' gantt-panning' : ''}${zoomArmed ? ' gantt-zoom-armed' : ''}`} style={{ position: 'relative', overflow: 'hidden', cursor: isPanning ? 'grabbing' : 'grab' }}>
           <div className="gantt-time-layer" style={{ position: 'absolute', inset: 0 }}>
             {ticks.map((tick, index) => (
               <span key={`${tick.text}-${index}`} style={{ position: 'absolute', left: `${tick.pct}%`, transform: 'translateX(-50%)', fontSize: tick.major ? 11 : 10, color: tick.major ? '#555' : '#aaa', whiteSpace: 'nowrap', userSelect: 'none', pointerEvents: 'none' }}>
@@ -438,7 +453,7 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       </div>
 
       {/* 滚动区域 */}
-      <div className={`gantt-scroll-area${isPanning ? ' gantt-panning' : ''}${zoomArmed ? ' gantt-zoom-armed' : ''}`} ref={scrollRef} style={{ height, position: 'relative', overflowX: 'hidden', overflowY: compact ? 'hidden' : 'auto', userSelect: isPanning ? 'none' : undefined, cursor: isPanning ? 'grabbing' : zoomArmed ? 'zoom-in' : 'grab', touchAction: 'none' }}>
+      <div className={`gantt-scroll-area${isPanning ? ' gantt-panning' : ''}${zoomArmed ? ' gantt-zoom-armed' : ''}`} ref={scrollRef} style={{ height, position: 'relative', overflowX: 'hidden', overflowY: compact ? 'hidden' : 'auto', userSelect: isPanning ? 'none' : undefined, cursor: isPanning ? 'grabbing' : 'grab', touchAction: 'pan-y' }}>
         {/* 网格线 */}
         <div className="gantt-time-layer" style={{ position: 'absolute', left: PROJECT_COL + STAGE_COL, right: 0, top: 0, height: totalContentHeight || '100%', pointerEvents: 'none', overflow: 'hidden', zIndex: 0 }}>
           {ticks.filter(tick => tick.major).map((tick, index) => (
@@ -554,14 +569,19 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
 
   const handleCompactClick = useCallback(() => {
     if (!suppressOpenRef.current) {
-      setTimelineModalOpen(true);
-      // Paint the lightweight modal shell first. Deferring the full timeline by
-      // one frame keeps the click response and opening animation responsive.
+      // Commit the mask and dialog shell inside this click.  Without this,
+      // React could batch it behind the compact chart's pointer cleanup and
+      // the user would see a blur before the dialog began opening.
+      flushSync(() => {
+        setTimelineContentMounted(false);
+        setTimelineModalOpen(true);
+      });
+      // Let the modal paint immediately, then mount the full timeline on the
+      // next frame. The former double-frame delay made the mask appear to wait
+      // before the opening animation began.
       modalMountFrameRef.current = requestAnimationFrame(() => {
-        modalMountFrameRef.current = requestAnimationFrame(() => {
-          modalMountFrameRef.current = 0;
-          setTimelineContentMounted(true);
-        });
+        modalMountFrameRef.current = 0;
+        setTimelineContentMounted(true);
       });
     }
     suppressOpenRef.current = false;
