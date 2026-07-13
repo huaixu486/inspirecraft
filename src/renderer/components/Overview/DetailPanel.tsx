@@ -1522,8 +1522,8 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
                     await convertToManualDescription(currentProject, updateProject, text);
                     message.success('已保存为手动描述');
                   } else {
-                    await resetAutoDescriptionLock(currentProject, updateProject);
                     setDescEditText('');
+                    await resetAutoDescriptionLock(currentProject, updateProject);
                     message.success('已清空，AI 将在满足条件后重新编写');
                   }
                   setDescEditing(false);
@@ -1531,8 +1531,8 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
                 <Button size="small" onClick={() => setDescEditing(false)}>取消</Button>
                 {currentProject.description && (
                   <Popconfirm title="确定清空描述？" onConfirm={async () => {
-                    await resetAutoDescriptionLock(currentProject, updateProject);
                     setDescEditText('');
+                    await resetAutoDescriptionLock(currentProject, updateProject);
                     setDescEditing(false);
                     message.success('已清空，AI 将在满足条件后重新编写');
                   }}>

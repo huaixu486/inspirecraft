@@ -91,6 +91,15 @@ const Overview: React.FC<Props> = ({ visible, onEnterProject, panelInitialTab, o
     setPanelIntentProject(currentProject);
   }, [currentProject?.id]);
 
+  // The rail keeps its own project object while opening/closing to avoid a
+  // visual jump.  Keep that object fresh for in-place updates (description,
+  // status, progress, etc.); previously it only refreshed when the project ID
+  // changed, so edits to the selected project remained visibly stale.
+  useEffect(() => {
+    if (!currentProject || panelProject?.id !== currentProject.id) return;
+    setPanelProject(currentProject);
+  }, [currentProject, panelProject?.id]);
+
   const cancelPendingPanelOpen = React.useCallback(() => {
     if (openFrameRef.current) {
       window.cancelAnimationFrame(openFrameRef.current);
