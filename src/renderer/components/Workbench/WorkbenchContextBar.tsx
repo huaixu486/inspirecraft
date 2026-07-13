@@ -112,13 +112,6 @@ const WorkbenchContextBar: React.FC<Props> = ({ globalPage, embedded = false, hi
     return sorted[0] || null;
   }, [currentProject, projectDocsList, currentStage, allStages]);
 
-  // 当前模板
-  const currentTemplate = useMemo(() => {
-    if (!currentDoc) return null;
-    const templates = useTemplateStore.getState().templates;
-    return templates.find(t => t.id === currentDoc.templateId) || null;
-  }, [currentDoc]);
-
   // 快捷操作
   const handleOpenFolder = async () => {
     if (currentProject?.folderPath) {
@@ -182,37 +175,6 @@ const WorkbenchContextBar: React.FC<Props> = ({ globalPage, embedded = false, hi
           <Tooltip title="文档完成进度">
             <Tag className="workbench-context-status-tag workbench-context-progress-tag">
               进度 {progress}%
-            </Tag>
-          </Tooltip>
-        )}
-        {showStatus && memoryCount > 0 && (
-          <Tooltip title="阶段记忆条数">
-            <Tag className="workbench-context-status-tag workbench-context-memory-tag">
-              记忆 {memoryCount}
-            </Tag>
-          </Tooltip>
-        )}
-        {showStatus && currentDoc && (
-          <Tooltip title={`当前文档：${currentDoc.name}`}>
-            <Tag className="workbench-context-status-tag" color="purple" style={{ cursor: 'pointer' }}
-              onClick={() => navigate({ target: 'report', projectId: currentProject.id, docId: currentDoc.id, source: 'overview' })}>
-              {currentDoc.name.length > 12 ? currentDoc.name.slice(0, 12) + '…' : currentDoc.name}
-            </Tag>
-          </Tooltip>
-        )}
-        {showStatus && currentTemplate && (
-          <Tooltip title={`当前模板：${currentTemplate.name}`}>
-            <Tag className="workbench-context-status-tag" color="cyan">
-              模板：{currentTemplate.name.length > 8 ? currentTemplate.name.slice(0, 8) + '…' : currentTemplate.name}
-            </Tag>
-          </Tooltip>
-        )}
-        {showStatus && latestReview && (
-          <Tooltip title={`审查于 ${new Date(latestReview.createdAt).toLocaleDateString('zh-CN')}，${latestReview.issues?.length || 0} 个问题`}>
-            <Tag className="workbench-context-status-tag" color={latestReview.score >= 80 ? 'green' : latestReview.score >= 60 ? 'orange' : 'red'}
-              style={{ cursor: 'pointer' }}
-              onClick={() => navigate({ target: 'review', projectId: currentProject.id, reviewId: latestReview.id, source: 'overview' })}>
-              审查 {latestReview.score}分
             </Tag>
           </Tooltip>
         )}

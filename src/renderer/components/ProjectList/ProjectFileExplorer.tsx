@@ -1306,9 +1306,6 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
                 {currentFolderName}
               </Text>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
-                <Tag color={isInRoot ? 'blue' : 'default'} style={{ margin: 0, borderRadius: 999, fontSize: 11 }}>
-                  {isInRoot ? '根目录' : '子目录'}
-                </Tag>
                 <WorkbenchContextBar globalPage="project-files" embedded hideProjectTitle mode="status" />
               </div>
             </div>
