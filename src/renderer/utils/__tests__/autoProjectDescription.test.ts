@@ -31,6 +31,7 @@ test('auto description requires a quiet due project with at least two files', ()
   assert.equal(shouldGenerateAutoProjectDescription(createProject({
     autoDescriptionLastFileActivityAt: undefined,
   }), 2), false);
+  assert.equal(shouldGenerateAutoProjectDescription(createProject(), 2, false), false);
 });
 
 test('manual or already generated descriptions are never automatically overwritten', () => {

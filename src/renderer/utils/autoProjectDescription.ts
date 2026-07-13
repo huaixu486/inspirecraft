@@ -60,7 +60,9 @@ export const markAutoDescriptionFileActivity = async (
 export const shouldGenerateAutoProjectDescription = (
   project?: Project | null,
   fileCount?: number,
+  enabled = true,
 ) => {
+  if (!enabled) return false;
   if (!project) return false;
   if (isManualProjectDescription(project)) return false;
   if (project.autoDescriptionGeneratedAt) return false;
@@ -115,13 +117,14 @@ export const maybeGenerateAutoProjectDescription = async (
   allStages: StageConfig[],
   updateProject: UpdateProjectFn,
   fileCount?: number,
-  options: { forceRetry?: boolean } = {},
+  options: { forceRetry?: boolean; enabled?: boolean } = {},
 ) => {
+  if (options.enabled === false) return false;
   const isEligibleForRetry = !isManualProjectDescription(project)
     && !project.autoDescriptionGeneratedAt
     && !project.description?.trim()
     && (fileCount === undefined || fileCount >= 2);
-  if (options.forceRetry ? !isEligibleForRetry : !shouldGenerateAutoProjectDescription(project, fileCount)) return false;
+  if (options.forceRetry ? !isEligibleForRetry : !shouldGenerateAutoProjectDescription(project, fileCount, options.enabled)) return false;
   const now = new Date();
   const nowIso = now.toISOString();
   try {
@@ -149,7 +152,7 @@ export const maybeGenerateAutoProjectDescription = async (
             allStages,
             updateProject,
             fileCount,
-            { forceRetry: true },
+            { forceRetry: true, enabled: options.enabled },
           );
         },
       },

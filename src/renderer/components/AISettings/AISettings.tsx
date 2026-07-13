@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Typography, Tabs, message } from 'antd';
 import {
-  SettingOutlined, RobotOutlined, FileTextOutlined, AppstoreOutlined, BranchesOutlined, BarChartOutlined,
+  SettingOutlined, RobotOutlined, FileTextOutlined, AppstoreOutlined, BranchesOutlined, BarChartOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import { AIConfig } from '../../../shared/types';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -13,6 +13,7 @@ import PromptSettings from './PromptSettings';
 import SkillSettings from './SkillSettings';
 import CompositionSettings from './CompositionSettings';
 import AIUsageSettings from './AIUsageSettings';
+import AutomationSettings from './AutomationSettings';
 
 const { Title } = Typography;
 
@@ -60,6 +61,11 @@ const AISettings: React.FC = () => {
       key: 'composition',
       label: <span><BranchesOutlined /> 合成规则</span>,
       children: <CompositionSettings />,
+    },
+    {
+      key: 'automation',
+      label: <span><ThunderboltOutlined /> 自动化</span>,
+      children: <AutomationSettings />,
     },
     {
       key: 'usage',

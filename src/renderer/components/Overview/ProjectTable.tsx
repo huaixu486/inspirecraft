@@ -51,6 +51,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => 
   const navigateWorkbench = useNavigationStore(state => state.navigate);
   const workspacePath = useSettingsStore(s => s.workspacePath);
   const customStages = useSettingsStore(s => s.customStages);
+  const autoProjectDescriptionEnabled = useSettingsStore(s => s.autoProjectDescriptionEnabled);
   const allStages = useMemo(() => getAllStages(customStages), [customStages]);
   const stageMeta = useMemo(() => getStageMeta(allStages), [allStages]);
 
@@ -211,6 +212,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => 
 
   // 轻量扫描：检测项目文件活动（不读内容，只看修改时间）
   const scanProjectFileActivity = useCallback(async (project: Project) => {
+    if (!autoProjectDescriptionEnabled) return;
     if (!project.folderPath) return;
     if (isManualProjectDescription(project)) return;
     if (project.autoDescriptionGeneratedAt) return;
@@ -249,7 +251,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => 
     } catch (error) {
       console.warn('Project file activity scan failed:', error);
     }
-  }, [updateProject]);
+  }, [autoProjectDescriptionEnabled, updateProject]);
 
   // 阶段文件同步 + 活动检测（主扫描）
   const scanOne = useCallback(async (project: Project): Promise<boolean> => {
@@ -307,17 +309,17 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => 
       }
 
       // AI 生成
-      if (!autoScanCancelledRef.current) {
+      if (!autoScanCancelledRef.current && autoProjectDescriptionEnabled) {
         const latestProjects = useProjectStore.getState().projects;
         const latestDocs = useProjectDocStore.getState().projectDocs;
         for (const project of latestProjects) {
           if (autoScanCancelledRef.current) break;
-          if (!shouldGenerateAutoProjectDescription(project)) continue;
+          if (!shouldGenerateAutoProjectDescription(project, undefined, autoProjectDescriptionEnabled)) continue;
           try {
             const statsResult = await window.electronAPI.getTreeStats(project.folderPath);
             const fileCount = statsResult?.stats?.fileCount ?? 0;
             if (fileCount < 2) continue;
-            await maybeGenerateAutoProjectDescription(project, latestDocs, allStages, updateProject, fileCount);
+            await maybeGenerateAutoProjectDescription(project, latestDocs, allStages, updateProject, fileCount, { enabled: autoProjectDescriptionEnabled });
           } catch {}
         }
       }
@@ -328,7 +330,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => 
       });
       autoScanBusyRef.current = false;
     }
-  }, [allStages, templates, addProjectDoc, updateProjectDoc, updateProject, scanOne]);
+  }, [allStages, templates, addProjectDoc, updateProjectDoc, updateProject, scanOne, autoProjectDescriptionEnabled]);
 
   // 启动后延迟扫描一次 + 每 15 分钟周期扫描
   useEffect(() => {

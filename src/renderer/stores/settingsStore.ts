@@ -19,6 +19,7 @@ interface SettingsState {
   customStages: StageConfig[];
   compositionWeights: CompositionWeightConfig | null;
   enableSystemNotifications: boolean;
+  autoProjectDescriptionEnabled: boolean;
   holidayDataSource: HolidayDataSource;
   holidayApiUrl: string;
   calendarDayRecords: CalendarDayRecord[];
@@ -31,6 +32,7 @@ interface SettingsState {
   updateRecycleBinRetentionDays: (days: number) => Promise<void>;
   updateUserProfile: (profile: UserProfile) => Promise<void>;
   updateSystemNotifications: (enabled: boolean) => Promise<void>;
+  updateAutoProjectDescriptionEnabled: (enabled: boolean) => Promise<void>;
   updateHolidaySettings: (settings: { source?: HolidayDataSource; apiUrl?: string }) => Promise<void>;
   updateCalendarDayRecords: (records: CalendarDayRecord[]) => Promise<void>;
   updateCalendarItineraries: (itineraries: CalendarItinerary[]) => Promise<void>;
@@ -56,6 +58,7 @@ function buildSettingsSnapshot(state: SettingsState, overrides: Partial<AppSetti
     customStages: state.customStages,
     compositionWeights: state.compositionWeights ?? undefined,
     enableSystemNotifications: state.enableSystemNotifications,
+    autoProjectDescriptionEnabled: state.autoProjectDescriptionEnabled,
     holidayDataSource: state.holidayDataSource,
     holidayApiUrl: state.holidayApiUrl,
     calendarDayRecords: state.calendarDayRecords,
@@ -73,6 +76,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   customStages: [],
   compositionWeights: null,
   enableSystemNotifications: true,
+  autoProjectDescriptionEnabled: true,
   holidayDataSource: 'auto',
   holidayApiUrl: 'https://timor.tech/api/holiday/year/{year}',
   calendarDayRecords: [],
@@ -92,6 +96,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           customStages: settings.customStages ?? [],
           compositionWeights: settings.compositionWeights ?? null,
           enableSystemNotifications: settings.enableSystemNotifications !== false,
+          autoProjectDescriptionEnabled: settings.autoProjectDescriptionEnabled !== false,
           holidayDataSource: settings.holidayDataSource || 'auto',
           holidayApiUrl: settings.holidayApiUrl || 'https://timor.tech/api/holiday/year/{year}',
           calendarDayRecords: settings.calendarDayRecords || [],
@@ -165,6 +170,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to save settings:', error);
       set({ enableSystemNotifications: prevEnabled });
+    }
+  },
+
+  updateAutoProjectDescriptionEnabled: async (enabled: boolean) => {
+    const previous = get().autoProjectDescriptionEnabled;
+    set({ autoProjectDescriptionEnabled: enabled });
+    try {
+      await saveSettings(buildSettingsSnapshot(get(), { autoProjectDescriptionEnabled: enabled }));
+    } catch (error) {
+      console.error('Failed to save auto project description setting:', error);
+      set({ autoProjectDescriptionEnabled: previous });
     }
   },
 

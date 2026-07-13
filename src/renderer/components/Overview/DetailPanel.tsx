@@ -536,6 +536,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   const deleteTask = useTaskStore(s => s.deleteTask);
   const navigateWorkbench = useNavigationStore(state => state.navigate);
   const customStages = useSettingsStore(s => s.customStages);
+  const autoProjectDescriptionEnabled = useSettingsStore(s => s.autoProjectDescriptionEnabled);
   const allStages = getAllStages(customStages);
   const stageMeta = getStageMeta(allStages);
 
@@ -649,18 +650,18 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   // 自动项目描述：兜底触发（主要由 ProjectTable 后台调度，这里仅作补充）
   useEffect(() => {
     if (!currentProject) return;
-    if (!shouldGenerateAutoProjectDescription(currentProject)) return;
+    if (!shouldGenerateAutoProjectDescription(currentProject, undefined, autoProjectDescriptionEnabled)) return;
     const timer = window.setTimeout(async () => {
       try {
         const statsResult = await window.electronAPI.getTreeStats(currentProject.folderPath);
         const fileCount = statsResult?.stats?.fileCount ?? 0;
         if (fileCount >= 2) {
-          void maybeGenerateAutoProjectDescription(currentProject, projectDocs, allStages, updateProject, fileCount);
+          void maybeGenerateAutoProjectDescription(currentProject, projectDocs, allStages, updateProject, fileCount, { enabled: autoProjectDescriptionEnabled });
         }
       } catch {}
     }, 1500);
     return () => clearTimeout(timer);
-  }, [currentProject?.id, currentProject?.autoDescriptionNextUpdateAt, currentProject?.autoDescriptionPendingSince, currentProject?.autoDescriptionGeneratedAt, currentProject?.autoDescriptionGenerationAttempted, projectDocs, allStages, updateProject]);
+  }, [currentProject?.id, currentProject?.autoDescriptionNextUpdateAt, currentProject?.autoDescriptionPendingSince, currentProject?.autoDescriptionGeneratedAt, currentProject?.autoDescriptionGenerationAttempted, projectDocs, allStages, updateProject, autoProjectDescriptionEnabled]);
 
   // 报告Tab：已分析的文档按阶段分组（非首屏，延后到 contentReady）
   const analyzedDocsByStage = useMemo(() => {

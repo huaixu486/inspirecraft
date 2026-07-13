@@ -347,6 +347,7 @@ export interface AppSettings {
   recycleBinRetentionDays?: number; // 回收站自动清理天数，1-365
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
   enableSystemNotifications?: boolean; // Enable Windows system notifications
+  autoProjectDescriptionEnabled?: boolean; // Automatically generate an empty project overview after file activity settles
   holidayDataSource?: HolidayDataSource; // Calendar holiday source
   holidayApiUrl?: string; // Calendar holiday API URL, supports {year}
   calendarDayRecords?: CalendarDayRecord[];
