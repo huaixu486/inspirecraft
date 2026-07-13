@@ -16,6 +16,15 @@ export type UpdateProjectFn = (id: string, updates: Partial<Project>) => Promise
 export const isManualProjectDescription = (project?: Project | null) =>
   Boolean(project?.description?.trim()) && project?.descriptionSource !== 'auto';
 
+export type AutoProjectDescriptionStatus = 'completed' | 'pending' | 'failed' | 'manual';
+
+export const getAutoProjectDescriptionStatus = (project?: Project | null): AutoProjectDescriptionStatus => {
+  if (isManualProjectDescription(project)) return 'manual';
+  if (project?.descriptionSource === 'auto' && project.description.trim()) return 'completed';
+  if (project?.autoDescriptionLastErrorAt || project?.autoDescriptionRetryAt) return 'failed';
+  return 'pending';
+};
+
 const addDays = (date: Date, days: number) => new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 const addHours = (date: Date, hours: number) => new Date(date.getTime() + hours * 60 * 60 * 1000);
 
@@ -46,6 +55,7 @@ export const markAutoDescriptionFileActivity = async (
     autoDescriptionPendingSince: activityAt,
     autoDescriptionNextUpdateAt: addDays(new Date(activityAt), AUTO_PROJECT_DESCRIPTION_INTERVAL_DAYS).toISOString(),
     autoDescriptionPendingFileNames: pendingNames,
+    autoDescriptionGenerationToken: `activity-${Date.now()}`,
   });
 };
 
@@ -127,6 +137,16 @@ export const maybeGenerateAutoProjectDescription = async (
   if (options.forceRetry ? !isEligibleForRetry : !shouldGenerateAutoProjectDescription(project, fileCount, options.enabled)) return false;
   const now = new Date();
   const nowIso = now.toISOString();
+  const generationToken = project.autoDescriptionGenerationToken;
+  const canApplyAutoResult = () => {
+    const latest = useProjectStore.getState().projects.find(item => item.id === project.id);
+    return Boolean(
+      latest
+      && latest.autoDescriptionGenerationToken === generationToken
+      && !isManualProjectDescription(latest)
+      && !latest.description?.trim(),
+    );
+  };
   try {
     const prompt = await buildAutoDescriptionPrompt(project, docs, allStages);
     if (!prompt.trim()) {
@@ -169,6 +189,7 @@ export const maybeGenerateAutoProjectDescription = async (
     );
     const description = normalizeAiSummary(String(response || ''));
     if (!description) {
+      if (!canApplyAutoResult()) return false;
       // AI 返回空内容：不永久锁定，24 小时后重试
       await updateProject(project.id, {
         autoDescriptionGenerationAttempted: true,
@@ -178,6 +199,7 @@ export const maybeGenerateAutoProjectDescription = async (
       return false;
     }
     // 成功：写入描述并永久锁定
+    if (!canApplyAutoResult()) return false;
     await updateProject(project.id, {
       description,
       descriptionSource: 'auto',
@@ -194,6 +216,7 @@ export const maybeGenerateAutoProjectDescription = async (
   } catch (error) {
     if (isAIJobCancelledError(error)) return false;
     console.warn('Auto project description failed:', error);
+    if (!canApplyAutoResult()) return false;
     // 失败：不永久锁定，24 小时后重试
     await updateProject(project.id, {
       autoDescriptionGenerationAttempted: true,
@@ -212,14 +235,20 @@ export const resetAutoDescriptionLock = async (
   project: Project,
   updateProject: UpdateProjectFn,
 ) => {
+  const now = new Date();
   await updateProject(project.id, {
     description: '',
-    descriptionSource: undefined,
+    descriptionSource: 'auto',
     autoDescriptionGeneratedAt: undefined,
     autoDescriptionGenerationAttempted: undefined,
     autoDescriptionUpdatedAt: undefined,
     autoDescriptionRetryAt: undefined,
     autoDescriptionLastErrorAt: undefined,
+    autoDescriptionLastFileActivityAt: now.toISOString(),
+    autoDescriptionPendingSince: now.toISOString(),
+    autoDescriptionNextUpdateAt: addDays(now, AUTO_PROJECT_DESCRIPTION_INTERVAL_DAYS).toISOString(),
+    autoDescriptionPendingFileNames: [],
+    autoDescriptionGenerationToken: `cleared-${Date.now()}`,
   });
 };
 
@@ -242,5 +271,6 @@ export const convertToManualDescription = async (
     autoDescriptionRetryAt: undefined,
     autoDescriptionLastErrorAt: undefined,
     autoDescriptionPendingFileNames: [],
+    autoDescriptionGenerationToken: `manual-${Date.now()}`,
   });
 };

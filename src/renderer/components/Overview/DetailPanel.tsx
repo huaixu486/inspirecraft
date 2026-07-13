@@ -27,7 +27,7 @@ import {
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { isManualProjectDescription, maybeGenerateAutoProjectDescription, shouldGenerateAutoProjectDescription, convertToManualDescription, resetAutoDescriptionLock } from '../../utils/autoProjectDescription';
+import { getAutoProjectDescriptionStatus, isManualProjectDescription, maybeGenerateAutoProjectDescription, shouldGenerateAutoProjectDescription, convertToManualDescription, resetAutoDescriptionLock } from '../../utils/autoProjectDescription';
 import { composePrompt } from '../../utils/promptComposer';
 import { useAIJobStore } from '../../stores/aiJobStore';
 import { deriveProjectNextActions, ProjectNextAction } from '../../utils/projectNextActions';
@@ -706,6 +706,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   }, [currentProject?.id, contentReady, tasks, projectDocs, versions, templates, reviews, stageMemories, allStages]);
 
   if (!currentProject || !contentReady) return <DetailPanelSkeleton />;
+  const autoDescriptionStatus = getAutoProjectDescriptionStatus(currentProject);
   const totalAnalyzed = projectDocsList.filter(doc => doc.analyzedAt).length;
   const totalUnread = totalAnalyzed - analyzedDocsByStage.reduce((sum, g) => sum + g.docs.filter(d => readReportIds.has(d.id)).length, 0);
 
@@ -1483,11 +1484,17 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
             <Title level={5} style={{ fontSize: 14, margin: 0 }}>{'项目描述'}</Title>
-            {currentProject.descriptionSource === 'auto' && currentProject.description && (
-              <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>AI简述</Tag>
+            {autoDescriptionStatus === 'completed' && (
+              <Tag color="green" style={{ margin: 0, fontSize: 11 }}>AI 编写完毕</Tag>
             )}
-            {isManualProjectDescription(currentProject) && (
-              <Tag color="green" style={{ margin: 0, fontSize: 11 }}>手动</Tag>
+            {autoDescriptionStatus === 'pending' && (
+              <Tag color="gold" style={{ margin: 0, fontSize: 11 }}>待 AI 编写</Tag>
+            )}
+            {autoDescriptionStatus === 'failed' && (
+              <Tag color="red" style={{ margin: 0, fontSize: 11 }}>AI 编写失败，等待重试</Tag>
+            )}
+            {autoDescriptionStatus === 'manual' && (
+              <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>手动编辑</Tag>
             )}
             {!descEditing && (
               <Button type="text" size="small" icon={<EditOutlined />}
@@ -1515,17 +1522,19 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
                     await convertToManualDescription(currentProject, updateProject, text);
                     message.success('已保存为手动描述');
                   } else {
-                    await updateProject(currentProject.id, { description: '', descriptionSource: undefined });
-                    message.success('已清空描述');
+                    await resetAutoDescriptionLock(currentProject, updateProject);
+                    setDescEditText('');
+                    message.success('已清空，AI 将在满足条件后重新编写');
                   }
                   setDescEditing(false);
                 }}>保存</Button>
                 <Button size="small" onClick={() => setDescEditing(false)}>取消</Button>
                 {currentProject.description && (
                   <Popconfirm title="确定清空描述？" onConfirm={async () => {
-                    await updateProject(currentProject.id, { description: '', descriptionSource: undefined });
+                    await resetAutoDescriptionLock(currentProject, updateProject);
+                    setDescEditText('');
                     setDescEditing(false);
-                    message.success('已清空描述');
+                    message.success('已清空，AI 将在满足条件后重新编写');
                   }}>
                     <Button size="small" danger>清空</Button>
                   </Popconfirm>
@@ -1535,27 +1544,12 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
           ) : (
             <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 20 }}>
               {currentProject.description
-                || (currentProject.autoDescriptionGeneratedAt && !currentProject.description
-                  ? 'AI 简述已生成过，如需重新生成请手动操作'
-                  : currentProject.autoDescriptionGenerationAttempted && !currentProject.description
-                    ? 'AI 简述生成失败或结果为空'
-                    : currentProject.autoDescriptionPendingSince && !isManualProjectDescription(currentProject)
-                      ? '已检测到文件更新，三天无更新后自动生成'
-                      : '暂无描述')}
+                || (autoDescriptionStatus === 'failed'
+                  ? 'AI 编写失败，系统将在下次重试时间后自动再试。'
+                  : autoDescriptionStatus === 'pending'
+                    ? '满足至少两个文件且三天无更新后，将自动编写项目描述。'
+                    : '暂无描述')}
             </Paragraph>
-          )}
-
-          {(currentProject.autoDescriptionGeneratedAt || currentProject.autoDescriptionGenerationAttempted) && !descEditing && (
-            <div style={{ marginBottom: 16 }}>
-              <Button size="small" type="link" style={{ fontSize: 11, padding: 0, color: '#8c8c8c' }}
-                onClick={async () => {
-                  await resetAutoDescriptionLock(currentProject, updateProject);
-                  message.success('已恢复自动生成资格，将在下次扫描后重新生成');
-                }}
-              >
-                恢复自动生成资格
-              </Button>
-            </div>
           )}
 
           {/* \u4e0b\u4e00\u6b65\u884c\u52a8\u4e2d\u5fc3 */}

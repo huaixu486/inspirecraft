@@ -14,6 +14,7 @@ export interface Project {
   autoDescriptionLastScannedAt?: string;
   autoDescriptionRetryAt?: string;
   autoDescriptionLastErrorAt?: string;
+  autoDescriptionGenerationToken?: string;
   folderPath: string;
   status: 'active' | 'completed' | 'paused';
   progress: number; // 0-100

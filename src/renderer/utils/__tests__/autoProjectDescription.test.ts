@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Project } from '../../../shared/types';
-import { shouldGenerateAutoProjectDescription } from '../autoProjectDescription';
+import { getAutoProjectDescriptionStatus, resetAutoDescriptionLock, shouldGenerateAutoProjectDescription } from '../autoProjectDescription';
 
 const now = Date.now();
 const iso = (offsetMs: number) => new Date(now + offsetMs).toISOString();
@@ -53,4 +53,32 @@ test('failed attempts observe retry backoff instead of permanently locking gener
     autoDescriptionGenerationAttempted: true,
     autoDescriptionRetryAt: iso(-60 * 60 * 1000),
   }), 2), true);
+});
+
+test('description status communicates completed, pending, and retry states', () => {
+  assert.equal(getAutoProjectDescriptionStatus(createProject({
+    description: 'AI 生成的项目概述',
+    descriptionSource: 'auto',
+  })), 'completed');
+  assert.equal(getAutoProjectDescriptionStatus(createProject({
+    autoDescriptionLastErrorAt: iso(-60 * 60 * 1000),
+    autoDescriptionRetryAt: iso(60 * 60 * 1000),
+  })), 'failed');
+  assert.equal(getAutoProjectDescriptionStatus(createProject()), 'pending');
+});
+
+test('clearing a description removes old AI locks and schedules a fresh quiet period', async () => {
+  let patch: Partial<Project> | undefined;
+  const project = createProject({
+    description: '旧 AI 概述',
+    autoDescriptionGeneratedAt: iso(-60 * 60 * 1000),
+    autoDescriptionGenerationAttempted: true,
+  });
+  await resetAutoDescriptionLock(project, async (_id, updates) => { patch = updates; });
+  assert.equal(patch?.description, '');
+  assert.equal(patch?.autoDescriptionGeneratedAt, undefined);
+  assert.equal(patch?.autoDescriptionGenerationAttempted, undefined);
+  assert.equal(patch?.descriptionSource, 'auto');
+  assert.ok(patch?.autoDescriptionPendingSince);
+  assert.ok(patch?.autoDescriptionGenerationToken);
 });

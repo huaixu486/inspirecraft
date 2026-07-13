@@ -14,6 +14,7 @@ export interface Project {
   autoDescriptionLastScannedAt?: string;
   autoDescriptionRetryAt?: string;
   autoDescriptionLastErrorAt?: string;
+  autoDescriptionGenerationToken?: string;
   folderPath: string;
   folderModifiedAt?: string; // 项目文件夹内最近文件/目录修改时间
   status: 'active' | 'completed' | 'paused';
