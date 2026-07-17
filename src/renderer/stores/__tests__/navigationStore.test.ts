@@ -5,7 +5,9 @@ import { useNavigationStore } from '../navigationStore';
 const reset = () => useNavigationStore.setState({
   activePage: 'overview',
   pendingFocus: null,
+  activeFocus: null,
   lastPage: null,
+  panelSession: null,
   overviewAction: null,
 });
 
@@ -23,10 +25,26 @@ test('navigation keeps the complete workbench focus until App consumes it', () =
 
   useNavigationStore.getState().navigate(focus);
   assert.deepEqual(useNavigationStore.getState().pendingFocus, focus);
-  assert.equal(useNavigationStore.getState().lastPage, 'review');
+  assert.equal(useNavigationStore.getState().lastPage, null);
 
   useNavigationStore.getState().consumePendingFocus();
   assert.equal(useNavigationStore.getState().pendingFocus, null);
+  assert.deepEqual(useNavigationStore.getState().activeFocus, focus);
+  useNavigationStore.getState().acknowledgeActiveFocus();
+  assert.equal(useNavigationStore.getState().activeFocus, null);
+});
+
+test('panel session has an explicit capture, away, restore lifecycle', () => {
+  reset();
+  useNavigationStore.getState().capturePanelSession({ wasOpen: true, projectId: 'project-1' });
+  assert.equal(useNavigationStore.getState().panelSession?.phase, 'captured');
+  useNavigationStore.getState().markPanelSessionAway();
+  assert.equal(useNavigationStore.getState().panelSession?.phase, 'away');
+  const restored = useNavigationStore.getState().beginPanelSessionRestore();
+  assert.equal(restored?.projectId, 'project-1');
+  assert.equal(useNavigationStore.getState().panelSession?.phase, 'restoring');
+  useNavigationStore.getState().clearPanelSession();
+  assert.equal(useNavigationStore.getState().panelSession, null);
 });
 
 test('overview actions are one-shot commands', () => {

@@ -1,3 +1,6 @@
+export * from './contracts';
+import type { ProjectDocumentLifecycleStatus, WorkItemAction, WorkItemDocumentContext, WorkItemExecutor, WorkItemStatus } from './contracts';
+
 // 项目类型定义
 export interface Project {
   id: string;
@@ -15,6 +18,10 @@ export interface Project {
   autoDescriptionRetryAt?: string;
   autoDescriptionLastErrorAt?: string;
   autoDescriptionGenerationToken?: string;
+  // Per-stage explicit source for AI memory extraction. When absent, the
+  // newest modified document in that stage is used automatically.
+  stageSummarySourceDocIds?: Record<string, string>;
+  stageCompletionEvents?: StageCompletionEvent[];
   folderPath: string;
   status: 'active' | 'completed' | 'paused';
   progress: number; // 0-100
@@ -55,6 +62,10 @@ export interface TaskItem {
   title: string;
   description: string; // 任务描述
   type: 'ai' | 'manual'; // AI处理或人工处理
+  executor?: WorkItemExecutor;
+  workStatus?: WorkItemStatus;
+  action?: WorkItemAction;
+  documentContext?: WorkItemDocumentContext;
   status: 'pending' | 'in_progress' | 'completed';
   priority: 'high' | 'medium' | 'low';
   source?: 'manual' | 'review' | 'stage' | 'report';
@@ -62,16 +73,36 @@ export interface TaskItem {
   relatedReviewId?: string;
   relatedIssueId?: string;
   sectionTitle?: string;
+  /** 审查结果给出的原始行号，用于任务执行时定位文档内容 */
+  sourceLineNumber?: number;
   stageName?: string;
   workflowId?: string;
   workflowName?: string;
   workflowOrder?: number;
   dependsOnTaskId?: string;
+  dependsOn?: string[];
   assigneeName?: string;
   dueAt?: string;
   completedAt?: string;
   result?: string; // AI执行结果
+  sourceMessageId?: string;
   createdAt: string;
+  updatedAt?: string;
+}
+
+export interface StageCompletionEvent {
+  id: string;
+  projectId: string;
+  stageName: string;
+  sourceDocIds: string[];
+  extractionDocId?: string;
+  extractionVersionId?: string;
+  completedAt: string;
+  status: 'completed' | 'learning' | 'learned' | 'learning_failed' | 'reopened';
+  memoryId?: string;
+  learnedAt?: string;
+  learningError?: string;
+  reopenedAt?: string;
 }
 
 // AI配置
@@ -115,6 +146,12 @@ export interface AIUsageRecord extends AITokenUsage {
   model: string;
   provider: AIProvider;
   requestId?: string;
+  correlationId?: string;
+  workItemId?: string;
+  requestTitle?: string;
+  scene?: AIJobScene;
+  durationMs?: number;
+  status?: 'completed' | 'failed';
 }
 
 export interface AIUsageStatistics {
@@ -123,6 +160,8 @@ export interface AIUsageStatistics {
   daily: AITokenUsage;
   monthly: AITokenUsage;
   byModel: Array<AITokenUsage & { modelId?: string; modelName: string; model: string; provider: AIProvider }>;
+  byTask: Array<AITokenUsage & { requestId?: string; correlationId?: string; workItemId?: string; requestTitle: string; scene?: AIJobScene; requestCount: number; firstAt: string; lastAt: string; models: string[] }>;
+  trend: Array<AITokenUsage & { date: string; requestCount: number }>;
   recent: AIUsageRecord[];
 }
 
@@ -285,17 +324,6 @@ export interface SectionAnalysis {
 }
 
 // 项目文档（关联模板+文件）
-export type ProjectDocumentLifecycleStatus =
-  | 'imported'
-  | 'identified'
-  | 'writing'
-  | 'analyzed'
-  | 'reviewed'
-  | 'needs_revision'
-  | 'completed'
-  | 'learned'
-  | 'archived';
-
 export interface ProjectDocument {
   id: string;
   projectId: string;
@@ -305,12 +333,14 @@ export interface ProjectDocument {
   sections: SectionAnalysis[];  // 各章节分析结果
   overallProgress: number;  // 0-100 整体完成度
   lifecycleStatus?: ProjectDocumentLifecycleStatus;
+  lifecycleStatusBeforeCompletion?: ProjectDocumentLifecycleStatus;
   lifecycleUpdatedAt?: string;
   reviewedAt?: string;
   learnedAt?: string;
   reopenedAt?: string;
   deadline?: string;        // 截止日期 ISO string
   completedAt?: string;     // 完成日期 ISO string
+  completionEventId?: string;
   analyzedAt?: string;      // 最近分析时间
   aiReport?: string;        // AI写作框架报告（JSON字符串）
   sourceFilePath?: string;  // 自动阶段识别关联的真实文件路径
@@ -329,6 +359,10 @@ export interface StageMemoryEntry {
   docId?: string;
   docName: string;
   sourceFilePath?: string;
+  sourceVersionId?: string;
+  sourceModifiedAt?: string;
+  sourceKind?: 'stage-completion' | 'manual';
+  completionEventId?: string;
   summary: string;
   model?: string;
   createdAt: string;
@@ -350,7 +384,7 @@ export interface ReferenceMaterial {
 export interface UserProfile {
   nickname: string;
   email: string;
-  avatar?: string; // base64 或文件路径
+  avatar?: string; // 压缩后的 data URL，用于本机显示和局域网好友同步
 }
 
 // 自定义阶段配置
@@ -408,11 +442,13 @@ export interface AppSettings {
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
   enableSystemNotifications?: boolean; // Enable Windows system notifications
   autoProjectDescriptionEnabled?: boolean; // Automatically generate an empty project overview after file activity settles
+  autoStageMemoryEnabled?: boolean; // Learn reusable writing memory from the final document when a stage is completed
   holidayDataSource?: HolidayDataSource; // Calendar holiday source
   holidayApiUrl?: string; // Calendar holiday API URL, supports {year}
   calendarDayRecords?: CalendarDayRecord[]; // Manual day overrides, notes and work statuses
   calendarItineraries?: CalendarItinerary[]; // Personal itinerary reminders
   compositionWeights?: CompositionWeightConfig; // Custom prompt composition weights
+  compositionWeightsByScene?: Partial<Record<PromptScene, CompositionWeightConfig>>; // Per-scene prompt composition weights
   customStages?: StageConfig[]; // 自定义阶段配置
 }
 
@@ -443,6 +479,12 @@ export interface WorkbenchFocus {
   issueId?: string;
   /** 阶段名称 */
   stageName?: string;
+  /** 审查任务对应的章节标题 */
+  sectionTitle?: string;
+  /** 审查任务对应的原始行号 */
+  sourceLineNumber?: number;
+  /** 跨工作台跳转意图，避免团队页把协同派发误判为 AI 写作 */
+  intent?: 'writing' | 'revision' | 'dispatch';
   /** 来源页面 */
   source?: WorkbenchSource;
   /** 附带提示/上下文文本 */
@@ -477,6 +519,8 @@ export interface AIJob {
   projectId?: string;
   docId?: string;
   taskId?: string;
+  workItemId?: string;
+  correlationId?: string;
   inputHash?: string;
   dedupeKey?: string;
   retryOf?: string;

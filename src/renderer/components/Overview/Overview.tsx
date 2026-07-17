@@ -281,7 +281,7 @@ const Overview: React.FC<Props> = ({ visible, onEnterProject, panelInitialTab, o
             </div>
           </div>
           <DeferredBlock skeleton={<StatsSkeleton />} delayMs={0}>
-            <StatsCards />
+            <StatsCards onSelectProject={previewProjectInPanel} />
           </DeferredBlock>
           <div style={{ marginTop: 18 }}>
             <DeferredBlock skeleton={<GanttSkeleton />} delayMs={50}>

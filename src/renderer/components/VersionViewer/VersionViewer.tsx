@@ -16,7 +16,7 @@ const VersionViewer: React.FC = () => {
 
   useEffect(() => {
     // 监听文件夹检测到的新文件
-    window.electronAPI.onFileDetected(async (data) => {
+    const unsubscribe = window.electronAPI.onFileDetected(async (data) => {
       if (!currentProject || data.projectId !== currentProject.id) return;
 
       message.info(`检测到新文件: ${data.fileName}`);
@@ -70,6 +70,7 @@ const VersionViewer: React.FC = () => {
         message.error(`自动导入失败: ${error.message}`);
       }
     });
+    return unsubscribe;
   }, [currentProject]);
 
   if (!currentProject) {

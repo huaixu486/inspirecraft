@@ -7,6 +7,7 @@ import * as zlib from 'zlib';
 import * as http from 'http';
 import * as dgram from 'dgram';
 import * as os from 'os';
+import { pathToFileURL } from 'url';
 import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, AIModelConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode, StageMemoryEntry, ReferenceMaterial, PromptScene, PromptTemplate, SkillPackage, StructuredPrompt, PromptRule, OutputField } from './types';
 import {
   checkWithinWorkspace,
@@ -14,6 +15,7 @@ import {
   checkParentWithinWorkspace,
   checkSafeChildName,
   checkPathInside,
+  checkExistingPath,
 } from './shared/pathGuard';
 import {
   appendAiLog,
@@ -31,6 +33,26 @@ import {
 } from './services/aiService';
 import { getAIUsageRecords, getAIUsageStatistics, onAIActivity, runWithAIUsageContext, sumAIUsage } from './services/aiUsageService';
 import { composePromptMain } from './shared/promptComposer';
+import { readVersionedJsonFile, writeVersionedJsonFile } from './shared/versionedJson';
+import { registerAllIpc } from './ipc/registerAllIpc';
+import { defineProjectArchiveIpc, defineProjectFolderIpc, defineProjectPersistenceIpc, defineTemplateIpc, defineVersionIpc, type TemplateAnalysisParams } from './ipc/registerProjectIpc';
+import { defineSettingsIpc } from './ipc/registerSettingsIpc';
+import { defineWorkflowIpc } from './ipc/registerWorkflowIpc';
+import { defineKnowledgeIpc } from './ipc/registerKnowledgeIpc';
+import { defineDocumentFileIpc, defineProjectDocumentIpc, defineReviewIpc } from './ipc/registerDocumentIpc';
+import { defineRecycleBinIpc, defineWorkspaceManagementIpc, defineWorkspaceScanIpc } from './ipc/registerRecycleBinIpc';
+import { defineAiRuntimeIpc, definePromptIpc, defineSkillIpc } from './ipc/registerAiIpc';
+import { defineCollaborationIpc } from './ipc/registerCollaborationIpc';
+import { definePlatformIpc } from './ipc/registerPlatformIpc';
+import {
+  createRecycleBinService,
+  RECYCLE_BIN_DIR_NAME,
+  type RecycleBinEntry,
+} from './services/recycleBinService';
+import { createFileSystemService } from './services/fileSystemService';
+import { writeDocxFileWithContent as writeTemplateDocxWithContent } from './fileCreation';
+import { defineArchiveFileIpc, defineCoreFileIpc, defineFolderQueryIpc } from './ipc/registerFileIpc';
+import { buildAcceptedCollaborationTask } from './shared/collaborationTask';
 import * as mammoth from 'mammoth';
 import pdfParse from 'pdf-parse';
 const JSZip = require('jszip');
@@ -48,7 +70,7 @@ let collaborationDiscoverySocket: dgram.Socket | null = null;
 let collaborationDiscoveryTimer: NodeJS.Timeout | null = null;
 const COLLABORATION_DISCOVERY_PORT = 39219;
 const COLLABORATION_PEER_TTL_MS = 12000;
-const discoveredCollaborationPeers = new Map<string, LanPeerRecord>();
+const discoveredCollaborationPeers = new Map<string, CollaborationPeerRecord>();
 const incomingFolderTransfers = new Map<string, {
   rootPath: string;
   expiresAt: number;
@@ -62,6 +84,8 @@ type CollaborationTaskPayload = {
   task?: TaskItem;
   projectName?: string;
   senderName?: string;
+  fromId?: string;
+  attachmentName?: string;
   sentAt?: string;
 };
 
@@ -71,6 +95,7 @@ type CollaborationFriend = {
   nickname?: string;
   email?: string;
   deviceName?: string;
+  avatar?: string;
   host: string;
   port: number;
   source: 'lan' | 'email' | 'nickname' | 'manual' | 'invite';
@@ -86,6 +111,7 @@ type CollaborationFriendRequest = {
   fromName: string;
   fromDeviceName?: string;
   fromEmail?: string;
+  fromAvatar?: string;
   fromHost: string;
   fromPort: number;
   targetId?: string;
@@ -94,11 +120,12 @@ type CollaborationFriendRequest = {
   status: 'pending' | 'accepted' | 'rejected';
 };
 
-type LanPeerRecord = {
+type CollaborationPeerRecord = {
   id: string;
   name: string;
   deviceName?: string;
   email?: string;
+  avatar?: string;
   host: string;
   port: number;
   lastSeenAt: string;
@@ -111,6 +138,18 @@ type CollaborationChatMessage = {
   content: string;
   senderName?: string;
   createdAt: string;
+  taskOffer?: {
+    id: string;
+    messageId?: string;
+    title: string;
+    description?: string;
+    projectName?: string;
+    stageName?: string;
+    sectionTitle?: string;
+    attachmentName?: string;
+    status: 'pending' | 'accepted' | 'rejected';
+    task?: TaskItem;
+  };
 };
 
 type CollaborationFileSendParams = {
@@ -205,6 +244,12 @@ function writeIncomingStream(req: http.IncomingMessage, outputPath: string) {
 
 const normalizeCollaborationEmail = (value?: string) => String(value || '').trim().toLowerCase();
 const isValidCollaborationEmail = (value?: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeCollaborationEmail(value));
+const normalizeCollaborationAvatar = (value?: string) => {
+  const avatar = String(value || '').trim();
+  return /^data:image\/(?:jpeg|jpg|png|webp);base64,/i.test(avatar) && avatar.length <= 60_000
+    ? avatar
+    : undefined;
+};
 
 function getLocalCollaborationIdentity() {
   ensureDataDir();
@@ -212,14 +257,17 @@ function getLocalCollaborationIdentity() {
   const configuredEmail = normalizeCollaborationEmail(profile?.email);
   try {
     if (fs.existsSync(collaborationIdentityFile)) {
-      const saved = JSON.parse(fs.readFileSync(collaborationIdentityFile, 'utf-8'));
+      const saved = readVersionedJsonFile<any>(collaborationIdentityFile, null).data;
       if (saved?.id) {
         const identity = {
           ...saved,
           name: profile?.nickname || saved.name,
           email: configuredEmail || undefined,
-        } as { id: string; name: string; deviceName: string; email?: string };
-        fs.writeFileSync(collaborationIdentityFile, JSON.stringify(identity, null, 2), 'utf-8');
+          avatar: normalizeCollaborationAvatar(profile?.avatar),
+        } as { id: string; name: string; deviceName: string; email?: string; avatar?: string };
+        if (saved.name !== identity.name || saved.email !== identity.email || saved.avatar !== identity.avatar) {
+          writeVersionedJsonFile(collaborationIdentityFile, identity);
+        }
         return identity;
       }
     }
@@ -229,8 +277,9 @@ function getLocalCollaborationIdentity() {
     name: os.userInfo().username || os.hostname() || APP_DISPLAY_NAME,
     deviceName: os.hostname() || APP_DISPLAY_NAME,
     email: configuredEmail || undefined,
+    avatar: normalizeCollaborationAvatar(profile?.avatar),
   };
-  fs.writeFileSync(collaborationIdentityFile, JSON.stringify(identity, null, 2), 'utf-8');
+  writeVersionedJsonFile(collaborationIdentityFile, identity);
   return identity;
 }
 
@@ -294,7 +343,7 @@ function loadCollaborationFriendsFromDisk(): CollaborationFriend[] {
   const filePath = getCollaborationStorageFile('friends.json', collaborationFriendsFile);
   if (!fs.existsSync(filePath)) return [];
   try {
-    const rows = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const rows = readVersionedJsonFile<any[]>(filePath, []).data;
     if (!Array.isArray(rows)) return [];
     return rows.filter(item => item?.id && item?.host && item?.port).map(item => ({
       id: String(item.id),
@@ -302,6 +351,7 @@ function loadCollaborationFriendsFromDisk(): CollaborationFriend[] {
       nickname: item.nickname ? String(item.nickname) : undefined,
       email: item.email ? String(item.email) : undefined,
       deviceName: item.deviceName ? String(item.deviceName) : undefined,
+      avatar: normalizeCollaborationAvatar(item.avatar),
       host: String(item.host),
       port: Number(item.port) || 39218,
       source: (item.source || 'lan') as CollaborationFriend['source'],
@@ -316,14 +366,14 @@ function loadCollaborationFriendsFromDisk(): CollaborationFriend[] {
 
 function saveCollaborationFriendsToDisk(friends: CollaborationFriend[]) {
   const filePath = getCollaborationStorageFile('friends.json', collaborationFriendsFile);
-  fs.writeFileSync(filePath, JSON.stringify(friends, null, 2), 'utf-8');
+  writeVersionedJsonFile(filePath, friends);
 }
 
 function loadCollaborationChatMessages(): CollaborationChatMessage[] {
   try {
     const filePath = getCollaborationStorageFile('chats.json', collaborationChatsFile);
     if (!fs.existsSync(filePath)) return [];
-    const messages = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const messages = readVersionedJsonFile<CollaborationChatMessage[]>(filePath, []).data;
     return Array.isArray(messages) ? messages.filter(message => message?.id && message?.friendId && message?.content) : [];
   } catch {
     return [];
@@ -332,7 +382,7 @@ function loadCollaborationChatMessages(): CollaborationChatMessage[] {
 
 function saveCollaborationChatMessages(messages: CollaborationChatMessage[]) {
   const filePath = getCollaborationStorageFile('chats.json', collaborationChatsFile);
-  fs.writeFileSync(filePath, JSON.stringify(messages.slice(-3000), null, 2), 'utf-8');
+  writeVersionedJsonFile(filePath, messages.slice(-3000));
 }
 
 function appendCollaborationChatMessage(message: CollaborationChatMessage) {
@@ -361,6 +411,7 @@ function getCollaborationFriends() {
       port: live?.port || friend.port,
       lastSeenAt: live?.lastSeenAt || friend.lastSeenAt,
       email: live?.email || friend.email,
+      avatar: live?.avatar || friend.avatar,
       online: isPeerOnline(live?.lastSeenAt || friend.lastSeenAt),
     };
   }).sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
@@ -382,6 +433,7 @@ function sendCollaborationDiscoveryBeat() {
     name: identity.name,
     deviceName: identity.deviceName,
     email: identity.email,
+    avatar: identity.avatar,
     port: collaborationPort,
     app: APP_DISPLAY_NAME,
     sentAt: new Date().toISOString(),
@@ -397,16 +449,35 @@ function startCollaborationDiscovery() {
       try {
         const payload = JSON.parse(message.toString('utf8'));
         if (payload?.type !== 'projecthub:hello' || !payload.id || payload.id === getLocalCollaborationIdentity().id) return;
-        const peer: LanPeerRecord = {
+        const peer: CollaborationPeerRecord = {
           id: String(payload.id),
           name: String(payload.name || payload.deviceName || rinfo.address),
           deviceName: payload.deviceName ? String(payload.deviceName) : undefined,
           email: payload.email ? normalizeCollaborationEmail(payload.email) : undefined,
+          avatar: normalizeCollaborationAvatar(payload.avatar),
           host: rinfo.address,
           port: Number(payload.port) || 39218,
           lastSeenAt: new Date().toISOString(),
         };
         discoveredCollaborationPeers.set(peer.id, peer);
+        const friends = loadCollaborationFriendsFromDisk();
+        const friendIndex = friends.findIndex(friend => friend.id === peer.id);
+        if (friendIndex >= 0) {
+          const friend = friends[friendIndex];
+          if (friend.name !== peer.name || friend.email !== peer.email || friend.avatar !== peer.avatar || friend.deviceName !== peer.deviceName) {
+            friends[friendIndex] = {
+              ...friend,
+              name: peer.name,
+              email: peer.email || friend.email,
+              avatar: peer.avatar,
+              deviceName: peer.deviceName || friend.deviceName,
+              host: peer.host,
+              port: peer.port,
+              lastSeenAt: peer.lastSeenAt,
+            };
+            saveCollaborationFriendsToDisk(friends);
+          }
+        }
         emitCollaborationPeersChanged();
       } catch {}
     });
@@ -648,14 +719,17 @@ async function sendFolderToPeer(params: CollaborationFileSendParams) {
 }
 
 async function sendFileToPeer(params: CollaborationFileSendParams) {
-  const sourceStat = fs.statSync(params.filePath);
+  const sourceCheck = checkExistingPath(params.filePath);
+  if (!sourceCheck.ok) throw new Error(sourceCheck.error);
+  const sourcePath = sourceCheck.path;
+  const sourceStat = fs.statSync(sourcePath);
   if (!sourceStat.isFile() && !sourceStat.isDirectory()) throw new Error('Only files and folders can be sent');
-  if (sourceStat.isDirectory()) return sendFolderToPeer(params);
+  if (sourceStat.isDirectory()) return sendFolderToPeer({ ...params, filePath: sourcePath });
 
   const stat = sourceStat;
   const url = resolveCollaborationTarget(params);
   url.pathname = '/files';
-  const fileName = path.basename(params.filePath);
+  const fileName = path.basename(sourcePath);
   const result = await new Promise<any>((resolve, reject) => {
     const req = http.request({
       hostname: url.hostname,
@@ -685,9 +759,9 @@ async function sendFileToPeer(params: CollaborationFileSendParams) {
       });
     });
     req.on('error', reject);
-    fs.createReadStream(params.filePath).on('error', reject).pipe(req);
+    fs.createReadStream(sourcePath).on('error', reject).pipe(req);
   });
-  return { ...result, transferKind: 'file', originalName: path.basename(params.filePath) };
+  return { ...result, transferKind: 'file', originalName: path.basename(sourcePath) };
 }
 
 function normalizeCollaborationEndpoint(endpoint: string) {
@@ -703,28 +777,40 @@ function saveIncomingCollaborationTask(payload: CollaborationTaskPayload) {
   if (!payload.task) throw new Error('Missing task payload');
   const now = new Date().toISOString();
   const incoming = payload.task;
-  const senderLine = payload.senderName || payload.projectName
-    ? `\n\n[LAN] From ${payload.senderName || 'ProjectHub'}${payload.projectName ? ` / ${payload.projectName}` : ''}`
-    : '';
-  const task: TaskItem = {
-    ...incoming,
-    id: `lan-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-    status: 'pending',
-    assigneeName: incoming.assigneeName || os.userInfo().username || 'Local user',
-    description: `${incoming.description || ''}${senderLine}`.trim(),
+  const friend = getCollaborationFriends().find(item => item.id === payload.fromId && item.status === 'accepted');
+  if (!friend) throw new Error('Task sender is not an accepted friend');
+  // 外部项目没有可安全复用的本地 projectId，不能直接写进本地任务库。
+  // 先作为聊天中的任务邀约，接收方明确接受后再进入协作流程。
+  const offerId = `offer-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const message: CollaborationChatMessage = {
+    id: `task-message-${offerId}`,
+    friendId: friend.id,
+    direction: 'incoming',
+    content: `任务邀约：${incoming.title || '未命名任务'}`,
+    senderName: payload.senderName || friend.name,
     createdAt: now,
-    completedAt: undefined,
-    result: undefined,
+    taskOffer: {
+      id: offerId,
+      messageId: `task-message-${offerId}`,
+      title: incoming.title || '未命名任务',
+      description: incoming.description || '',
+      projectName: payload.projectName || '',
+      stageName: incoming.stageName,
+      sectionTitle: incoming.sectionTitle,
+      attachmentName: payload.attachmentName,
+      status: 'pending',
+      task: incoming,
+    },
   };
-  const tasks = loadTasksFromDisk();
-  saveTasksToDisk([...tasks, task]);
+  appendCollaborationChatMessage(message);
   mainWindow?.webContents.send('collaboration:taskReceived', {
-    task,
+    task: incoming,
+    offerId,
     projectName: payload.projectName || '',
     senderName: payload.senderName || '',
     sentAt: payload.sentAt || now,
   });
-  return task;
+  return message;
 }
 
 function createCollaborationHttpServer() {
@@ -822,6 +908,7 @@ function createCollaborationHttpServer() {
             fromName: payload.fromName || payload.fromDeviceName || 'Unknown',
             fromDeviceName: payload.fromDeviceName,
             fromEmail: payload.fromEmail ? normalizeCollaborationEmail(payload.fromEmail) : undefined,
+            fromAvatar: normalizeCollaborationAvatar(payload.fromAvatar),
             fromHost: payload.fromHost || req.socket.remoteAddress || '',
             fromPort: payload.fromPort || 0,
             message: payload.message,
@@ -841,6 +928,7 @@ function createCollaborationHttpServer() {
           id: String(payload.id),
           name: String(payload.name || payload.deviceName || payload.host),
           email: payload.email ? normalizeCollaborationEmail(payload.email) : undefined,
+          avatar: normalizeCollaborationAvatar(payload.avatar),
           deviceName: payload.deviceName ? String(payload.deviceName) : undefined,
           host: String(payload.host),
           port: Number(payload.port),
@@ -902,7 +990,7 @@ async function startCollaborationServer(preferredPort = 39218) {
     try {
       collaborationPort = await listenCollaborationServer(server, 0);
     } catch (secondError: any) {
-      throw new Error(secondError?.message || firstError?.message || 'Failed to start LAN receiver');
+      throw new Error(secondError?.message || firstError?.message || 'Failed to start collaboration receiver');
     }
   }
 
@@ -1041,95 +1129,55 @@ function ensureDataDir() {
 // 读取所有项目
 function loadProjectsFromDisk(): Project[] {
   ensureDataDir();
-  if (!fs.existsSync(projectsFile)) {
-    return [];
-  }
-  try {
-    const data = fs.readFileSync(projectsFile, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
+  return readVersionedJsonFile<Project[]>(projectsFile, []).data;
 }
 
 // 保存项目列表到磁盘
 function saveProjectsToDisk(projects: Project[]) {
   ensureDataDir();
-  fs.writeFileSync(projectsFile, JSON.stringify(projects, null, 2), 'utf-8');
+  writeVersionedJsonFile(projectsFile, projects);
 }
 
 // 读取所有版本
 function loadVersionsFromDisk(): DocumentVersion[] {
   ensureDataDir();
-  if (!fs.existsSync(versionsFile)) {
-    return [];
-  }
-  try {
-    const data = fs.readFileSync(versionsFile, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
+  return readVersionedJsonFile<DocumentVersion[]>(versionsFile, []).data;
 }
 
 // 保存版本列表到磁盘
 function saveVersionsToDisk(versions: DocumentVersion[]) {
   ensureDataDir();
-  fs.writeFileSync(versionsFile, JSON.stringify(versions, null, 2), 'utf-8');
+  writeVersionedJsonFile(versionsFile, versions);
 }
 
 // 读取所有模板
 function loadTemplatesFromDisk(): WritingTemplate[] {
   ensureDataDir();
-  if (!fs.existsSync(templatesFile)) {
-    return [];
-  }
-  try {
-    const data = fs.readFileSync(templatesFile, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
+  return readVersionedJsonFile<WritingTemplate[]>(templatesFile, []).data;
 }
 
 // 保存模板列表到磁盘
 function saveTemplatesToDisk(templates: WritingTemplate[]) {
   ensureDataDir();
-  fs.writeFileSync(templatesFile, JSON.stringify(templates, null, 2), 'utf-8');
+  writeVersionedJsonFile(templatesFile, templates);
 }
 
 // 读取所有审查结果
 function loadReviewsFromDisk(): ReviewResult[] {
   ensureDataDir();
-  if (!fs.existsSync(reviewsFile)) {
-    return [];
-  }
-  try {
-    const data = fs.readFileSync(reviewsFile, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return [];
-  }
+  return readVersionedJsonFile<ReviewResult[]>(reviewsFile, []).data;
 }
 
 // 保存审查结果到磁盘
 function saveReviewsToDisk(reviews: ReviewResult[]) {
   ensureDataDir();
-  fs.writeFileSync(reviewsFile, JSON.stringify(reviews, null, 2), 'utf-8');
+  writeVersionedJsonFile(reviewsFile, reviews);
 }
 
 // 读取所有任务
 function loadTasksFromDisk(): TaskItem[] {
   ensureDataDir();
-  if (!fs.existsSync(tasksFile)) {
-    return [];
-  }
-  try {
-    const data = fs.readFileSync(tasksFile, 'utf-8');
-    return dedupeTasksForPersistence(JSON.parse(data));
-  } catch {
-    return [];
-  }
+  return dedupeTasksForPersistence(readVersionedJsonFile<TaskItem[]>(tasksFile, []).data);
 }
 
 // 保存任务列表到磁盘
@@ -1173,7 +1221,7 @@ function dedupeTasksForPersistence(tasks: TaskItem[]) {
 
 function saveTasksToDisk(tasks: TaskItem[]) {
   ensureDataDir();
-  fs.writeFileSync(tasksFile, JSON.stringify(dedupeTasksForPersistence(tasks), null, 2), 'utf-8');
+  writeVersionedJsonFile(tasksFile, dedupeTasksForPersistence(tasks));
 }
 
 // 默认工作区路径
@@ -1182,15 +1230,10 @@ const defaultWorkspacePath = path.join(userDataPath, 'projects');
 // 读取设置
 function loadSettingsFromDisk(): AppSettings {
   ensureDataDir();
-  if (!fs.existsSync(settingsFile)) {
-    return { workspacePath: defaultWorkspacePath, workspaceCapacity: 10 };
-  }
-  try {
-    const data = fs.readFileSync(settingsFile, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return { workspacePath: defaultWorkspacePath, workspaceCapacity: 10 };
-  }
+  return readVersionedJsonFile<AppSettings>(settingsFile, {
+    workspacePath: defaultWorkspacePath,
+    workspaceCapacity: 10,
+  }).data;
 }
 
 // Every model call, including calls made outside the task planner, reports a
@@ -1281,119 +1324,36 @@ async function moveWorkspaceFolder(sourcePath: string, targetPath: string): Prom
   }
 }
 
-const RECYCLE_BIN_DIR_NAME = '.projecthub-recycle-bin';
-const RECYCLE_BIN_ENTRIES_DIR_NAME = 'entries';
-const RECYCLE_BIN_INDEX_FILE_NAME = 'index.json';
-
-type RecycleBinEntry = {
-  id: string;
-  name: string;
-  originalPath: string;
-  recycledPath: string;
-  isDirectory: boolean;
-  deletedAt: string;
-  size: number;
-  projectSnapshot?: {
-    project: Project;
-    versions: DocumentVersion[];
-    documents: ProjectDocument[];
-    tasks: TaskItem[];
-    reviews: ReviewResult[];
-    stageMemories: StageMemoryEntry[];
-    referenceMaterials: ReferenceMaterial[];
-  };
-};
-
-function getActiveWorkspaceRoot(requestedWorkspacePath?: string): string {
-  const configuredWorkspacePath = String(loadSettingsFromDisk().workspacePath || '').trim();
-  if (!configuredWorkspacePath) throw new Error('尚未设置工作区路径');
-  const configuredRoot = path.resolve(configuredWorkspacePath);
-  if (requestedWorkspacePath && path.resolve(requestedWorkspacePath) !== configuredRoot) {
-    throw new Error('回收站只能操作当前工作区');
-  }
-  return configuredRoot;
-}
-
-function getRecycleBinPaths(workspaceRoot: string) {
-  const root = path.join(workspaceRoot, RECYCLE_BIN_DIR_NAME);
-  return {
-    root,
-    entries: path.join(root, RECYCLE_BIN_ENTRIES_DIR_NAME),
-    index: path.join(root, RECYCLE_BIN_INDEX_FILE_NAME),
-  };
-}
-
-function loadRecycleBinEntries(workspaceRoot: string): RecycleBinEntry[] {
-  const { index } = getRecycleBinPaths(workspaceRoot);
-  if (!fs.existsSync(index)) return [];
-  try {
-    const records = JSON.parse(fs.readFileSync(index, 'utf-8'));
-    return Array.isArray(records) ? records : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveRecycleBinEntries(workspaceRoot: string, entries: RecycleBinEntry[]): void {
-  const paths = getRecycleBinPaths(workspaceRoot);
-  fs.mkdirSync(paths.entries, { recursive: true });
-  const tempIndex = `${paths.index}.tmp`;
-  fs.writeFileSync(tempIndex, JSON.stringify(entries, null, 2), 'utf-8');
-  fs.renameSync(tempIndex, paths.index);
-}
-
-async function removeRecycleBinEntryFile(entry: RecycleBinEntry): Promise<void> {
-  if (!fs.existsSync(entry.recycledPath)) return;
-  if (entry.isDirectory) await fs.promises.rm(entry.recycledPath, { recursive: true, force: true });
-  else await fs.promises.unlink(entry.recycledPath);
-}
-
-async function cleanupRecycleBinForWorkspace(workspaceRoot: string): Promise<number> {
-  const retentionDays = Math.min(365, Math.max(1, Number(loadSettingsFromDisk().recycleBinRetentionDays || 30)));
-  const threshold = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  const entries = loadRecycleBinEntries(workspaceRoot);
-  const expired = entries.filter(entry => !Number.isFinite(new Date(entry.deletedAt).getTime()) || new Date(entry.deletedAt).getTime() <= threshold);
-  await Promise.all(expired.map(removeRecycleBinEntryFile));
-  if (expired.length) saveRecycleBinEntries(workspaceRoot, entries.filter(entry => !expired.includes(entry)));
-  return expired.length;
-}
-
-async function movePathToRecycleBin(filePath: string): Promise<RecycleBinEntry> {
-  const workspaceRoot = getActiveWorkspaceRoot();
-  const sourcePath = path.resolve(filePath);
-  const recyclePaths = getRecycleBinPaths(workspaceRoot);
-  if (!isSameOrChildPath(sourcePath, workspaceRoot) || isSameOrChildPath(sourcePath, recyclePaths.root)) {
-    throw new Error('只能将当前工作区中的文件或文件夹移入回收站');
-  }
-  if (!fs.existsSync(sourcePath)) throw new Error('文件或文件夹不存在');
-
-  await cleanupRecycleBinForWorkspace(workspaceRoot);
-  await fs.promises.mkdir(recyclePaths.entries, { recursive: true });
-  const stat = await fs.promises.stat(sourcePath);
-  const id = `recycle-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-  const recycledPath = path.join(recyclePaths.entries, `${id}-${path.basename(sourcePath)}`);
-  if (stat.isDirectory()) await moveWorkspaceFolder(sourcePath, recycledPath);
-  else {
-    try {
-      await fs.promises.rename(sourcePath, recycledPath);
-    } catch (error: any) {
-      if (error?.code !== 'EXDEV') throw error;
-      await fs.promises.copyFile(sourcePath, recycledPath, fs.constants.COPYFILE_EXCL);
-      await fs.promises.unlink(sourcePath);
-    }
-  }
-  const entry: RecycleBinEntry = {
-    id,
-    name: path.basename(sourcePath),
-    originalPath: sourcePath,
-    recycledPath,
-    isDirectory: stat.isDirectory(),
-    deletedAt: new Date().toISOString(),
-    size: stat.isDirectory() ? await getDirSize(recycledPath) : stat.size,
-  };
-  saveRecycleBinEntries(workspaceRoot, [entry, ...loadRecycleBinEntries(workspaceRoot)]);
-  return entry;
-}
+const recycleBinService = createRecycleBinService({
+  getWorkspacePath: () => loadSettingsFromDisk().workspacePath,
+  getRetentionDays: () => Number(loadSettingsFromDisk().recycleBinRetentionDays || 30),
+  getDirSize,
+  hasProjectId: projectId => loadProjectsFromDisk().some(project => project.id === projectId),
+  restoreProjectSnapshot: snapshot => {
+    saveProjectsToDisk([...loadProjectsFromDisk(), snapshot.project]);
+    saveVersionsToDisk([...loadVersionsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.versions]);
+    saveProjectDocsToDisk([...loadProjectDocsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.documents]);
+    saveTasksToDisk([...loadTasksFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.tasks]);
+    saveReviewsToDisk([...loadReviewsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.reviews]);
+    saveStageMemoriesToDisk([...loadStageMemoriesFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.stageMemories]);
+    saveReferenceMaterialsToDisk([...loadReferenceMaterialsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.referenceMaterials]);
+  },
+});
+const fileSystemService = createFileSystemService(recycleBinService, {
+  checkWithinWorkspace,
+  checkParentWithinWorkspace,
+  checkSafeChildName,
+}, {
+  createByType: createFileByType,
+  writeDocxWithContent: writeTemplateDocxWithContent,
+  createFolderShortcut: (shortcutPath, targetPath) => {
+    const created = shell.writeShortcutLink(shortcutPath, 'create', {
+      target: targetPath,
+      description: `ProjectHub 文件夹快捷方式：${path.basename(targetPath)}`,
+    });
+    if (!created) throw new Error('创建文件夹快捷方式失败');
+  },
+});
 
 // 保存设置
 function saveSettingsToDisk(settings: AppSettings) {
@@ -1403,7 +1363,7 @@ function saveSettingsToDisk(settings: AppSettings) {
   if (previousWorkspacePath && nextWorkspacePath && path.resolve(previousWorkspacePath) !== path.resolve(nextWorkspacePath)) {
     copyCollaborationWorkspaceData(previousWorkspacePath, nextWorkspacePath);
   }
-  fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), 'utf-8');
+  writeVersionedJsonFile(settingsFile, settings);
 }
 
 // ─── 提示词模板系统 ─────────────────────────────────────
@@ -1751,7 +1711,7 @@ function loadPromptTemplatesFromDisk(): PromptTemplate[] {
     return defaults;
   }
   try {
-    return JSON.parse(fs.readFileSync(promptTemplatesFile, 'utf-8'));
+    return readVersionedJsonFile<PromptTemplate[]>(promptTemplatesFile, []).data;
   } catch {
     const defaults = getDefaultPromptTemplates();
     savePromptTemplatesToDisk(defaults);
@@ -1762,107 +1722,108 @@ function loadPromptTemplatesFromDisk(): PromptTemplate[] {
 /** 保存提示词模板 */
 function savePromptTemplatesToDisk(templates: PromptTemplate[]) {
   ensureDataDir();
-  fs.writeFileSync(promptTemplatesFile, JSON.stringify(templates, null, 2), 'utf-8');
+  writeVersionedJsonFile(promptTemplatesFile, templates);
 }
-
-// ─── IPC: 提示词模板 ────────────────────────────────────
-
-ipcMain.handle('prompt:loadAll', () => {
-  return loadPromptTemplatesFromDisk();
-});
-
-ipcMain.handle('prompt:save', (_event, template: PromptTemplate) => {
-  const templates = loadPromptTemplatesFromDisk();
-  const idx = templates.findIndex(t => t.id === template.id);
-  if (idx >= 0) {
-    templates[idx] = template;
-  } else {
-    templates.push(template);
-  }
-  savePromptTemplatesToDisk(templates);
-});
-
-ipcMain.handle('prompt:reset', (_event, id: string) => {
-  const templates = loadPromptTemplatesFromDisk();
-  const defaults = getDefaultPromptTemplates();
-  const defaultTmpl = defaults.find(t => t.id === id);
-  if (!defaultTmpl) return;
-  const idx = templates.findIndex(t => t.id === id);
-  if (idx >= 0) {
-    templates[idx] = defaultTmpl;
-  } else {
-    templates.push(defaultTmpl);
-  }
-  savePromptTemplatesToDisk(templates);
-});
-
 // ─── Skill 包管理 ──────────────────────────────────────
 
 function loadSkillPackagesFromDisk(): SkillPackage[] {
   ensureDataDir();
   if (!fs.existsSync(skillPackagesFile)) return [];
   try {
-    return JSON.parse(fs.readFileSync(skillPackagesFile, 'utf-8'));
+    return readVersionedJsonFile<SkillPackage[]>(skillPackagesFile, []).data;
   } catch { return []; }
 }
 
 function saveSkillPackagesToDisk(skills: SkillPackage[]) {
   ensureDataDir();
-  fs.writeFileSync(skillPackagesFile, JSON.stringify(skills, null, 2), 'utf-8');
+  writeVersionedJsonFile(skillPackagesFile, skills);
 }
 
-ipcMain.handle('skill:loadAll', () => {
-  return loadSkillPackagesFromDisk();
-});
+const supportedSkillScenes: PromptScene[] = ['report', 'review', 'rewrite', 'diff', 'summary', 'memory', 'description', 'taskExecute', 'sectionAnalysis', 'templateExtract'];
 
-ipcMain.handle('skill:import', (_event, pkg: SkillPackage) => {
-  const skills = loadSkillPackagesFromDisk();
-  const idx = skills.findIndex(s => s.id === pkg.id);
-  if (idx >= 0) {
-    skills[idx] = pkg;
+function inferSkillScenes(content: string): PromptScene[] {
+  const value = content.toLowerCase();
+  const scenes: PromptScene[] = [];
+  if (/report|报告/.test(value)) scenes.push('report');
+  if (/review|审查|审核/.test(value)) scenes.push('review');
+  if (/rewrite|write|写作|修订|改写/.test(value)) scenes.push('rewrite');
+  if (/diff|对比|比较/.test(value)) scenes.push('diff');
+  return scenes.length ? [...new Set(scenes)] : ['rewrite'];
+}
+
+function normalizeExternalSkillPackage(raw: any, fallbackName: string, markdown = ''): SkillPackage {
+  const promptMap = raw && typeof raw.prompts === 'object' && raw.prompts ? raw.prompts : {};
+  const requestedScenes = Array.isArray(raw?.type) ? raw.type : Array.isArray(raw?.scenes) ? raw.scenes : Object.keys(promptMap);
+  const type: PromptScene[] = requestedScenes.filter((scene: unknown): scene is PromptScene => typeof scene === 'string' && supportedSkillScenes.includes(scene as PromptScene));
+  const scenes: PromptScene[] = type.length ? type : inferSkillScenes(`${markdown}\n${raw?.description || ''}\n${raw?.prompt || raw?.instructions || ''}`);
+  const defaultPrompt = String(raw?.prompt || raw?.instructions || markdown || '').trim();
+  const prompts: Partial<Record<PromptScene, string>> = {};
+  scenes.forEach(scene => {
+    const prompt = String(promptMap[scene] || defaultPrompt || '').trim();
+    if (prompt) prompts[scene] = prompt;
+  });
+  if (Object.keys(prompts).length === 0) throw new Error('Skill 包中没有可用的提示词或 SKILL.md 内容');
+  const name = String(raw?.name || raw?.displayName || fallbackName || '外部 Skill').trim();
+  const idBase = String(raw?.id || name).trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '');
+  const rawRules = Array.isArray(raw?.rules) ? raw.rules : Array.isArray(raw?.constraints) ? raw.constraints : [];
+  return { id: idBase || `external-skill-${Date.now()}`, name, version: String(raw?.version || '1.0.0'), type: scenes, scope: raw?.scope === 'project' ? 'project' : 'global', weight: Math.max(0, Math.min(100, Number(raw?.weight ?? 50))), enabled: raw?.enabled !== false, prompts, rules: rawRules.map((rule: unknown) => String(rule).trim()).filter(Boolean), importedAt: new Date().toISOString() };
+}
+
+async function readExternalSkillPackage(selection: string): Promise<SkillPackage> {
+  const stat = fs.statSync(selection);
+  let rawText = '';
+  let markdown = '';
+  let fallbackName = path.basename(selection, path.extname(selection));
+  if (stat.isDirectory()) {
+    const target = ['skill.json', 'manifest.json', 'package.json', 'SKILL.md'].map(name => path.join(selection, name)).find(file => fs.existsSync(file));
+    if (!target) throw new Error('所选目录中未找到 skill.json、manifest.json 或 SKILL.md');
+    fallbackName = path.basename(selection);
+    if (path.extname(target).toLowerCase() === '.md') markdown = fs.readFileSync(target, 'utf-8');
+    else rawText = fs.readFileSync(target, 'utf-8');
+  } else if (['.zip', '.skillpkg'].includes(path.extname(selection).toLowerCase())) {
+    const zip = await JSZip.loadAsync(fs.readFileSync(selection));
+    const names = Object.keys(zip.files);
+    const manifest = names.find(name => /(^|\/)(skill|manifest)\.json$/i.test(name)) || names.find(name => /(^|\/)SKILL\.md$/i.test(name));
+    if (!manifest) throw new Error('压缩包中未找到 skill.json、manifest.json 或 SKILL.md');
+    const content = await zip.file(manifest)?.async('string');
+    if (!content) throw new Error('无法读取 Skill 包内容');
+    if (/\.md$/i.test(manifest)) markdown = content; else rawText = content;
   } else {
-    skills.push(pkg);
+    rawText = fs.readFileSync(selection, 'utf-8');
+    if (/\.md$/i.test(selection)) { markdown = rawText; rawText = ''; }
   }
-  saveSkillPackagesToDisk(skills);
-  return pkg;
-});
+  let raw: any = {};
+  if (rawText.trim()) {
+    try { raw = JSON.parse(rawText); } catch { throw new Error('Skill 清单不是有效 JSON；可导入 JSON、.skillpkg/.zip 或含 SKILL.md 的目录'); }
+  }
+  return normalizeExternalSkillPackage(raw, fallbackName, markdown);
+}
 
-ipcMain.handle('skill:delete', (_event, id: string) => {
-  const skills = loadSkillPackagesFromDisk();
-  saveSkillPackagesToDisk(skills.filter(s => s.id !== id));
-});
-
-ipcMain.handle('skill:setEnabled', (_event, id: string, enabled: boolean) => {
-  const skills = loadSkillPackagesFromDisk();
-  const skill = skills.find(s => s.id === id);
-  if (skill) {
-    skill.enabled = enabled;
+const importExternalSkillPackage = async () => {
+  const result = await dialog.showOpenDialog({ title: '导入外部 Skill 包', properties: ['openFile', 'openDirectory'], filters: [{ name: 'Skill 包', extensions: ['skill', 'skillpkg', 'zip', 'json', 'md'] }, { name: '所有文件', extensions: ['*'] }] });
+  if (result.canceled || !result.filePaths[0]) return { success: false, cancelled: true };
+  try {
+    const pkg = await readExternalSkillPackage(result.filePaths[0]);
+    const skills = loadSkillPackagesFromDisk();
+    const index = skills.findIndex(skill => skill.id === pkg.id);
+    if (index >= 0) skills[index] = pkg; else skills.push(pkg);
     saveSkillPackagesToDisk(skills);
+    return { success: true, pkg };
+  } catch (error: any) {
+    return { success: false, error: error?.message || '导入外部 Skill 包失败' };
   }
-});
-
-ipcMain.handle('skill:setWeight', (_event, id: string, weight: number) => {
-  const skills = loadSkillPackagesFromDisk();
-  const skill = skills.find(s => s.id === id);
-  if (skill) {
-    skill.weight = Math.max(0, Math.min(100, weight));
-    saveSkillPackagesToDisk(skills);
-  }
-});
+};
 
 // 读取项目文档
 function loadProjectDocsFromDisk(): ProjectDocument[] {
   ensureDataDir();
-  if (!fs.existsSync(projectDocsFile)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(projectDocsFile, 'utf-8'));
-  } catch { return []; }
+  return readVersionedJsonFile<ProjectDocument[]>(projectDocsFile, []).data;
 }
 
 // 保存项目文档
 function saveProjectDocsToDisk(docs: ProjectDocument[]) {
   ensureDataDir();
-  fs.writeFileSync(projectDocsFile, JSON.stringify(docs, null, 2), 'utf-8');
+  writeVersionedJsonFile(projectDocsFile, docs);
 }
 
 // ==================== 章节提取算法 ====================
@@ -1872,24 +1833,22 @@ const cnNumMap: Record<string, number> = { '一': 1, '二': 2, '三': 3, '四': 
 
 function loadStageMemoriesFromDisk(): StageMemoryEntry[] {
   ensureDataDir();
-  if (!fs.existsSync(stageMemoriesFile)) return [];
-  try { return JSON.parse(fs.readFileSync(stageMemoriesFile, 'utf-8')); } catch { return []; }
+  return readVersionedJsonFile<StageMemoryEntry[]>(stageMemoriesFile, []).data;
 }
 
 function saveStageMemoriesToDisk(entries: StageMemoryEntry[]) {
   ensureDataDir();
-  fs.writeFileSync(stageMemoriesFile, JSON.stringify(entries, null, 2), 'utf-8');
+  writeVersionedJsonFile(stageMemoriesFile, entries);
 }
 
 function loadReferenceMaterialsFromDisk(): ReferenceMaterial[] {
   ensureDataDir();
-  if (!fs.existsSync(referenceMaterialsFile)) return [];
-  try { return JSON.parse(fs.readFileSync(referenceMaterialsFile, 'utf-8')); } catch { return []; }
+  return readVersionedJsonFile<ReferenceMaterial[]>(referenceMaterialsFile, []).data;
 }
 
 function saveReferenceMaterialsToDisk(entries: ReferenceMaterial[]) {
   ensureDataDir();
-  fs.writeFileSync(referenceMaterialsFile, JSON.stringify(entries, null, 2), 'utf-8');
+  writeVersionedJsonFile(referenceMaterialsFile, entries);
 }
 
 function normalizeKnowledgeStageName(value?: string): string {
@@ -2388,6 +2347,8 @@ function scheduleDevServerReload(reason: string) {
 }
 
 function createWindow() {
+  const productionEntryPath = path.join(__dirname, '../renderer/index.html');
+  const productionEntryUrl = pathToFileURL(productionEntryPath).toString();
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -2399,6 +2360,19 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
     title: '项目进度管理工具',
+  });
+
+  const isTrustedNavigation = (url: string) => process.env.NODE_ENV === 'development'
+    ? url.startsWith(DEV_SERVER_URL)
+    : url === productionEntryUrl;
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isTrustedNavigation(url)) return;
+    event.preventDefault();
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
   });
 
   // Development loads the local Vite server; production loads bundled files.
@@ -2418,7 +2392,7 @@ function createWindow() {
     });
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+    mainWindow.loadFile(productionEntryPath);
   }
 
   mainWindow.on('closed', () => {
@@ -2431,42 +2405,48 @@ function createWindow() {
 }
 
 // IPC 处理器
-ipcMain.handle('dialog:openFolder', async () => {
+const openProjectFolderDialog = async (options?: { title?: string; buttonLabel?: string }) => {
   const result = await dialog.showOpenDialog({
     properties: ['openDirectory'],
-    title: '选择项目文件夹',
+    title: options?.title || '选择项目文件夹',
+    buttonLabel: options?.buttonLabel || '选择此文件夹',
   });
   if (result.canceled) {
     return null;
   }
   return result.filePaths[0];
-});
+};
 
-ipcMain.handle('file:openInExplorer', async (_event: any, targetPath: string) => {
+const openPathInExplorer = async (targetPath: string) => {
   try {
-    if (!fs.existsSync(targetPath)) return { success: false, error: '路径不存在' };
-    const stat = fs.statSync(targetPath);
+    const inputCheck = checkExistingPath(targetPath);
+    if (!inputCheck.ok) return { success: false, error: inputCheck.error };
+    const resolvedPath = inputCheck.path;
+    const stat = fs.statSync(resolvedPath);
     if (stat.isFile()) {
-      shell.showItemInFolder(targetPath);
+      shell.showItemInFolder(resolvedPath);
     } else {
-      const error = await shell.openPath(targetPath);
+      const error = await shell.openPath(resolvedPath);
       if (error) return { success: false, error };
     }
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 // 用默认程序打开文件
-ipcMain.handle('file:openWithDefaultApp', async (_event: any, filePath: string) => {
+const openFileWithDefaultApp = async (filePath: string) => {
   try {
-    await shell.openPath(filePath);
+    const inputCheck = checkExistingPath(filePath, 'file');
+    if (!inputCheck.ok) return { success: false, error: inputCheck.error };
+    const openError = await shell.openPath(inputCheck.path);
+    if (openError) return { success: false, error: openError };
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 let dragFileIconImage: ReturnType<typeof nativeImage.createFromBuffer> | null = null;
 
@@ -2536,13 +2516,18 @@ function getDragFileIcon() {
 }
 
 // 原生文件拖拽：同步 IPC 保证 startDrag 在 renderer dragstart 事件结束前执行
-ipcMain.on('shell:startDrag', (event: any, filePath: string) => {
+const startNativeFileDrag = (event: any, filePath: string) => {
   try {
     if (!filePath) {
       event.returnValue = { success: false, error: '文件路径为空' };
       return;
     }
     const resolvedPath = path.resolve(filePath);
+    const workspaceCheck = checkWithinWorkspace(resolvedPath);
+    if (!workspaceCheck.ok) {
+      event.returnValue = { success: false, error: workspaceCheck.error };
+      return;
+    }
     if (!fs.existsSync(resolvedPath)) {
       event.returnValue = { success: false, error: '文件不存在' };
       return;
@@ -2556,201 +2541,7 @@ ipcMain.on('shell:startDrag', (event: any, filePath: string) => {
     console.warn('Native file drag failed:', error);
     event.returnValue = { success: false, error: error?.message || '系统拖拽启动失败' };
   }
-});
-
-ipcMain.handle('file:rename', async (_event: any, params: { filePath: string; newName: string }) => {
-  try {
-    const { filePath, newName } = params;
-    const pathCheck = checkWithinWorkspace(filePath);
-    if (!pathCheck.ok) return { success: false, error: pathCheck.error };
-    const nameCheck = checkSafeChildName(newName);
-    if (!nameCheck.ok) return { success: false, error: nameCheck.error };
-    if (!fs.existsSync(filePath)) return { success: false, error: '文件不存在' };
-    const safeName = path.basename(newName.trim());
-    if (!safeName) return { success: false, error: '文件名不能为空' };
-    if (safeName !== newName.trim()) return { success: false, error: '文件名不能包含路径' };
-    const destPath = path.join(path.dirname(filePath), safeName);
-    if (destPath === filePath) return { success: true, filePath };
-    if (fs.existsSync(destPath)) return { success: false, error: '同名文件已存在' };
-    fs.renameSync(filePath, destPath);
-    return { success: true, filePath: destPath };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('file:importFiles', async (_event: any, params: { folderPath: string; filePaths: string[] }) => {
-  try {
-    const { folderPath, filePaths } = params;
-    if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
-    if (!fs.statSync(folderPath).isDirectory()) return { success: false, error: '目标位置不是文件夹' };
-
-    const targetResolved = path.resolve(folderPath);
-    const imported: { name: string; path: string }[] = [];
-    for (const sourcePath of filePaths) {
-      if (!sourcePath || !fs.existsSync(sourcePath)) continue;
-      const sourceResolved = path.resolve(sourcePath);
-      const stat = fs.statSync(sourcePath);
-      const isDirectory = stat.isDirectory();
-      if (!isDirectory && !stat.isFile()) continue;
-
-      // 防止把文件夹复制到自身或子文件夹里，避免递归膨胀。
-      if (isDirectory && (targetResolved === sourceResolved || targetResolved.startsWith(sourceResolved + path.sep))) {
-        continue;
-      }
-
-      const ext = isDirectory ? '' : path.extname(sourcePath);
-      const base = path.basename(sourcePath, ext);
-      let destPath = path.join(folderPath, path.basename(sourcePath));
-      let index = 1;
-      while (fs.existsSync(destPath) && path.resolve(destPath) !== sourceResolved) {
-        destPath = path.join(folderPath, `${base} (${index})${ext}`);
-        index += 1;
-      }
-      if (path.resolve(destPath) === sourceResolved) continue;
-
-      if (isDirectory) {
-        fs.cpSync(sourcePath, destPath, { recursive: true, errorOnExist: true });
-      } else {
-        fs.copyFileSync(sourcePath, destPath, fs.constants.COPYFILE_EXCL);
-      }
-      imported.push({ name: path.basename(destPath), path: destPath });
-    }
-    return { success: true, files: imported };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('file:move', async (_event: any, params: { sourcePaths: string[]; targetFolder: string }) => {
-  try {
-    const { sourcePaths, targetFolder } = params;
-    if (!targetFolder) return { success: false, error: '目标文件夹无效' };
-    for (const sp of sourcePaths) {
-      const c = checkWithinWorkspace(sp);
-      if (!c.ok) return { success: false, error: c.error };
-    }
-    const tc = checkWithinWorkspace(targetFolder);
-    if (!tc.ok) return { success: false, error: tc.error };
-    if (!fs.existsSync(targetFolder)) fs.mkdirSync(targetFolder, { recursive: true });
-    if (!fs.statSync(targetFolder).isDirectory()) return { success: false, error: '目标位置不是文件夹' };
-
-    const targetResolved = path.resolve(targetFolder);
-    const moved: { name: string; path: string; sourcePath: string; isDirectory: boolean }[] = [];
-    const errors: string[] = [];
-
-    for (const sourcePath of sourcePaths) {
-      if (!sourcePath || !fs.existsSync(sourcePath)) {
-        errors.push(`${path.basename(sourcePath || '') || '项目'}不存在`);
-        continue;
-      }
-      const sourceResolved = path.resolve(sourcePath);
-      const stat = fs.statSync(sourcePath);
-      const isDirectory = stat.isDirectory();
-      if (!isDirectory && !stat.isFile()) continue;
-      if (path.dirname(sourceResolved) === targetResolved) continue;
-      if (isDirectory && (targetResolved === sourceResolved || targetResolved.startsWith(sourceResolved + path.sep))) {
-        errors.push(`不能把“${path.basename(sourcePath)}”移动到自身或其子文件夹中`);
-        continue;
-      }
-
-      const destPath = path.join(targetFolder, path.basename(sourcePath));
-      if (fs.existsSync(destPath)) {
-        errors.push(`“${path.basename(sourcePath)}”已存在于目标文件夹`);
-        continue;
-      }
-
-      try {
-        fs.renameSync(sourcePath, destPath);
-      } catch (error: any) {
-        if (error?.code !== 'EXDEV') throw error;
-        if (isDirectory) {
-          fs.cpSync(sourcePath, destPath, { recursive: true, errorOnExist: true });
-          fs.rmSync(sourcePath, { recursive: true, force: false });
-        } else {
-          fs.copyFileSync(sourcePath, destPath, fs.constants.COPYFILE_EXCL);
-          fs.unlinkSync(sourcePath);
-        }
-      }
-      moved.push({ name: path.basename(destPath), path: destPath, sourcePath, isDirectory });
-    }
-
-    return { success: errors.length === 0, moved, errors, error: errors.join('；') || undefined };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('file:duplicate', async (_event: any, params: { sourcePaths: string[]; targetFolder: string }) => {
-  try {
-    const { sourcePaths, targetFolder } = params;
-    for (const sp of sourcePaths) {
-      const c = checkWithinWorkspace(sp);
-      if (!c.ok) return { success: false, error: c.error };
-    }
-    const tc = checkWithinWorkspace(targetFolder);
-    if (!tc.ok) return { success: false, error: tc.error };
-    if (!fs.existsSync(targetFolder)) fs.mkdirSync(targetFolder, { recursive: true });
-    const copies: { name: string; path: string; isDirectory: boolean }[] = [];
-
-    for (const sourcePath of sourcePaths) {
-      if (!sourcePath || !fs.existsSync(sourcePath)) continue;
-      const stat = fs.statSync(sourcePath);
-      const isDirectory = stat.isDirectory();
-      if (!isDirectory && !stat.isFile()) continue;
-
-      const ext = isDirectory ? '' : path.extname(sourcePath);
-      const base = path.basename(sourcePath, ext);
-      let suffix = ' - 副本';
-      let destPath = path.join(targetFolder, `${base}${suffix}${ext}`);
-      let index = 2;
-      while (fs.existsSync(destPath)) {
-        suffix = ` - 副本 (${index})`;
-        destPath = path.join(targetFolder, `${base}${suffix}${ext}`);
-        index += 1;
-      }
-
-      if (isDirectory) {
-        fs.cpSync(sourcePath, destPath, { recursive: true, errorOnExist: true });
-      } else {
-        fs.copyFileSync(sourcePath, destPath, fs.constants.COPYFILE_EXCL);
-      }
-      copies.push({ name: path.basename(destPath), path: destPath, isDirectory });
-    }
-
-    return { success: true, copies };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
-
-// 删除文件
-ipcMain.handle('file:delete', async (_event: any, filePath: string, options?: { permanent?: boolean }) => {
-  try {
-    const check = checkWithinWorkspace(filePath);
-    if (!check.ok) return { success: false, error: check.error };
-    let recycleEntry: RecycleBinEntry | undefined;
-    if (fs.existsSync(filePath)) {
-      if (options?.permanent) fs.unlinkSync(filePath);
-      else recycleEntry = await movePathToRecycleBin(filePath);
-    }
-    return { success: true, recycleEntry };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('file:read', async (_event: any, filePath: string) => {
-  const check = checkWithinWorkspace(filePath);
-  if (!check.ok) throw new Error(check.error);
-  return fs.readFileSync(filePath, 'utf-8');
-});
-
-ipcMain.handle('file:readDir', async (_event: any, dirPath: string) => {
-  const check = checkWithinWorkspace(dirPath);
-  if (!check.ok) throw new Error(check.error);
-  return fs.promises.readdir(dirPath);
-});
+};
 
 const fallbackFontNames = [
   '宋体',
@@ -2789,16 +2580,16 @@ function listInstalledFonts(): string[] {
   return Array.from(fontNames).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
 }
 
-ipcMain.handle('system:listFonts', async () => {
+const listSystemFonts = async () => {
   try {
     return { success: true, fonts: listInstalledFonts() };
   } catch (error: any) {
     return { success: false, fonts: fallbackFontNames, error: error.message };
   }
-});
+};
 
 
-ipcMain.handle('system:notify', async (_event: any, params: { title?: string; body?: string; silent?: boolean; target?: string; projectId?: string }) => {
+const showSystemNotification = async (params: { title?: string; body?: string; silent?: boolean; target?: string; projectId?: string }) => {
   try {
     const shortcut = didEnsureWindowsNotificationShortcut
       ? { success: true, appUserModelId: APP_USER_MODEL_ID }
@@ -2830,18 +2621,18 @@ ipcMain.handle('system:notify', async (_event: any, params: { title?: string; bo
   } catch (error: any) {
     return { success: false, error: error.message, appUserModelId: APP_USER_MODEL_ID };
   }
-});
+};
 
-ipcMain.handle('system:notificationStatus', async () => {
+const getSystemNotificationStatus = async () => {
   return {
     supported: Notification.isSupported(),
     shortcut: ensureWindowsNotificationShortcut(),
     appUserModelId: APP_USER_MODEL_ID,
   };
-});
+};
 
 // 项目持久化
-ipcMain.handle('project:save', async (_event: any, project: Project) => {
+const saveProject = async (project: Project) => {
   const projects = loadProjectsFromDisk();
   const index = projects.findIndex(p => p.id === project.id);
   if (index < 0 && deletedProjectIds.has(project.id)) {
@@ -2866,7 +2657,7 @@ ipcMain.handle('project:save', async (_event: any, project: Project) => {
   }
   saveProjectsToDisk(projects);
   return { success: true };
-});
+};
 
 function getLatestProjectFolderModifiedAt(folderPath: string): string | undefined {
   if (!folderPath || !fs.existsSync(folderPath)) return undefined;
@@ -2904,13 +2695,13 @@ function getLatestProjectFolderModifiedAt(folderPath: string): string | undefine
   return latest > 0 ? new Date(latest).toISOString() : undefined;
 }
 
-ipcMain.handle('project:loadAll', async () => {
+const loadAllProjects = async () => {
   // 直接返回缓存数据，不做实时目录扫描
   return loadProjectsFromDisk();
-});
+};
 
 // 后台刷新指定项目的目录修改时间（异步、非阻塞）
-ipcMain.handle('project:refreshFolderModifiedAt', async (_event: any, projectIds: string[]) => {
+const refreshProjectFolderModifiedAt = async (projectIds: string[]) => {
   const projects = loadProjectsFromDisk();
   const updates: { id: string; folderModifiedAt: string }[] = [];
   for (const project of projects) {
@@ -2936,14 +2727,15 @@ ipcMain.handle('project:refreshFolderModifiedAt', async (_event: any, projectIds
     saveProjectsToDisk(merged);
   }
   return updates;
-});
+};
 
-ipcMain.handle('project:delete', async (_event: any, projectId: string) => {
+const deleteProject = async (projectId: string, options?: { mode?: 'unregister' | 'delete-folder' }) => {
   try {
     const projects = loadProjectsFromDisk();
     const project = projects.find(item => item.id === projectId);
     if (!project) return { success: false, error: 'Project not found' };
     deletedProjectIds.add(projectId);
+    const deleteFolder = options?.mode !== 'unregister';
 
     const snapshot = {
       project,
@@ -2956,15 +2748,11 @@ ipcMain.handle('project:delete', async (_event: any, projectId: string) => {
     };
 
     let recycleEntry: RecycleBinEntry | undefined;
-    if (project.folderPath && fs.existsSync(project.folderPath)) {
-      recycleEntry = await movePathToRecycleBin(project.folderPath);
-      const workspaceRoot = getActiveWorkspaceRoot();
-      const entries = loadRecycleBinEntries(workspaceRoot);
-      const entry = entries.find(item => item.id === recycleEntry!.id);
-      if (entry) {
-        entry.projectSnapshot = snapshot;
-        saveRecycleBinEntries(workspaceRoot, entries);
-      }
+    if (deleteFolder && project.folderPath && fs.existsSync(project.folderPath)) {
+      // 项目是否可删除由已持久化的项目记录决定；不再要求它位于当前工作区。
+      // 这样迁移遗留或外部登记的项目也能安全地移入当前工作区的回收站。
+      recycleEntry = await recycleBinService.moveToRecycleBin(project.folderPath, { allowOutsideWorkspace: true });
+      recycleBinService.attachProjectSnapshot(recycleEntry.id, snapshot);
     }
 
     const watcher = folderWatchers.get(projectId);
@@ -2984,10 +2772,10 @@ ipcMain.handle('project:delete', async (_event: any, projectId: string) => {
     deletedProjectIds.delete(projectId);
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
 // 文件选择对话框
-ipcMain.handle('dialog:openFile', async (_event: any, filters?: Electron.FileFilter[]) => {
+const openSingleFileDialog = async (filters?: Electron.FileFilter[]) => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
     title: '选择文件',
@@ -3000,9 +2788,9 @@ ipcMain.handle('dialog:openFile', async (_event: any, filters?: Electron.FileFil
     return null;
   }
   return result.filePaths[0];
-});
+};
 
-ipcMain.handle('dialog:openFiles', async (_event: any, filters?: Electron.FileFilter[]) => {
+const openMultipleFilesDialog = async (filters?: Electron.FileFilter[]) => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile', 'multiSelections'],
     title: '选择文件',
@@ -3014,7 +2802,7 @@ ipcMain.handle('dialog:openFiles', async (_event: any, filters?: Electron.FileFi
     return null;
   }
   return result.filePaths;
-});
+};
 
 function normalizeExtractedText(value: string): string {
   return value
@@ -3814,7 +3602,10 @@ async function replaceDocumentText(params: { filePath: string; originalText: str
   const filePath = String(params?.filePath || '');
   const originalText = String(params?.originalText || '').trim();
   const replacementText = String(params?.replacementText || '').trim();
-  if (!filePath || !fs.existsSync(filePath)) return { success: false, error: '文件不存在或路径无效' };
+  const workspaceCheck = checkWithinWorkspace(filePath);
+  if (!workspaceCheck.ok) return { success: false, error: workspaceCheck.error };
+  const inputCheck = checkExistingPath(filePath, 'file');
+  if (!inputCheck.ok) return { success: false, error: inputCheck.error };
   if (!originalText) return { success: false, error: '原文内容不能为空' };
   if (!replacementText) return { success: false, error: '建议修改内容不能为空' };
 
@@ -3853,10 +3644,11 @@ async function replaceDocumentText(params: { filePath: string; originalText: str
 }
 
 
-ipcMain.handle('file:replaceDocumentText', async (_event: any, params: { filePath: string; originalText: string; replacementText: string }) => replaceDocumentText(params));
-
-ipcMain.handle('file:parseWord', async (_event: any, filePath: string) => {
+const parseWordDocument = async (filePath: string) => {
   try {
+    const inputCheck = checkExistingPath(filePath, 'file');
+    if (!inputCheck.ok) return { success: false, error: inputCheck.error };
+    filePath = inputCheck.path;
     const buffer = fs.readFileSync(filePath);
     if (path.extname(filePath).toLowerCase() === '.docx') {
       const docxContent = await extractDocxTextWithNumbering(buffer);
@@ -3880,7 +3672,7 @@ ipcMain.handle('file:parseWord', async (_event: any, filePath: string) => {
       error: error.message,
     };
   }
-});
+};
 
 interface DocxParagraphBlock {
   xml: string;
@@ -3988,16 +3780,20 @@ async function applyDocumentParagraphFormats(params: { sourcePath: string; targe
   }
 }
 
-ipcMain.handle('file:applyDocumentParagraphFormats', async (_event: any, params: { sourcePath: string; targetPath: string; paragraphIndices: number[] }) => applyDocumentParagraphFormats(params));
-ipcMain.handle('file:extractTemplateFormatRules', async (_event: any, filePath: string) => {
+const readTemplateFormatRules = async (filePath: string) => {
   try {
-    return await extractDocxTemplateFormatRules(filePath);
+    const inputCheck = checkExistingPath(filePath, 'file');
+    if (!inputCheck.ok) return { success: false, error: inputCheck.error };
+    return await extractDocxTemplateFormatRules(inputCheck.path);
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
-ipcMain.handle('file:parseDocument', async (_event: any, filePath: string) => {
+};
+const parseDocument = async (filePath: string) => {
   try {
+    const inputCheck = checkExistingPath(filePath, 'file');
+    if (!inputCheck.ok) return { success: false, error: inputCheck.error };
+    filePath = inputCheck.path;
     const ext = path.extname(filePath).toLowerCase();
     const fileName = path.basename(filePath);
     const buffer = fs.readFileSync(filePath);
@@ -4067,10 +3863,13 @@ ipcMain.handle('file:parseDocument', async (_event: any, filePath: string) => {
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
-ipcMain.handle('file:parseDocumentSilent', async (_event: any, filePath: string) => {
+const parseDocumentSilent = async (filePath: string) => {
   try {
+    const inputCheck = checkExistingPath(filePath, 'file');
+    if (!inputCheck.ok) return { success: false, error: inputCheck.error };
+    filePath = inputCheck.path;
     const ext = path.extname(filePath).toLowerCase();
     const fileName = path.basename(filePath);
     const buffer = fs.readFileSync(filePath);
@@ -4140,11 +3939,14 @@ ipcMain.handle('file:parseDocumentSilent', async (_event: any, filePath: string)
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 // 解析 PDF 文档
-ipcMain.handle('file:parsePdf', async (_event: any, filePath: string) => {
+const parsePdfDocument = async (filePath: string) => {
   try {
+    const inputCheck = checkExistingPath(filePath, 'file');
+    if (!inputCheck.ok) return { success: false, error: inputCheck.error };
+    filePath = inputCheck.path;
     const buffer = fs.readFileSync(filePath);
     const data = await pdfParse(buffer);
     return {
@@ -4159,74 +3961,29 @@ ipcMain.handle('file:parsePdf', async (_event: any, filePath: string) => {
       error: error.message,
     };
   }
-});
-
-// 版本操作
-ipcMain.handle('version:save', async (_event: any, version: DocumentVersion) => {
-  const versions = loadVersionsFromDisk();
-  const index = versions.findIndex(v => v.id === version.id);
-  if (index >= 0) {
-    versions[index] = version;
-  } else {
-    versions.push(version);
-  }
-  saveVersionsToDisk(versions);
-});
-
-ipcMain.handle('version:loadAll', async () => {
-  return loadVersionsFromDisk();
-});
-
-ipcMain.handle('version:delete', async (_event: any, versionId: string) => {
-  const versions = loadVersionsFromDisk();
-  const filtered = versions.filter(v => v.id !== versionId);
-  saveVersionsToDisk(filtered);
-});
-
-// 模板操作
-ipcMain.handle('template:save', async (_event: any, template: WritingTemplate) => {
-  const templates = loadTemplatesFromDisk();
-  const index = templates.findIndex(t => t.id === template.id);
-  if (index >= 0) {
-    templates[index] = template;
-  } else {
-    templates.push(template);
-  }
-  saveTemplatesToDisk(templates);
-});
+};
 
 // 存储模板源文件（导入模板时调用）
-ipcMain.handle('template:storeFile', async (_event: any, params: { templateId: string; sourcePath: string }) => {
+const storeTemplateFile = async (params: { templateId: string; sourcePath: string }) => {
   try {
+    const idCheck = checkSafeChildName(params.templateId);
+    if (!idCheck.ok) return { success: false, error: idCheck.error };
+    const sourceCheck = checkExistingPath(params.sourcePath, 'file');
+    if (!sourceCheck.ok) return { success: false, error: sourceCheck.error };
     if (!fs.existsSync(templateFilesDir)) {
       fs.mkdirSync(templateFilesDir, { recursive: true });
     }
-    const ext = path.extname(params.sourcePath);
+    const ext = path.extname(sourceCheck.path);
     const destPath = path.join(templateFilesDir, `${params.templateId}${ext}`);
-    fs.copyFileSync(params.sourcePath, destPath);
+    fs.copyFileSync(sourceCheck.path, destPath);
     return { success: true, filePath: destPath };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
-
-ipcMain.handle('template:loadAll', async () => {
-  return loadTemplatesFromDisk();
-});
-
-ipcMain.handle('template:delete', async (_event: any, templateId: string) => {
-  const templates = loadTemplatesFromDisk();
-  const filtered = templates.filter(t => t.id !== templateId);
-  saveTemplatesToDisk(filtered);
-});
+};
 
 // 范文分析：解析范文并生成AI分析摘要，支持多次分析对比差异
-ipcMain.handle('template:analyzeExamples', async (_event: any, params: {
-  exampleContents: string[];
-  templateNodes: Array<{ id: string; title: string; level: number }>;
-  templateName: string;
-  existingAnalysis?: string;
-}) => {
+const analyzeTemplateExamples = async (params: TemplateAnalysisParams) => {
   const combinedContent = params.exampleContents
     .map((content, i) => `【范文${i + 1}】\n${content.slice(0, 15000)}`)
     .join('\n\n---\n\n');
@@ -4312,10 +4069,10 @@ ${combinedContent}`;
   } catch (error: any) {
     return { success: false, error: error.message || '范文分析失败' };
   }
-});
+};
 
 // 文档审查功能
-ipcMain.handle('review:execute', async (_event: any, params: {
+const executeDocumentReview = async (params: {
   versionId: string;
   templateId: string;
   config: ReviewConfig;
@@ -4486,29 +4243,20 @@ ipcMain.handle('review:execute', async (_event: any, params: {
   saveReviewsToDisk(reviews);
 
   return { success: true, result: reviewResult };
-});
+};
 
-ipcMain.handle('review:loadAll', async () => {
+const loadAllReviews = async () => {
   return loadReviewsFromDisk();
-});
+};
 
-ipcMain.handle('review:delete', async (_event: any, reviewId: string) => {
+const deleteReview = async (reviewId: string) => {
   const reviews = loadReviewsFromDisk();
   const filtered = reviews.filter(r => r.id !== reviewId);
   saveReviewsToDisk(filtered);
-});
-
-// AI 配置操作
-ipcMain.handle('ai:loadConfig', async () => {
-  return loadAIConfigFromDisk();
-});
-
-ipcMain.handle('ai:saveConfig', async (_event: any, config: AIConfig) => {
-  saveAIConfigToDisk(config);
-});
+};
 
 // AI 调用
-ipcMain.handle('ai:call', async (_event: any, prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: AIConfig; usageRequestId?: string }) => {
+const callAi = async (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: AIConfig; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => {
   try {
     if (typeof prompt === 'string') return await callConfiguredAI(prompt);
     const execute = async () => {
@@ -4520,27 +4268,25 @@ ipcMain.handle('ai:call', async (_event: any, prompt: string | { prompt: string;
         : callDefaultAI(prompt.prompt, prompt.modelId);
     };
     return prompt.usageRequestId
-      ? await runWithAIUsageContext(prompt.usageRequestId, execute)
+      ? await runWithAIUsageContext({ requestId: prompt.usageRequestId, requestTitle: prompt.usageTitle, scene: prompt.usageScene }, execute)
       : await execute();
   } catch (error: any) {
     throw new Error(`AI 调用失败: ${error.message}`);
   }
-});
-
-ipcMain.handle('ai:usageStatistics', async () => getAIUsageStatistics());
-ipcMain.handle('ai:usageForRequest', async (_event: any, requestId: string) => sumAIUsage(getAIUsageRecords(requestId)));
+};
 
 
-ipcMain.handle('ai:callParallelDetails', async (_event: any, params: { prompt: string; modelId?: string; modelIds?: string[]; config?: AIConfig }) => {
+const callAiParallelDetails = async (params: { prompt: string; modelId?: string; modelIds?: string[]; config?: AIConfig; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => {
   try {
-    return await callParallelAIDetails(params.prompt, params.modelIds, params.config, params.modelId);
+    const execute = () => callParallelAIDetails(params.prompt, params.modelIds, params.config, params.modelId);
+    return params.usageRequestId ? await runWithAIUsageContext({ requestId: params.usageRequestId, requestTitle: params.usageTitle, scene: params.usageScene }, execute) : await execute();
   } catch (error: any) {
     throw new Error(`AI parallel details failed: ${error.message}`);
   }
-});
+};
 
 // AI 生成摘要
-ipcMain.handle('ai:generateSummary', async (_event: any, content: string) => {
+const generateAiSummary = async (content: string) => {
   const prompt = composePromptMain('summary', {
     content: content.substring(0, 3000),
   });
@@ -4551,10 +4297,10 @@ ipcMain.handle('ai:generateSummary', async (_event: any, content: string) => {
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 // AI 审查建议
-ipcMain.handle('ai:reviewSuggestion', async (_event: any, params: { content: string; template: string }) => {
+const generateAiReviewSuggestion = async (params: { content: string; template: string }) => {
   const prompt = composePromptMain('review', {
     requiredOutline: params.template,
     analysisContext: '',
@@ -4568,11 +4314,15 @@ ipcMain.handle('ai:reviewSuggestion', async (_event: any, params: { content: str
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 // 文件夹监听
-ipcMain.handle('folder:startWatch', async (_event: any, params: { projectId: string; folderPath: string }) => {
+const startFolderWatch = async (params: { projectId: string; folderPath: string }) => {
   try {
+    const workspaceCheck = checkWithinWorkspace(params.folderPath);
+    if (!workspaceCheck.ok) return { success: false, error: workspaceCheck.error };
+    const folderCheck = checkExistingPath(params.folderPath, 'directory');
+    if (!folderCheck.ok) return { success: false, error: folderCheck.error };
     // 如果已经在监听，先停止
     if (folderWatchers.has(params.projectId)) {
       folderWatchers.get(params.projectId)?.close();
@@ -4607,9 +4357,9 @@ ipcMain.handle('folder:startWatch', async (_event: any, params: { projectId: str
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
-ipcMain.handle('folder:stopWatch', async (_event: any, projectId: string) => {
+const stopFolderWatch = async (projectId: string) => {
   try {
     if (folderWatchers.has(projectId)) {
       folderWatchers.get(projectId)?.close();
@@ -4619,9 +4369,9 @@ ipcMain.handle('folder:stopWatch', async (_event: any, projectId: string) => {
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
-ipcMain.handle('folder:listFiles', async (_event: any, folderPath: string) => {
+const listSupportedFolderFiles = async (folderPath: string) => {
   try {
     const check = checkWithinWorkspace(folderPath);
     if (!check.ok) return { success: false, error: check.error, files: [] };
@@ -4635,10 +4385,10 @@ ipcMain.handle('folder:listFiles', async (_event: any, folderPath: string) => {
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 // 获取文件夹完整内容（含元数据）— 异步 I/O 避免阻塞主进程
-ipcMain.handle('folder:getContents', async (_event: any, folderPath: string) => {
+const getFolderContents = async (folderPath: string) => {
   try {
     const check = checkWithinWorkspace(folderPath);
     if (!check.ok) return { success: false, error: check.error, items: [] };
@@ -4672,7 +4422,7 @@ ipcMain.handle('folder:getContents', async (_event: any, folderPath: string) => 
   } catch (error: any) {
     return { success: false, items: [], error: error.message };
   }
-});
+};
 
 interface SearchedProjectFile {
   name: string;
@@ -4729,7 +4479,7 @@ async function searchProjectFiles(
   return output;
 }
 
-ipcMain.handle('folder:searchFiles', async (_event: any, params: { folderPath: string; query: string }) => {
+const searchFolderFiles = async (params: { folderPath: string; query: string }) => {
   try {
     const { folderPath, query } = params;
     const check = checkWithinWorkspace(folderPath);
@@ -4742,7 +4492,7 @@ ipcMain.handle('folder:searchFiles', async (_event: any, params: { folderPath: s
   } catch (error: any) {
     return { success: false, files: [], error: error.message };
   }
-});
+};
 
 interface ScannedStageFile {
   name: string;
@@ -4784,7 +4534,7 @@ async function scanStageFiles(folderPath: string, output: ScannedStageFile[] = [
   return output;
 }
 
-ipcMain.handle('folder:scanStageFiles', async (_event: any, folderPath: string) => {
+const scanFolderStageFiles = async (folderPath: string) => {
   try {
     const check = checkWithinWorkspace(folderPath);
     if (!check.ok) return { success: false, error: check.error, files: [] };
@@ -4794,10 +4544,10 @@ ipcMain.handle('folder:scanStageFiles', async (_event: any, folderPath: string) 
   } catch (error: any) {
     return { success: false, files: [], error: error.message };
   }
-});
+};
 // ---- workspace:scanProjectFiles ----
 // 轻量扫描：只返回文件路径、大小、修改时间，不读内容，不识别阶段
-ipcMain.handle('workspace:scanProjectFiles', async (_event: any, folderPath: string) => {
+const scanWorkspaceProjectFiles = async (folderPath: string) => {
   const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.cache', '.projecthub-recycle-bin', '.projecthub-data']);
   const SKIP_PREFIXES = ['.', '~$', '.~'];
   const result: Array<{ path: string; size: number; modifiedAt: string }> = [];
@@ -4838,7 +4588,7 @@ ipcMain.handle('workspace:scanProjectFiles', async (_event: any, folderPath: str
   } catch (error: any) {
     return { success: false, files: [], error: error.message };
   }
-});
+};
 
 // ---- folder:getTreeStats ----
 interface TreeFileEntry {
@@ -4928,7 +4678,7 @@ async function collectTreeStats(
   return { fileCount, folderCount, totalSize };
 }
 
-ipcMain.handle('folder:getTreeStats', async (_event: any, folderPath: string): Promise<TreeStatsResult> => {
+const getFolderTreeStats = async (folderPath: string): Promise<TreeStatsResult> => {
   try {
     const check = checkWithinWorkspace(folderPath);
     if (!check.ok) return { success: false, error: check.error };
@@ -4964,37 +4714,18 @@ ipcMain.handle('folder:getTreeStats', async (_event: any, folderPath: string): P
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
-// 任务操作
-ipcMain.handle('task:save', async (_event: any, task: TaskItem) => {
-  const tasks = loadTasksFromDisk();
-  const index = tasks.findIndex(t => t.id === task.id);
-  if (index >= 0) {
-    tasks[index] = task;
-  } else {
-    tasks.push(task);
-  }
-  saveTasksToDisk(tasks);
-});
-
-ipcMain.handle('task:loadAll', async () => {
-  return loadTasksFromDisk();
-});
-
-
-ipcMain.handle('collaboration:startReceiver', async (_event: any, params?: { port?: number }) => {
+const startCollaborationReceiver = async (params?: { port?: number }) => {
   try {
     getLocalCollaborationIdentity();
     return await startCollaborationServer(params?.port || 39218);
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('collaboration:stopReceiver', async () => stopCollaborationServer());
-
-ipcMain.handle('collaboration:getStatus', async () => ({
+const getCollaborationStatus = () => ({
   success: true,
   running: Boolean(collaborationServer),
   port: collaborationPort,
@@ -5002,31 +4733,98 @@ ipcMain.handle('collaboration:getStatus', async () => ({
   urls: collaborationServer ? getLanAddresses().map(address => `http://${address}:${collaborationPort}/tasks`) : [],
   peers: getCollaborationPeers(),
   friends: getCollaborationFriends(),
-}));
+});
 
-ipcMain.handle('collaboration:sendTask', async (_event: any, params: { endpoint?: string; friendId?: string; task: TaskItem; projectName?: string; senderName?: string }) => {
+const sendCollaborationTask = async (params: { endpoint?: string; friendId?: string; task: TaskItem; projectName?: string; senderName?: string; attachmentName?: string }) => {
   try {
-    getLocalCollaborationIdentity();
+    const identity = getLocalCollaborationIdentity();
+    if (params.friendId) {
+      const friend = getCollaborationFriends().find(item => item.id === params.friendId && item.status === 'accepted');
+      if (!friend?.online) throw new Error('好友当前离线，无法发送协作任务');
+    }
     const endpoint = resolveCollaborationTarget(params).toString();
+    const sentAt = new Date().toISOString();
     const result = await postJsonToPeer(endpoint, {
       task: params.task,
       projectName: params.projectName || '',
-      senderName: params.senderName || os.userInfo().username || APP_DISPLAY_NAME,
-      sentAt: new Date().toISOString(),
+      senderName: params.senderName || identity.name || os.userInfo().username || APP_DISPLAY_NAME,
+      fromId: identity.id,
+      attachmentName: params.attachmentName || '',
+      sentAt,
     });
+    if (params.friendId) {
+      const messageId = `task-message-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+      appendCollaborationChatMessage({
+        id: messageId,
+        friendId: params.friendId,
+        direction: 'outgoing',
+        content: `已发送任务：${params.task.title || '未命名任务'}`,
+        senderName: identity.name,
+        createdAt: sentAt,
+        taskOffer: {
+          id: `sent-${params.task.id}-${Date.now()}`,
+          messageId,
+          title: params.task.title || '未命名任务',
+          description: params.task.description || '',
+          projectName: params.projectName || '',
+          stageName: params.task.stageName,
+          sectionTitle: params.task.sectionTitle,
+          attachmentName: params.attachmentName,
+          status: 'pending',
+        },
+      });
+    }
     return { success: true, result };
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('collaboration:listPeers', async () => ({
-  success: true,
-  peers: getCollaborationPeers(),
-  friends: getCollaborationFriends(),
-}));
+const respondToCollaborationTaskOffer = async (params: { friendId: string; offerId: string; status: 'accepted' | 'rejected'; projectId?: string }) => {
+  try {
+    const status = params.status === 'accepted' ? 'accepted' : 'rejected';
+    const messages = loadCollaborationChatMessages();
+    const target = messages.find(message => message.friendId === params.friendId && message.taskOffer?.id === params.offerId && message.direction === 'incoming');
+    if (!target?.taskOffer) throw new Error('未找到该任务邀约');
+    let acceptedTask: TaskItem | undefined;
+    if (status === 'accepted') {
+      if (!params.projectId || !loadProjectsFromDisk().some(project => project.id === params.projectId)) {
+        throw new Error('请选择任务要归属的本地项目');
+      }
+      const incoming = target.taskOffer.task;
+      if (!incoming) throw new Error('旧任务邀约缺少任务数据，请让好友重新发送');
+      const tasks = loadTasksFromDisk();
+      acceptedTask = tasks.find(task => task.sourceMessageId === target.id);
+      if (!acceptedTask) {
+        acceptedTask = buildAcceptedCollaborationTask({
+          incoming,
+          localProjectId: params.projectId,
+          offerId: params.offerId,
+          sourceMessageId: target.id,
+          sourceProjectName: target.taskOffer.projectName,
+        });
+        saveTasksToDisk([acceptedTask, ...tasks]);
+      }
+    }
+    target.taskOffer.status = status;
+    saveCollaborationChatMessages(messages);
+    const identity = getLocalCollaborationIdentity();
+    const friend = getCollaborationFriends().find(item => item.id === params.friendId && item.status === 'accepted');
+    if (friend?.online) {
+      const url = resolveCollaborationTarget({ friendId: friend.id });
+      url.pathname = '/chat';
+      const content = `${status === 'accepted' ? '已接受' : '已拒绝'}协作任务「${target.taskOffer.title}」`;
+      const reply: CollaborationChatMessage = { id: `task-response-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, friendId: friend.id, direction: 'outgoing', content, senderName: identity.name, createdAt: new Date().toISOString() };
+      await postJsonToPeer(url.toString(), { id: reply.id, fromId: identity.id, senderName: identity.name, content, createdAt: reply.createdAt });
+      appendCollaborationChatMessage(reply);
+    }
+    return { success: true, task: acceptedTask };
+  } catch (error: any) {
+    return { success: false, error: error?.message || String(error) };
+  }
+};
 
-ipcMain.handle('collaboration:searchByEmail', async (_event: any, email: string) => {
+const searchCollaborationPeerByEmail = async (email: string) => {
   try {
     requireCollaborationEmail();
     const normalized = normalizeCollaborationEmail(email);
@@ -5036,9 +4834,9 @@ ipcMain.handle('collaboration:searchByEmail', async (_event: any, email: string)
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('collaboration:addFriend', async (_event: any, peer: Partial<LanPeerRecord> & { source?: string; status?: string }) => {
+const addCollaborationFriend = async (peer: Partial<CollaborationPeerRecord> & { source?: string; status?: string }) => {
   try {
     requireCollaborationEmail();
     if (!peer?.id || !peer.host || !peer.port) throw new Error('Invalid peer');
@@ -5047,6 +4845,7 @@ ipcMain.handle('collaboration:addFriend', async (_event: any, peer: Partial<LanP
       id: String(peer.id),
       name: String(peer.name || peer.deviceName || peer.host),
       email: peer.email ? normalizeCollaborationEmail(peer.email) : undefined,
+      avatar: normalizeCollaborationAvatar(peer.avatar),
       deviceName: peer.deviceName ? String(peer.deviceName) : undefined,
       host: String(peer.host),
       port: Number(peer.port),
@@ -5061,32 +4860,32 @@ ipcMain.handle('collaboration:addFriend', async (_event: any, peer: Partial<LanP
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('collaboration:removeFriend', async (_event: any, friendId: string) => {
+const removeCollaborationFriend = async (friendId: string) => {
   const friends = loadCollaborationFriendsFromDisk().filter(item => item.id !== friendId);
   saveCollaborationFriendsToDisk(friends);
   emitCollaborationPeersChanged();
   return { success: true, friends: getCollaborationFriends() };
-});
+};
 
-ipcMain.handle('collaboration:listFriends', async () => {
+const listCollaborationFriends = async () => {
   try {
     return { success: true, friends: getCollaborationFriends() };
   } catch (error: any) {
     return { success: false, error: error?.message || String(error), friends: [] };
   }
-});
+};
 
-ipcMain.handle('collaboration:listChatMessages', async (_event: any, friendId: string) => {
+const listCollaborationChatMessages = async (friendId: string) => {
   try {
     return { success: true, messages: loadCollaborationChatMessages().filter(message => message.friendId === friendId).slice(-500) };
   } catch (error: any) {
     return { success: false, error: error?.message || String(error), messages: [] };
   }
-});
+};
 
-ipcMain.handle('collaboration:sendChatMessage', async (_event: any, params: { friendId: string; content: string }) => {
+const sendCollaborationChatMessage = async (params: { friendId: string; content: string }) => {
   try {
     const identity = getLocalCollaborationIdentity();
     const friend = getCollaborationFriends().find(item => item.id === params.friendId && item.status === 'accepted');
@@ -5110,16 +4909,16 @@ ipcMain.handle('collaboration:sendChatMessage', async (_event: any, params: { fr
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('collaboration:sendFile', async (_event: any, params: CollaborationFileSendParams) => {
+const sendCollaborationFile = async (params: CollaborationFileSendParams) => {
   try {
     const result = await sendFileToPeer(params);
     return { success: true, result };
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
 // ─── 好友请求 ────────────────────────────────────────────
 
@@ -5127,7 +4926,7 @@ function loadFriendRequestsFromDisk(): CollaborationFriendRequest[] {
   try {
     const filePath = getCollaborationStorageFile('requests.json', collaborationRequestsFile);
     if (!fs.existsSync(filePath)) return [];
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return readVersionedJsonFile<CollaborationFriendRequest[]>(filePath, []).data;
   } catch {
     return [];
   }
@@ -5135,32 +4934,32 @@ function loadFriendRequestsFromDisk(): CollaborationFriendRequest[] {
 
 function saveFriendRequestsToDisk(requests: CollaborationFriendRequest[]) {
   const filePath = getCollaborationStorageFile('requests.json', collaborationRequestsFile);
-  fs.writeFileSync(filePath, JSON.stringify(requests, null, 2), 'utf-8');
+  writeVersionedJsonFile(filePath, requests);
 }
 
-ipcMain.handle('communication:loadMessageCenterState', async () => {
+const loadMessageCenterState = async () => {
   try {
     const filePath = getCollaborationStorageFile('message-center.json', path.join(dataDir, 'message-center.json'));
     if (!fs.existsSync(filePath)) return { success: true, state: null };
-    return { success: true, state: JSON.parse(fs.readFileSync(filePath, 'utf-8')) };
+    return { success: true, state: readVersionedJsonFile<any>(filePath, null).data };
   } catch (error: any) {
     return { success: false, state: null, error: error?.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('communication:saveMessageCenterState', async (_event: any, state: any) => {
+const saveMessageCenterState = async (state: any) => {
   try {
     const dismissedIds = Array.isArray(state?.dismissedIds) ? state.dismissedIds.map(String).slice(-400) : [];
     const replies = Array.isArray(state?.replies) ? state.replies.slice(-300) : [];
     const filePath = getCollaborationStorageFile('message-center.json', path.join(dataDir, 'message-center.json'));
-    fs.writeFileSync(filePath, JSON.stringify({ dismissedIds, replies }, null, 2), 'utf-8');
+    writeVersionedJsonFile(filePath, { dismissedIds, replies });
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('collaboration:sendFriendRequest', async (_event: any, params: { targetId: string; targetHost: string; targetPort: number; message?: string }) => {
+const sendCollaborationFriendRequest = async (params: { targetId: string; targetHost: string; targetPort: number; message?: string }) => {
   try {
     const identity = requireCollaborationEmail();
     const requests = loadFriendRequestsFromDisk();
@@ -5174,6 +4973,7 @@ ipcMain.handle('collaboration:sendFriendRequest', async (_event: any, params: { 
       fromName: identity.name,
       fromDeviceName: identity.deviceName,
       fromEmail: identity.email,
+      fromAvatar: identity.avatar,
       fromHost: getLanAddresses()[0] || '127.0.0.1',
       fromPort: collaborationPort,
       message: params.message || '',
@@ -5190,6 +4990,7 @@ ipcMain.handle('collaboration:sendFriendRequest', async (_event: any, params: { 
       fromName: identity.name,
       fromDeviceName: identity.deviceName,
       fromEmail: identity.email,
+      fromAvatar: identity.avatar,
       fromHost: payload.fromHost,
       fromPort: payload.fromPort,
       targetId: params.targetId,
@@ -5202,14 +5003,14 @@ ipcMain.handle('collaboration:sendFriendRequest', async (_event: any, params: { 
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('collaboration:listFriendRequests', async () => ({
+const listCollaborationFriendRequests = () => ({
   success: true,
   requests: loadFriendRequestsFromDisk(),
-}));
+});
 
-ipcMain.handle('collaboration:acceptFriendRequest', async (_event: any, requestId: string) => {
+const acceptCollaborationFriendRequest = async (requestId: string) => {
   try {
     requireCollaborationEmail();
     const requests = loadFriendRequestsFromDisk();
@@ -5228,6 +5029,7 @@ ipcMain.handle('collaboration:acceptFriendRequest', async (_event: any, requestI
         id: req.fromId,
         name: req.fromName,
         email: req.fromEmail,
+        avatar: req.fromAvatar,
         deviceName: req.fromDeviceName,
         host: req.fromHost,
         port: req.fromPort,
@@ -5243,6 +5045,7 @@ ipcMain.handle('collaboration:acceptFriendRequest', async (_event: any, requestI
         id: identity.id,
         name: identity.name,
         email: identity.email,
+        avatar: identity.avatar,
         deviceName: identity.deviceName,
         host: getLanAddresses()[0] || '127.0.0.1',
         port: collaborationPort,
@@ -5256,9 +5059,9 @@ ipcMain.handle('collaboration:acceptFriendRequest', async (_event: any, requestI
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('collaboration:rejectFriendRequest', async (_event: any, requestId: string) => {
+const rejectCollaborationFriendRequest = async (requestId: string) => {
   try {
     const requests = loadFriendRequestsFromDisk();
     const req = requests.find(r => r.id === requestId);
@@ -5269,19 +5072,13 @@ ipcMain.handle('collaboration:rejectFriendRequest', async (_event: any, requestI
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
 // 在 HTTP server 中添加好友请求路由
 const originalCreateServer = createCollaborationHttpServer;
 
-ipcMain.handle('task:delete', async (_event: any, taskId: string) => {
-  const tasks = loadTasksFromDisk();
-  const filtered = tasks.filter(t => t.id !== taskId);
-  saveTasksToDisk(filtered);
-});
-
-// AI 执行任务
-ipcMain.handle('task:executeAI', async (_event: any, params: { taskId: string; content: string; instruction: string; usageRequestId?: string }) => {
+// AI 执行任务（由 workflow IPC registrar 暴露现有 channel）。
+const executeAiWorkflowTask = async (params: { taskId: string; content: string; instruction: string; usageRequestId?: string }) => {
   const prompt = composePromptMain('taskExecute', {
     instruction: params.instruction,
     content: params.content.substring(0, 3000),
@@ -5289,12 +5086,18 @@ ipcMain.handle('task:executeAI', async (_event: any, params: { taskId: string; c
 
   try {
     const usageRequestId = params.usageRequestId || `task:${params.taskId}:${Date.now()}`;
-    const result = await runWithAIUsageContext(usageRequestId, () => callConfiguredAI(prompt));
+    const tasks = loadTasksFromDisk();
+    const taskIndex = tasks.findIndex(t => t.id === params.taskId);
+    const result = await runWithAIUsageContext({
+      requestId: usageRequestId,
+      correlationId: usageRequestId,
+      workItemId: params.taskId,
+      requestTitle: taskIndex >= 0 ? tasks[taskIndex].title : 'AI 任务执行',
+      scene: 'taskExecute',
+    }, () => callConfiguredAI(prompt));
     const usage = sumAIUsage(getAIUsageRecords(usageRequestId));
 
     // 更新任务状态
-    const tasks = loadTasksFromDisk();
-    const taskIndex = tasks.findIndex(t => t.id === params.taskId);
     if (taskIndex >= 0) {
       tasks[taskIndex].status = 'completed';
       tasks[taskIndex].result = result;
@@ -5305,115 +5108,21 @@ ipcMain.handle('task:executeAI', async (_event: any, params: { taskId: string; c
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
-
-// 设置操作
-ipcMain.handle('settings:load', async () => {
-  return loadSettingsFromDisk();
-});
-
-ipcMain.handle('settings:save', async (_event: any, settings: AppSettings) => {
-  saveSettingsToDisk(settings);
-});
+};
 
 // 获取工作区已用大小
-ipcMain.handle('workspace:getSize', async (_event: any, workspacePath: string) => {
+const getWorkspaceSize = async (workspacePath: string) => {
   try {
-    const bytes = await getDirSize(workspacePath);
+    const workspaceRoot = recycleBinService.getWorkspaceRoot(workspacePath);
+    const bytes = await getDirSize(workspaceRoot);
     return { success: true, bytes };
   } catch (error: any) {
     return { success: true, bytes: 0 };
   }
-});
-
-ipcMain.handle('workspace:listRecycleBin', async (_event: any, params: { workspacePath: string }) => {
-  try {
-    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
-    await cleanupRecycleBinForWorkspace(workspaceRoot);
-    const allEntries = loadRecycleBinEntries(workspaceRoot);
-    // 过滤掉实体文件已不存在的残留条目，并持久化清理
-    const validEntries = allEntries.filter(entry => fs.existsSync(entry.recycledPath));
-    if (validEntries.length !== allEntries.length) {
-      saveRecycleBinEntries(workspaceRoot, validEntries);
-    }
-    const sorted = validEntries.sort((a, b) => new Date(b.deletedAt).getTime() - new Date(a.deletedAt).getTime());
-    return { success: true, entries: sorted.map(entry => ({ ...entry, isProject: Boolean(entry.projectSnapshot) })) };
-  } catch (error: any) {
-    return { success: false, error: error.message || String(error) };
-  }
-});
-
-ipcMain.handle('workspace:restoreRecycleBinItem', async (_event: any, params: { workspacePath: string; id: string }) => {
-  try {
-    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
-    const entries = loadRecycleBinEntries(workspaceRoot);
-    const entry = entries.find(item => item.id === params?.id);
-    if (!entry) return { success: false, error: '回收站项目不存在' };
-    if (!fs.existsSync(entry.recycledPath)) return { success: false, error: '回收站中的文件已不存在' };
-    if (!isSameOrChildPath(entry.originalPath, workspaceRoot)) return { success: false, error: '原始路径不在当前工作区' };
-    if (fs.existsSync(entry.originalPath)) return { success: false, error: '原位置已有同名文件或文件夹，请先处理冲突' };
-    if (entry.projectSnapshot && loadProjectsFromDisk().some(project => project.id === entry.projectSnapshot!.project.id)) {
-      return { success: false, error: '同 ID 的项目记录已存在，无法恢复' };
-    }
-    if (entry.isDirectory) await moveWorkspaceFolder(entry.recycledPath, entry.originalPath);
-    else {
-      await fs.promises.mkdir(path.dirname(entry.originalPath), { recursive: true });
-      await fs.promises.rename(entry.recycledPath, entry.originalPath);
-    }
-    if (entry.projectSnapshot) {
-      const snapshot = entry.projectSnapshot;
-      saveProjectsToDisk([...loadProjectsFromDisk(), snapshot.project]);
-      saveVersionsToDisk([...loadVersionsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.versions]);
-      saveProjectDocsToDisk([...loadProjectDocsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.documents]);
-      saveTasksToDisk([...loadTasksFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.tasks]);
-      saveReviewsToDisk([...loadReviewsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.reviews]);
-      saveStageMemoriesToDisk([...loadStageMemoriesFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.stageMemories]);
-      saveReferenceMaterialsToDisk([...loadReferenceMaterialsFromDisk().filter(item => item.projectId !== snapshot.project.id), ...snapshot.referenceMaterials]);
-    }
-    saveRecycleBinEntries(workspaceRoot, entries.filter(item => item.id !== entry.id));
-    return { success: true };
-  } catch (error: any) {
-    return { success: false, error: error.message || String(error) };
-  }
-});
-
-ipcMain.handle('workspace:permanentlyDeleteRecycleBinItem', async (_event: any, params: { workspacePath: string; id: string }) => {
-  try {
-    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
-    const entries = loadRecycleBinEntries(workspaceRoot);
-    const entry = entries.find(item => item.id === params?.id);
-    if (!entry) return { success: false, error: '回收站项目不存在' };
-    await removeRecycleBinEntryFile(entry);
-    saveRecycleBinEntries(workspaceRoot, entries.filter(item => item.id !== entry.id));
-    return { success: true };
-  } catch (error: any) {
-    return { success: false, error: error.message || String(error) };
-  }
-});
-
-ipcMain.handle('workspace:emptyRecycleBin', async (_event: any, params: { workspacePath: string }) => {
-  try {
-    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
-    const entries = loadRecycleBinEntries(workspaceRoot);
-    await Promise.all(entries.map(removeRecycleBinEntryFile));
-    saveRecycleBinEntries(workspaceRoot, []);
-    return { success: true, removed: entries.length };
-  } catch (error: any) {
-    return { success: false, error: error.message || String(error) };
-  }
-});
-
-ipcMain.handle('workspace:cleanupRecycleBin', async (_event: any, params: { workspacePath: string }) => {
-  try {
-    const workspaceRoot = getActiveWorkspaceRoot(params?.workspacePath);
-    return { success: true, removed: await cleanupRecycleBinForWorkspace(workspaceRoot) };
-  } catch (error: any) {
-    return { success: false, error: error.message || String(error) };
-  }
-});
+};
 
 // 工作区迁移：由主进程在切换设置前完成，避免新旧工作区的路径校验互相影响。
-ipcMain.handle('workspace:listMigrationProjects', async (_event: any, params: { sourceWorkspacePath: string }) => {
+const listWorkspaceMigrationProjects = async (params: { sourceWorkspacePath: string }) => {
   try {
     const sourceWorkspacePath = String(params?.sourceWorkspacePath || '').trim();
     const sourceRoot = sourceWorkspacePath ? path.resolve(sourceWorkspacePath) : '';
@@ -5434,9 +5143,9 @@ ipcMain.handle('workspace:listMigrationProjects', async (_event: any, params: { 
   } catch (error: any) {
     return { success: false, error: error.message || String(error) };
   }
-});
+};
 
-ipcMain.handle('workspace:migrateProjects', async (_event: any, params: {
+const migrateWorkspaceProjects = async (params: {
   sourceWorkspacePath: string;
   targetWorkspacePath: string;
   projectIds: string[];
@@ -5515,49 +5224,12 @@ ipcMain.handle('workspace:migrateProjects', async (_event: any, params: {
   } catch (error: any) {
     return { success: false, error: error.message || String(error) };
   }
-});
+};
 
 // ==================== 项目文档操作 ====================
 
-ipcMain.handle('projectDoc:save', async (_event: any, doc: ProjectDocument) => {
-  const docs = loadProjectDocsFromDisk();
-  const index = docs.findIndex(d => d.id === doc.id);
-  if (index >= 0) {
-    docs[index] = doc;
-  } else {
-    docs.push(doc);
-  }
-  saveProjectDocsToDisk(docs);
-});
-
-ipcMain.handle('projectDoc:loadAll', async () => {
-  return loadProjectDocsFromDisk();
-});
-
-ipcMain.handle('projectDoc:delete', async (_event: any, docId: string) => {
-  const docs = loadProjectDocsFromDisk();
-  saveProjectDocsToDisk(docs.filter(d => d.id !== docId));
-  removeStageMemoriesForDoc(docId);
-});
-
 // 项目文档分析
 // Knowledge and reference materials
-ipcMain.handle('knowledge:loadStageMemories', async () => loadStageMemoriesFromDisk());
-
-ipcMain.handle('knowledge:saveStageMemory', async (_event: any, entry: StageMemoryEntry) => {
-  const entries = loadStageMemoriesFromDisk();
-  const index = entries.findIndex(item => item.id === entry.id);
-  if (index >= 0) entries[index] = entry;
-  else entries.push(entry);
-  saveStageMemoriesToDisk(entries);
-  return entry;
-});
-
-ipcMain.handle('knowledge:deleteStageMemory', async (_event: any, memoryId: string) => {
-  const entries = loadStageMemoriesFromDisk();
-  saveStageMemoriesToDisk(entries.filter(item => item.id !== memoryId));
-});
-
 function removeStageMemoriesForDoc(docId?: string): number {
   if (!docId) return 0;
   const entries = loadStageMemoriesFromDisk();
@@ -5566,18 +5238,20 @@ function removeStageMemoriesForDoc(docId?: string): number {
   return entries.length - nextEntries.length;
 }
 
-ipcMain.handle('knowledge:deleteStageMemoriesForDoc', async (_event: any, docId: string) => {
-  return { success: true, removed: removeStageMemoriesForDoc(docId) };
-});
-
-ipcMain.handle('knowledge:learnStageFinal', async (_event: any, params: {
+const learnStageFinalKnowledge = async (params: {
   projectId: string;
   projectName: string;
   stageName: string;
   docId?: string;
   docName: string;
   sourceFilePath?: string;
+  sourceVersionId?: string;
+  sourceModifiedAt?: string;
+  sourceKind?: 'stage-completion' | 'manual';
+  completionEventId?: string;
   content?: string;
+  usageRequestId?: string;
+  usageTitle?: string;
 }) => {
   try {
     let content = clipKnowledgeText(params.content || '', 18000);
@@ -5593,17 +5267,23 @@ ipcMain.handle('knowledge:learnStageFinal', async (_event: any, params: {
       docName: params.docName,
       content,
     });
-    const summary = await callConfiguredAI(prompt);
+    const execute = () => callConfiguredAI(prompt);
+    const summary = params.usageRequestId
+      ? await runWithAIUsageContext({ requestId: params.usageRequestId, requestTitle: params.usageTitle || `阶段记忆学习：${stageName}`, scene: 'memory' }, execute)
+      : await execute();
     const now = new Date().toISOString();
     const entries = loadStageMemoriesFromDisk();
-    const existingIndex = params.docId
-      ? entries.findIndex(item =>
+    const existingIndex = params.completionEventId
+      ? entries.findIndex(item => item.completionEventId === params.completionEventId)
+      : params.docId
+        ? entries.findIndex(item =>
           item.projectId === params.projectId &&
           normalizeKnowledgeStageName(item.stageName) === stageName &&
           item.docId === params.docId
         )
-      : -1;
+        : -1;
     const previous = existingIndex >= 0 ? entries[existingIndex] : undefined;
+    const activeModel = getActiveAIModel(loadAIConfigFromDisk());
     const entry: StageMemoryEntry = {
       id: previous?.id || `memory-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       projectId: params.projectId,
@@ -5612,7 +5292,12 @@ ipcMain.handle('knowledge:learnStageFinal', async (_event: any, params: {
       docId: params.docId,
       docName: params.docName,
       sourceFilePath: params.sourceFilePath,
+      sourceVersionId: params.sourceVersionId,
+      sourceModifiedAt: params.sourceModifiedAt,
+      sourceKind: params.sourceKind || 'manual',
+      completionEventId: params.completionEventId,
       summary: String(summary || '').trim(),
+      model: activeModel?.name || activeModel?.model,
       createdAt: previous?.createdAt || now,
       updatedAt: now,
     };
@@ -5623,18 +5308,9 @@ ipcMain.handle('knowledge:learnStageFinal', async (_event: any, params: {
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
-ipcMain.handle('knowledge:loadReferenceMaterials', async () => loadReferenceMaterialsFromDisk());
-
-ipcMain.handle('knowledge:saveReferenceMaterial', async (_event: any, material: ReferenceMaterial) => saveReferenceMaterialUpsert(material));
-
-ipcMain.handle('knowledge:deleteReferenceMaterial', async (_event: any, materialId: string) => {
-  const materials = loadReferenceMaterialsFromDisk();
-  saveReferenceMaterialsToDisk(materials.filter(item => item.id !== materialId));
-});
-
-ipcMain.handle('knowledge:importReferenceFiles', async (_event: any, params: { projectId: string; filePaths: string[]; source?: 'project-file' | 'external' }) => {
+const importKnowledgeReferenceFiles = async (params: { projectId: string; filePaths: string[]; source?: 'project-file' | 'external' }) => {
   try {
     const imported: ReferenceMaterial[] = [];
     for (const filePath of params.filePaths || []) {
@@ -5657,9 +5333,9 @@ ipcMain.handle('knowledge:importReferenceFiles', async (_event: any, params: { p
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
-ipcMain.handle('projectDoc:analyze', async (_event: any, params: {
+const analyzeProjectDocument = async (params: {
   content: string;
   template: WritingTemplate;
   useAI?: boolean;
@@ -5717,38 +5393,13 @@ ipcMain.handle('projectDoc:analyze', async (_event: any, params: {
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
-
-// 创建项目文件夹
-ipcMain.handle('project:createFolder', async (_event: any, params: { projectName: string; workspacePath: string }) => {
-  try {
-    const { projectName, workspacePath } = params;
-
-    // 确保工作区目录存在
-    if (!fs.existsSync(workspacePath)) {
-      fs.mkdirSync(workspacePath, { recursive: true });
-    }
-
-    // 生成文件夹名，处理重名
-    let folderName = projectName;
-    let folderPath = path.join(workspacePath, folderName);
-    let counter = 1;
-    while (fs.existsSync(folderPath)) {
-      folderName = `${projectName}-${counter}`;
-      folderPath = path.join(workspacePath, folderName);
-      counter++;
-    }
-
-    fs.mkdirSync(folderPath, { recursive: true });
-    return { success: true, folderPath };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
+};
 
 // 列出目录下的子文件夹
-ipcMain.handle('workspace:listFolders', async (_event: any, dirPath: string) => {
+const listWorkspaceFolders = async (dirPath: string) => {
   try {
+    const workspaceCheck = checkWithinWorkspace(dirPath);
+    if (!workspaceCheck.ok) return { success: false, folders: [], error: workspaceCheck.error };
     if (!fs.existsSync(dirPath)) return { success: true, folders: [] };
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     const folders = entries.filter(e => e.isDirectory() && e.name !== COLLABORATION_WORKSPACE_DIR).map(e => e.name);
@@ -5756,10 +5407,10 @@ ipcMain.handle('workspace:listFolders', async (_event: any, dirPath: string) => 
   } catch (error: any) {
     return { success: false, folders: [], error: error.message };
   }
-});
+};
 
 // 移动文件夹
-ipcMain.handle('workspace:moveFolder', async (_event: any, params: { src: string; dest: string }) => {
+const moveWorkspaceFolderEntry = async (params: { src: string; dest: string }) => {
   try {
     const { src, dest } = params;
     const sc = checkWithinWorkspace(src);
@@ -5779,140 +5430,22 @@ ipcMain.handle('workspace:moveFolder', async (_event: any, params: { src: string
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 // 删除文件夹
-ipcMain.handle('workspace:deleteFolder', async (_event: any, folderPath: string, options?: { permanent?: boolean }) => {
+const deleteWorkspaceFolder = async (folderPath: string, options?: { permanent?: boolean }) => {
   try {
     const check = checkWithinWorkspace(folderPath);
     if (!check.ok) return { success: false, error: check.error };
     if (!fs.existsSync(folderPath)) return { success: true };
     let recycleEntry: RecycleBinEntry | undefined;
     if (options?.permanent) fs.rmSync(folderPath, { recursive: true, force: true });
-    else recycleEntry = await movePathToRecycleBin(folderPath);
+    else recycleEntry = await recycleBinService.moveToRecycleBin(folderPath);
     return { success: true, recycleEntry };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
-
-// 在当前目录创建普通文件夹
-ipcMain.handle('file:createFolder', async (_event: any, params: { folderPath: string; folderName: string }) => {
-  try {
-    const parentPath = path.resolve(String(params.folderPath || '').trim());
-    const parentCheck = checkParentWithinWorkspace(parentPath);
-    if (!parentCheck.ok) return { success: false, error: parentCheck.error };
-    const rawName = String(params.folderName || '').trim();
-    const safeName = path.basename(rawName);
-    if (!rawName) return { success: false, error: '文件夹名称不能为空' };
-    if (safeName !== rawName || /[<>:"/\\|?*]/.test(rawName)) {
-      return { success: false, error: '文件夹名称包含无效字符' };
-    }
-    if (/[. ]$/.test(rawName)) {
-      return { success: false, error: '文件夹名称不能以点或空格结尾' };
-    }
-    if (!fs.existsSync(parentPath)) fs.mkdirSync(parentPath, { recursive: true });
-    const folderPath = path.join(parentPath, safeName);
-    if (fs.existsSync(folderPath)) return { success: false, error: '同名文件或文件夹已存在' };
-    fs.mkdirSync(folderPath);
-    return { success: true, folderPath };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
-// 创建空白文件
-ipcMain.handle('file:createBlank', async (_event: any, params: { folderPath: string; fileName: string; fileType: string }) => {
-  try {
-    const { folderPath, fileName, fileType } = params;
-    const parentCheck = checkParentWithinWorkspace(folderPath);
-    if (!parentCheck.ok) return { success: false, error: parentCheck.error };
-    const nameCheck = checkSafeChildName(fileName);
-    if (!nameCheck.ok) return { success: false, error: nameCheck.error };
-    if (!fs.existsSync(folderPath)) {
-      fs.mkdirSync(folderPath, { recursive: true });
-    }
-    const normalizedType = normalizeFileType(fileType);
-    const filePath = path.join(folderPath, `${fileName}.${normalizedType}`);
-    if (!fs.existsSync(filePath)) {
-      await createFileByType(filePath, normalizedType);
-    }
-    return { success: true, filePath };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
-
-// 根据模板和用户内容生成 Word 文档
-ipcMain.handle('file:generateFromContent', async (_event: any, params: {
-  template: WritingTemplate;
-  sectionContents: Record<string, string>;
-  folderPath: string;
-  fileName: string;
-}) => {
-  try {
-    const { template, sectionContents, folderPath, fileName } = params;
-    const parentCheck = checkParentWithinWorkspace(folderPath);
-    if (!parentCheck.ok) return { success: false, error: parentCheck.error };
-    const nameCheck = checkSafeChildName(fileName);
-    if (!nameCheck.ok) return { success: false, error: nameCheck.error };
-    if (!fs.existsSync(folderPath)) {
-      fs.mkdirSync(folderPath, { recursive: true });
-    }
-    const fileType = template.outputFileType || 'docx';
-    const filePath = path.join(folderPath, `${fileName}.${fileType}`);
-    await writeDocxFileWithContent(filePath, template, sectionContents);
-    return { success: true, filePath };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
-
-// 从模板创建文件（直接复制模板源文件并重命名）
-ipcMain.handle('file:createFromTemplate', async (_event: any, params: { folderPath: string; fileName: string; template: WritingTemplate; fileType?: string }) => {
-  try {
-    const { folderPath, fileName, template } = params;
-    const parentCheck = checkParentWithinWorkspace(folderPath);
-    if (!parentCheck.ok) return { success: false, error: parentCheck.error };
-    const nameCheck = checkSafeChildName(fileName);
-    if (!nameCheck.ok) return { success: false, error: nameCheck.error };
-    if (!fs.existsSync(folderPath)) {
-      fs.mkdirSync(folderPath, { recursive: true });
-    }
-
-    const outputFileType = normalizeFileType(params.fileType || template.outputFileType || 'docx');
-    const outputExt = `.${outputFileType}`;
-
-    if (!template.filePath || !fs.existsSync(template.filePath)) {
-      if (template.templateType !== 'example') {
-        return { success: false, error: '直接套用模板的源文件不存在，请重新编辑模板并导入源文件' };
-      }
-      const destPath = path.join(folderPath, `${fileName}${outputExt}`);
-      if (!fs.existsSync(destPath)) {
-        await createFileByType(destPath, outputFileType, template);
-      }
-      return { success: true, filePath: destPath };
-    }
-
-    const sourceExt = path.extname(template.filePath).toLowerCase();
-    if (template.templateType !== 'example') {
-      // 直接套用模板必须原样复制，不能重新生成，否则会丢失源文档的排版、图片和页眉页脚。
-      const directDestPath = path.join(folderPath, `${fileName}${sourceExt || outputExt}`);
-      fs.copyFileSync(template.filePath, directDestPath, fs.constants.COPYFILE_EXCL);
-      return { success: true, filePath: directDestPath };
-    }
-
-    const destPath = path.join(folderPath, `${fileName}${outputExt}`);
-    if (sourceExt === outputExt.toLowerCase() && outputFileType !== 'docx') {
-      fs.copyFileSync(template.filePath, destPath, fs.constants.COPYFILE_EXCL);
-    } else {
-      await createFileByType(destPath, outputFileType, template);
-    }
-
-    return { success: true, filePath: destPath };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-});
+};
 
 // ========== ZIP 导入导出 ==========
 
@@ -5932,7 +5465,7 @@ function addFolderToZip(zip: any, folderPath: string, basePath: string) {
 }
 
 // File-detail quick archive actions. Output stays inside the configured workspace.
-ipcMain.handle('file:compressToZip', async (_event: any, sourcePath: string) => {
+const compressFileToZip = async (sourcePath: string) => {
   try {
     const sourceCheck = checkWithinWorkspace(sourcePath);
     if (!sourceCheck.ok) return { success: false, error: sourceCheck.error };
@@ -5945,10 +5478,10 @@ ipcMain.handle('file:compressToZip', async (_event: any, sourcePath: string) => 
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
 // Extract into a new sibling folder to avoid overwriting files in the current view.
-ipcMain.handle('file:extractZip', async (_event: any, zipPath: string) => {
+const extractZipToNewFolder = async (zipPath: string) => {
   try {
     const zipCheck = checkWithinWorkspace(zipPath);
     if (!zipCheck.ok) return { success: false, error: zipCheck.error };
@@ -5960,7 +5493,7 @@ ipcMain.handle('file:extractZip', async (_event: any, zipPath: string) => {
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
   }
-});
+};
 
 function escapeXml(value: string = ''): string {
   return value
@@ -6265,7 +5798,7 @@ async function createFileByType(filePath: string, fileType: string, template?: W
 }
 
 // 打开ZIP文件对话框
-ipcMain.handle('dialog:openZip', async () => {
+const openZipFileDialog = async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
     title: '选择 ZIP 文件',
@@ -6277,10 +5810,10 @@ ipcMain.handle('dialog:openZip', async () => {
     return null;
   }
   return result.filePaths[0];
-});
+};
 
 // 保存ZIP文件对话框
-ipcMain.handle('dialog:saveZip', async (_event: any, projectName: string) => {
+const saveZipFileDialog = async (projectName: string) => {
   const defaultName = projectName ? `${projectName}.zip` : 'project-export.zip';
   const result = await dialog.showSaveDialog({
     title: '导出项目为 ZIP',
@@ -6293,24 +5826,26 @@ ipcMain.handle('dialog:saveZip', async (_event: any, projectName: string) => {
     return null;
   }
   return result.filePath;
-});
+};
 
 // 从ZIP导入项目
-ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: string; workspacePath: string }) => {
+const importProjectFromZip = async (params: { zipPath: string; workspacePath: string }) => {
   try {
     const { zipPath, workspacePath } = params;
     const wsCheck = checkWithinWorkspace(workspacePath);
     if (!wsCheck.ok) return { success: false, error: wsCheck.error };
 
-    if (!fs.existsSync(zipPath)) {
-      return { success: false, error: 'ZIP 文件不存在' };
-    }
+    const zipCheck = checkExistingPath(zipPath, 'file');
+    if (!zipCheck.ok) return { success: false, error: zipCheck.error };
+    const resolvedZipPath = zipCheck.path;
 
-    const buffer = fs.readFileSync(zipPath);
+    const buffer = fs.readFileSync(resolvedZipPath);
     const zip = await JSZip.loadAsync(buffer);
 
     // 确定项目文件夹名（取ZIP文件名，去掉.zip后缀）
-    const zipBaseName = path.basename(zipPath, '.zip');
+    const zipBaseName = path.basename(resolvedZipPath, path.extname(resolvedZipPath));
+    const zipNameCheck = checkSafeChildName(zipBaseName);
+    if (!zipNameCheck.ok) return { success: false, error: zipNameCheck.error };
     let projectFolderName = zipBaseName;
 
     // 检查是否只有一个顶级目录
@@ -6414,13 +5949,13 @@ ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: s
     }
 
     // 保存项目
-    const projects = JSON.parse(fs.readFileSync(projectsFile, 'utf-8')) as any[];
+    const projects = loadProjectsFromDisk();
     projects.push(project);
-    fs.writeFileSync(projectsFile, JSON.stringify(projects, null, 2));
+    saveProjectsToDisk(projects);
 
     // 如果有文档记录，也保存
     if (metadata && metadata.documents && Array.isArray(metadata.documents)) {
-      const docs = JSON.parse(fs.readFileSync(projectDocsFile, 'utf-8')) as any[];
+      const docs = loadProjectDocsFromDisk();
       for (const doc of metadata.documents) {
         docs.push({
           ...doc,
@@ -6429,22 +5964,21 @@ ipcMain.handle('project:importFromZip', async (_event: any, params: { zipPath: s
           sourceFilePath: '', // 路径在不同机器上可能不同
         });
       }
-      fs.writeFileSync(projectDocsFile, JSON.stringify(docs, null, 2));
+      saveProjectDocsToDisk(docs);
     }
 
     return { success: true, project };
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 // 列出ZIP中的文件
-ipcMain.handle('zip:listFiles', async (_event: any, zipPath: string) => {
+const listZipFiles = async (zipPath: string) => {
   try {
-    if (!fs.existsSync(zipPath)) {
-      return { success: false, error: 'ZIP 文件不存在' };
-    }
-    const buffer = fs.readFileSync(zipPath);
+    const zipCheck = checkExistingPath(zipPath, 'file');
+    if (!zipCheck.ok) return { success: false, error: zipCheck.error };
+    const buffer = fs.readFileSync(zipCheck.path);
     const zip = await JSZip.loadAsync(buffer);
     const files: { name: string; path: string; size: number; isDirectory: boolean }[] = [];
     zip.forEach((relativePath: string, zipEntry: any) => {
@@ -6460,18 +5994,17 @@ ipcMain.handle('zip:listFiles', async (_event: any, zipPath: string) => {
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 // 从ZIP中提取指定文件到目标文件夹
-ipcMain.handle('zip:extractFiles', async (_event: any, params: { zipPath: string; targetPath: string; filePaths: string[] }) => {
+const extractSelectedZipFiles = async (params: { zipPath: string; targetPath: string; filePaths: string[] }) => {
   try {
     const { zipPath, targetPath, filePaths } = params;
     const targetCheck = checkWithinWorkspace(targetPath);
     if (!targetCheck.ok) return { success: false, error: targetCheck.error };
-    if (!fs.existsSync(zipPath)) {
-      return { success: false, error: 'ZIP 文件不存在' };
-    }
-    const buffer = fs.readFileSync(zipPath);
+    const zipCheck = checkExistingPath(zipPath, 'file');
+    if (!zipCheck.ok) return { success: false, error: zipCheck.error };
+    const buffer = fs.readFileSync(zipCheck.path);
     const zip = await JSZip.loadAsync(buffer);
     const resolvedTarget = path.resolve(targetPath);
     const extracted: string[] = [];
@@ -6494,21 +6027,24 @@ ipcMain.handle('zip:extractFiles', async (_event: any, params: { zipPath: string
   } catch (error: any) {
     return { success: false, error: error.message };
   }
-});
+};
 
 // 导出项目为ZIP
-ipcMain.handle('project:exportZip', async (_event: any, params: { project: any; savePath: string; projectDocs: any[] }) => {
+const exportProjectZip = async (params: { project: any; savePath: string; projectDocs: any[] }) => {
   try {
     const { project, savePath, projectDocs } = params;
 
-    if (!project.folderPath || !fs.existsSync(project.folderPath)) {
-      return { success: false, error: '项目文件夹不存在' };
-    }
+    const projectPathCheck = checkWithinWorkspace(project.folderPath);
+    if (!projectPathCheck.ok) return { success: false, error: projectPathCheck.error };
+    const projectFolderCheck = checkExistingPath(project.folderPath, 'directory');
+    if (!projectFolderCheck.ok) return { success: false, error: projectFolderCheck.error };
+    const saveParentCheck = checkExistingPath(path.dirname(String(savePath || '')), 'directory');
+    if (!saveParentCheck.ok) return { success: false, error: saveParentCheck.error };
 
     const zip = new JSZip();
 
     // 添加项目文件
-    addFolderToZip(zip, project.folderPath, project.folderPath);
+    addFolderToZip(zip, projectFolderCheck.path, projectFolderCheck.path);
 
     // 添加project.json元数据
     const metadata = {
@@ -6526,7 +6062,123 @@ ipcMain.handle('project:exportZip', async (_event: any, params: { project: any; 
   } catch (error: any) {
     return { success: false, error: error.message };
   }
+};
+
+defineVersionIpc({ loadVersions: loadVersionsFromDisk, saveVersions: saveVersionsToDisk });
+defineTemplateIpc({
+  load: loadTemplatesFromDisk,
+  save: saveTemplatesToDisk,
+  storeFile: storeTemplateFile,
+  analyzeExamples: analyzeTemplateExamples,
 });
+defineSettingsIpc({ load: loadSettingsFromDisk, save: saveSettingsToDisk });
+defineWorkflowIpc({ loadTasks: loadTasksFromDisk, saveTasks: saveTasksToDisk, executeAiTask: executeAiWorkflowTask });
+defineKnowledgeIpc({
+  loadStageMemories: loadStageMemoriesFromDisk,
+  saveStageMemories: saveStageMemoriesToDisk,
+  removeStageMemoriesForDoc,
+  learnStageFinal: learnStageFinalKnowledge,
+  loadReferenceMaterials: loadReferenceMaterialsFromDisk,
+  saveReferenceMaterials: saveReferenceMaterialsToDisk,
+  saveReferenceMaterial: saveReferenceMaterialUpsert,
+  importReferenceFiles: importKnowledgeReferenceFiles,
+});
+defineProjectDocumentIpc({
+  load: loadProjectDocsFromDisk,
+  save: saveProjectDocsToDisk,
+  onDelete: removeStageMemoriesForDoc,
+  analyze: analyzeProjectDocument,
+});
+defineDocumentFileIpc({
+  replaceText: replaceDocumentText,
+  parseWord: parseWordDocument,
+  applyParagraphFormats: applyDocumentParagraphFormats,
+  extractTemplateFormatRules: readTemplateFormatRules,
+  parseDocument,
+  parseDocumentSilent,
+  parsePdf: parsePdfDocument,
+});
+defineRecycleBinIpc(recycleBinService);
+defineCoreFileIpc(fileSystemService);
+defineArchiveFileIpc({
+  compressToZip: compressFileToZip,
+  extractZip: extractZipToNewFolder,
+  listZipFiles,
+  extractZipFiles: extractSelectedZipFiles,
+});
+defineFolderQueryIpc({
+  startWatch: startFolderWatch,
+  stopWatch: stopFolderWatch,
+  listFiles: listSupportedFolderFiles,
+  getContents: getFolderContents,
+  searchFiles: searchFolderFiles,
+  scanStageFiles: scanFolderStageFiles,
+  getTreeStats: getFolderTreeStats,
+});
+defineWorkspaceScanIpc(scanWorkspaceProjectFiles);
+defineProjectArchiveIpc({ importFromZip: importProjectFromZip, exportZip: exportProjectZip });
+defineProjectFolderIpc(fileSystemService);
+defineProjectPersistenceIpc({
+  save: saveProject,
+  loadAll: loadAllProjects,
+  refreshFolderModifiedAt: refreshProjectFolderModifiedAt,
+  delete: deleteProject,
+});
+defineReviewIpc({ execute: executeDocumentReview, loadAll: loadAllReviews, delete: deleteReview });
+defineWorkspaceManagementIpc({
+  getSize: getWorkspaceSize,
+  listMigrationProjects: listWorkspaceMigrationProjects,
+  migrateProjects: migrateWorkspaceProjects,
+  listFolders: listWorkspaceFolders,
+  moveFolder: moveWorkspaceFolderEntry,
+  deleteFolder: deleteWorkspaceFolder,
+});
+definePromptIpc({ load: loadPromptTemplatesFromDisk, save: savePromptTemplatesToDisk, defaults: getDefaultPromptTemplates });
+defineSkillIpc({ load: loadSkillPackagesFromDisk, save: saveSkillPackagesToDisk, importExternal: importExternalSkillPackage });
+defineAiRuntimeIpc({
+  loadConfig: loadAIConfigFromDisk,
+  saveConfig: saveAIConfigToDisk,
+  call: callAi,
+  usageStatistics: getAIUsageStatistics,
+  usageForRequest: requestId => sumAIUsage(getAIUsageRecords(requestId)),
+  callParallelDetails: callAiParallelDetails,
+  generateSummary: generateAiSummary,
+  reviewSuggestion: generateAiReviewSuggestion,
+});
+defineCollaborationIpc({
+  startReceiver: startCollaborationReceiver,
+  stopReceiver: stopCollaborationServer,
+  getStatus: getCollaborationStatus,
+  sendTask: sendCollaborationTask,
+  respondTaskOffer: respondToCollaborationTaskOffer,
+  searchByEmail: searchCollaborationPeerByEmail,
+  addFriend: addCollaborationFriend,
+  removeFriend: removeCollaborationFriend,
+  listFriends: listCollaborationFriends,
+  listChatMessages: listCollaborationChatMessages,
+  sendChatMessage: sendCollaborationChatMessage,
+  sendFile: sendCollaborationFile,
+  loadMessageCenterState,
+  saveMessageCenterState,
+  sendFriendRequest: sendCollaborationFriendRequest,
+  listFriendRequests: listCollaborationFriendRequests,
+  acceptFriendRequest: acceptCollaborationFriendRequest,
+  rejectFriendRequest: rejectCollaborationFriendRequest,
+});
+definePlatformIpc({
+  openFolder: openProjectFolderDialog,
+  openInExplorer: openPathInExplorer,
+  openWithDefaultApp: openFileWithDefaultApp,
+  startDrag: startNativeFileDrag,
+  listFonts: listSystemFonts,
+  notify: showSystemNotification,
+  notificationStatus: getSystemNotificationStatus,
+  openFile: openSingleFileDialog,
+  openFiles: openMultipleFilesDialog,
+  openZip: openZipFileDialog,
+  saveZip: saveZipFileDialog,
+});
+registerAllIpc(ipcMain);
 
 app.whenReady().then(() => {
   ensureWindowsNotificationShortcut();
@@ -6537,7 +6189,7 @@ app.whenReady().then(() => {
   try {
     const settings = loadSettingsFromDisk();
     if (settings.workspacePath) {
-      cleanupRecycleBinForWorkspace(settings.workspacePath).catch((err) => {
+      recycleBinService.cleanup(settings.workspacePath).catch((err) => {
         console.warn('[RecycleBin] Startup cleanup failed:', err);
       });
     }
@@ -6548,7 +6200,7 @@ app.whenReady().then(() => {
     try {
       const settings = loadSettingsFromDisk();
       if (settings.workspacePath) {
-        cleanupRecycleBinForWorkspace(settings.workspacePath).catch((err) => {
+        recycleBinService.cleanup(settings.workspacePath).catch((err) => {
           console.warn('[RecycleBin] Periodic cleanup failed:', err);
         });
       }

@@ -3,7 +3,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 // 暴露给渲染进程的API
 contextBridge.exposeInMainWorld('electronAPI', {
   // 文件操作
-  openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
+  openFolder: (options?: { title?: string; buttonLabel?: string }) => ipcRenderer.invoke('dialog:openFolder', options),
   openFile: (filters?: any[]) => ipcRenderer.invoke('dialog:openFile', filters),
   openFiles: (filters?: any[]) => ipcRenderer.invoke('dialog:openFiles', filters),
   openInExplorer: (folderPath: string) => ipcRenderer.invoke('file:openInExplorer', folderPath),
@@ -14,12 +14,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPathForFile: (file: any) => webUtils.getPathForFile(file),
   renameFile: (params: { filePath: string; newName: string }) => ipcRenderer.invoke('file:rename', params),
   importFiles: (params: { folderPath: string; filePaths: string[] }) => ipcRenderer.invoke('file:importFiles', params),
+  importFolder: (params: { sourcePath: string; targetFolder: string; mode: 'shortcut' | 'move' }) => ipcRenderer.invoke('file:importFolder', params),
   duplicateFiles: (params: { sourcePaths: string[]; targetFolder: string }) => ipcRenderer.invoke('file:duplicate', params),
   moveFiles: (params: { sourcePaths: string[]; targetFolder: string }) => ipcRenderer.invoke('file:move', params),
   deleteFile: (filePath: string, options?: { permanent?: boolean }) => ipcRenderer.invoke('file:delete', filePath, options),
   createFolder: (params: { folderPath: string; folderName: string }) => ipcRenderer.invoke('file:createFolder', params),
   readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
   readDir: (dirPath: string) => ipcRenderer.invoke('file:readDir', dirPath),
+  listDirectoryEntries: (dirPath: string) => ipcRenderer.invoke('file:listDirectoryEntries', dirPath),
   listSystemFonts: () => ipcRenderer.invoke('system:listFonts'),
   showSystemNotification: (params: { title: string; body?: string; silent?: boolean; target?: string; projectId?: string }) => ipcRenderer.invoke('system:notify', params),
   getSystemNotificationStatus: () => ipcRenderer.invoke('system:notificationStatus'),
@@ -44,7 +46,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 项目操作
   saveProject: (project: any) => ipcRenderer.invoke('project:save', project),
   loadProjects: () => ipcRenderer.invoke('project:loadAll'),
-  deleteProject: (projectId: string) => ipcRenderer.invoke('project:delete', projectId),
+  deleteProject: (projectId: string, options?: { mode?: 'unregister' | 'delete-folder' }) => ipcRenderer.invoke('project:delete', projectId, options),
   refreshProjectFolderModifiedAt: (projectIds: string[]) => ipcRenderer.invoke('project:refreshFolderModifiedAt', projectIds),
 
   // 版本操作
@@ -69,8 +71,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // AI操作
   loadAIConfig: () => ipcRenderer.invoke('ai:loadConfig'),
   saveAIConfig: (config: any) => ipcRenderer.invoke('ai:saveConfig', config),
-  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any; usageRequestId?: string }) => ipcRenderer.invoke('ai:call', prompt),
-  callAIParallelDetails: (params: { prompt: string; modelId?: string; modelIds?: string[]; config?: any }) => ipcRenderer.invoke('ai:callParallelDetails', params),
+  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => ipcRenderer.invoke('ai:call', prompt),
+  callAIParallelDetails: (params: { prompt: string; modelId?: string; modelIds?: string[]; config?: any; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => ipcRenderer.invoke('ai:callParallelDetails', params),
   getAIUsageStatistics: () => ipcRenderer.invoke('ai:usageStatistics'),
   getAIUsageForRequest: (requestId: string) => ipcRenderer.invoke('ai:usageForRequest', requestId),
   generateSummary: (content: string) => ipcRenderer.invoke('ai:generateSummary', content),
@@ -84,6 +86,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Skill 包管理
   loadSkillPackages: () => ipcRenderer.invoke('skill:loadAll'),
   importSkillPackage: (pkg: any) => ipcRenderer.invoke('skill:import', pkg),
+  importExternalSkillPackage: () => ipcRenderer.invoke('skill:importExternal'),
   deleteSkillPackage: (id: string) => ipcRenderer.invoke('skill:delete', id),
   setSkillEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('skill:setEnabled', id, enabled),
   setSkillWeight: (id: string, weight: number) => ipcRenderer.invoke('skill:setWeight', id, weight),
@@ -93,7 +96,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopFolderWatch: (projectId: string) => ipcRenderer.invoke('folder:stopWatch', projectId),
   listFolderFiles: (folderPath: string) => ipcRenderer.invoke('folder:listFiles', folderPath),
   onFileDetected: (callback: (data: any) => void) => {
-    ipcRenderer.on('folder:fileDetected', (_event, data) => callback(data));
+    const listener = (_event: Electron.IpcRendererEvent, data: any) => callback(data);
+    ipcRenderer.on('folder:fileDetected', listener);
+    return () => ipcRenderer.removeListener('folder:fileDetected', listener);
   },
 
   // 任务操作
@@ -103,16 +108,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   executeAITask: (params: any) => ipcRenderer.invoke('task:executeAI', params),
 
 
-  // LAN collaboration
+  // Collaboration
   startCollaborationReceiver: (params?: { port?: number }) => ipcRenderer.invoke('collaboration:startReceiver', params),
   stopCollaborationReceiver: () => ipcRenderer.invoke('collaboration:stopReceiver'),
   getCollaborationStatus: () => ipcRenderer.invoke('collaboration:getStatus'),
-  sendCollaborationTask: (params: { endpoint?: string; friendId?: string; task: any; projectName?: string; senderName?: string }) => ipcRenderer.invoke('collaboration:sendTask', params),
-  listCollaborationPeers: () => ipcRenderer.invoke('collaboration:listPeers'),
+  sendCollaborationTask: (params: { endpoint?: string; friendId?: string; task: any; projectName?: string; senderName?: string; attachmentName?: string }) => ipcRenderer.invoke('collaboration:sendTask', params),
   listCollaborationFriends: () => ipcRenderer.invoke('collaboration:listFriends'),
   searchCollaborationFriendByEmail: (email: string) => ipcRenderer.invoke('collaboration:searchByEmail', email),
   listCollaborationChatMessages: (friendId: string) => ipcRenderer.invoke('collaboration:listChatMessages', friendId),
   sendCollaborationChatMessage: (params: { friendId: string; content: string }) => ipcRenderer.invoke('collaboration:sendChatMessage', params),
+  respondCollaborationTaskOffer: (params: { friendId: string; offerId: string; status: 'accepted' | 'rejected'; projectId?: string }) => ipcRenderer.invoke('collaboration:respondTaskOffer', params),
   addCollaborationFriend: (peer: any) => ipcRenderer.invoke('collaboration:addFriend', peer),
   removeCollaborationFriend: (friendId: string) => ipcRenderer.invoke('collaboration:removeFriend', friendId),
   sendCollaborationFile: (params: { endpoint?: string; friendId?: string; filePath: string; projectName?: string; senderName?: string }) => ipcRenderer.invoke('collaboration:sendFile', params),

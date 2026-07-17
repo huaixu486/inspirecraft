@@ -14,6 +14,7 @@ import SkillSettings from './SkillSettings';
 import CompositionSettings from './CompositionSettings';
 import AIUsageSettings from './AIUsageSettings';
 import AutomationSettings from './AutomationSettings';
+import { requireIpcObject } from '../../utils/ipcResult';
 
 const { Title } = Typography;
 
@@ -26,9 +27,13 @@ const AISettings: React.FC = () => {
     const loadConfig = async () => {
       try {
         const savedConfig = await window.electronAPI.loadAIConfig();
-        setConfig(savedConfig || { models: [], activeModelId: '', multiModelMode: 'single', parallelModelIds: [] });
+        setConfig(savedConfig
+          ? requireIpcObject<AIConfig>(savedConfig, '加载 AI 配置失败')
+          : { models: [], activeModelId: '', multiModelMode: 'single', parallelModelIds: [] });
       } catch (error) {
         console.error('Failed to load AI config:', error);
+        message.error(error instanceof Error ? error.message : '加载 AI 配置失败');
+        setConfig({ models: [], activeModelId: '', multiModelMode: 'single', parallelModelIds: [] });
       }
     };
     void loadConfig();
@@ -75,7 +80,7 @@ const AISettings: React.FC = () => {
   ];
 
   return (
-    <div>
+    <div className="ai-settings-page">
       <Title level={4}>设置</Title>
       <Tabs items={tabItems} defaultActiveKey="basic" />
     </div>

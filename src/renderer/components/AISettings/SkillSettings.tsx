@@ -9,7 +9,7 @@ const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const SkillSettings: React.FC = () => {
-  const { skills, importSkill, deleteSkill, setEnabled, setWeight } = useSkillStore();
+  const { skills, importSkill, importExternalSkill, deleteSkill, setEnabled, setWeight } = useSkillStore();
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importJson, setImportJson] = useState('');
   const [importError, setImportError] = useState('');
@@ -89,6 +89,16 @@ const SkillSettings: React.FC = () => {
     form.resetFields();
   };
 
+  const handleImportExternal = async () => {
+    const result = await importExternalSkill();
+    if (result.cancelled) return;
+    if (!result.success) {
+      message.error(result.error || '导入外部 Skill 包失败');
+      return;
+    }
+    message.success(`已导入外部 Skill 包：${result.pkg?.name || ''}`);
+  };
+
   return (
     <>
       <Card>
@@ -97,7 +107,10 @@ const SkillSettings: React.FC = () => {
             <Title level={5} style={{ margin: 0 }}>Skill 包管理</Title>
             <Text type="secondary">Skill 包可以为特定场景的 AI 提示词添加额外指导，增强写作、审查等能力</Text>
           </div>
-          <Button type="primary" icon={<PlusOutlined />} onClick={openImportModal}>添加 Skill 包</Button>
+          <Space>
+            <Button icon={<ImportOutlined />} onClick={() => void handleImportExternal}>导入外部包</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openImportModal}>添加 Skill 包</Button>
+          </Space>
         </div>
 
         {skills.length === 0 ? (

@@ -1,18 +1,6 @@
 import { create } from 'zustand';
 import { Project, DocumentVersion } from '../../shared/types';
-
-export type WorkflowWorkbenchTarget = 'plan' | 'team' | 'report' | 'review' | 'writing';
-
-export interface WorkflowFocus {
-  projectId: string;
-  workflowId?: string;
-  taskId?: string;
-  relatedDocId?: string;
-  stageName?: string;
-  source?: 'manual' | 'review' | 'stage' | 'report';
-  prompt?: string;
-  target: WorkflowWorkbenchTarget;
-}
+import { assertIpcMutationSucceeded, requireIpcArray } from '../utils/ipcResult';
 
 interface ProjectState {
   projects: Project[];
@@ -21,7 +9,6 @@ interface ProjectState {
   pendingReportDocId: string | null;  // 双击报告时传递的目标文档ID
   pendingReportDocOnly: boolean;     // 是否只显示该文档（双击进入 vs 按钮进入）
   versions: DocumentVersion[];
-  pendingWorkflowFocus: WorkflowFocus | null;
   isLoading: boolean;
 
   // 项目操作
@@ -31,9 +18,8 @@ interface ProjectState {
   setCurrentStageName: (stageName: string) => void;
   setPendingReportDocId: (docId: string | null) => void;
   setPendingReportDocOnly: (only: boolean) => void;
-  setPendingWorkflowFocus: (focus: WorkflowFocus | null) => void;
   updateProject: (id: string, updates: Partial<Project>) => Promise<void>;
-  deleteProject: (id: string) => Promise<{ success: boolean; recycleEntry?: { id: string; name?: string } }>;
+  deleteProject: (id: string, options?: { mode?: 'unregister' | 'delete-folder' }) => Promise<{ success: boolean; recycleEntry?: { id: string; name?: string } }>;
 
   // 版本操作
   loadVersions: () => Promise<void>;
@@ -47,14 +33,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   currentStageName: '',
   pendingReportDocId: null,
   pendingReportDocOnly: false,
-  pendingWorkflowFocus: null,
   versions: [],
   isLoading: false,
 
   loadProjects: async (options) => {
     if (!options?.silent) set({ isLoading: true });
     try {
-      const projects = await window.electronAPI.loadProjects();
+      const projects = requireIpcArray<Project>(await window.electronAPI.loadProjects(), '加载项目失败');
       set(options?.silent ? { projects } : { projects, isLoading: false });
       // 后台刷新目录修改时间（不阻塞加载，结果回来后静默更新 store）
       const projectIds = projects.map(p => p.id);
@@ -88,14 +73,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setCurrentProject: (project) => set((state) => ({
     currentProject: project,
-    currentStageName: project ? state.currentStageName : '',
+    currentStageName: project && project.id === state.currentProject?.id
+      ? state.currentStageName
+      : '',
   })),
 
   setCurrentStageName: (stageName) => set({ currentStageName: stageName }),
 
   setPendingReportDocId: (docId) => set({ pendingReportDocId: docId }),
   setPendingReportDocOnly: (only) => set({ pendingReportDocOnly: only }),
-  setPendingWorkflowFocus: (focus) => set({ pendingWorkflowFocus: focus }),
 
   updateProject: async (id, updates) => {
     const prev = get().projects;
@@ -131,28 +117,24 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
-  deleteProject: async (id) => {
-    const prev = get().projects;
-    const previousCurrentProject = get().currentProject;
-    const newProjects = prev.filter((p) => p.id !== id);
-    set({
-      projects: newProjects,
-      currentProject: previousCurrentProject?.id === id ? null : previousCurrentProject,
-    });
+  deleteProject: async (id, options) => {
     try {
-      const result = await window.electronAPI.deleteProject(id);
+      const result = await window.electronAPI.deleteProject(id, options);
       if (!result?.success) throw new Error(result?.error || '删除项目失败');
+      set((state) => ({
+        projects: state.projects.filter((project) => project.id !== id),
+        currentProject: state.currentProject?.id === id ? null : state.currentProject,
+      }));
       return result;
     } catch (error) {
       console.error('Failed to delete project:', error);
-      set({ projects: prev, currentProject: previousCurrentProject });
       throw error;
     }
   },
 
   loadVersions: async () => {
     try {
-      const versions = await window.electronAPI.loadVersions();
+      const versions = requireIpcArray<DocumentVersion>(await window.electronAPI.loadVersions(), '加载文档版本失败');
       set({ versions });
     } catch (error) {
       console.error('Failed to load versions:', error);
@@ -160,22 +142,28 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   addVersion: async (version) => {
-    const newVersions = [...get().versions, version];
+    const previous = get().versions;
+    const newVersions = [...previous, version];
     set({ versions: newVersions });
     try {
-      await window.electronAPI.saveVersion(version);
+      const result = await window.electronAPI.saveVersion(version);
+      assertIpcMutationSucceeded(result, '保存文档版本失败');
     } catch (error) {
       console.error('Failed to save version:', error);
+      set(state => ({ versions: state.versions.filter(item => item.id !== version.id) }));
     }
   },
 
   deleteVersion: async (versionId) => {
-    const newVersions = get().versions.filter((v) => v.id !== versionId);
+    const previous = get().versions;
+    const newVersions = previous.filter((v) => v.id !== versionId);
     set({ versions: newVersions });
     try {
-      await window.electronAPI.deleteVersion(versionId);
+      const result = await window.electronAPI.deleteVersion(versionId);
+      assertIpcMutationSucceeded(result, '删除文档版本失败');
     } catch (error) {
       console.error('Failed to delete version:', error);
+      set({ versions: previous });
     }
   },
 }));

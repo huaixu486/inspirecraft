@@ -25,6 +25,8 @@ type AIJobRunOptions<T> = {
   projectId?: string;
   docId?: string;
   taskId?: string;
+  workItemId?: string;
+  correlationId?: string;
   inputHash?: string;
   dedupeKey?: string;
   resultPreview?: (result: T) => string | undefined;
@@ -43,6 +45,8 @@ type AIActivity = {
   modelName: string;
   model: string;
   requestId?: string;
+  correlationId?: string;
+  workItemId?: string;
   error?: string;
 };
 
@@ -218,6 +222,8 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
       projectId: options.projectId,
       docId: options.docId,
       taskId: options.taskId,
+      workItemId: options.workItemId || options.taskId,
+      correlationId: options.correlationId || id,
       inputHash: options.inputHash,
       dedupeKey,
       createdAt,

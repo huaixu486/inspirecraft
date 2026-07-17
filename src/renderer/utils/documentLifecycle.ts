@@ -24,11 +24,43 @@ export const DOCUMENT_LIFECYCLE_COLORS: Record<ProjectDocumentLifecycleStatus, s
   archived: 'default',
 };
 
+const DOCUMENT_LIFECYCLE_TRANSITIONS: Record<ProjectDocumentLifecycleStatus, ProjectDocumentLifecycleStatus[]> = {
+  imported: ['identified', 'completed', 'archived'],
+  identified: ['writing', 'analyzed', 'reviewed', 'needs_revision', 'completed', 'archived'],
+  writing: ['analyzed', 'reviewed', 'needs_revision', 'completed', 'archived'],
+  analyzed: ['writing', 'reviewed', 'needs_revision', 'completed', 'archived'],
+  reviewed: ['writing', 'needs_revision', 'completed', 'archived'],
+  needs_revision: ['writing', 'reviewed', 'completed', 'archived'],
+  completed: ['identified', 'writing', 'analyzed', 'reviewed', 'needs_revision', 'learned', 'archived'],
+  learned: ['completed', 'archived'],
+  archived: [],
+};
+
+export const canTransitionProjectDocumentLifecycle = (
+  from: ProjectDocumentLifecycleStatus,
+  to: ProjectDocumentLifecycleStatus,
+): boolean => from === to || DOCUMENT_LIFECYCLE_TRANSITIONS[from].includes(to);
+
+export const transitionProjectDocumentLifecycle = (
+  doc: ProjectDocument,
+  to: ProjectDocumentLifecycleStatus,
+  timestamp = new Date().toISOString(),
+): Partial<ProjectDocument> => {
+  const from = inferProjectDocumentLifecycle(doc);
+  if (!canTransitionProjectDocumentLifecycle(from, to)) {
+    throw new Error(`Illegal document lifecycle transition: ${from} -> ${to}`);
+  }
+  return {
+    lifecycleStatus: to,
+    lifecycleUpdatedAt: timestamp,
+  };
+};
+
 export const inferProjectDocumentLifecycle = (doc: ProjectDocument): ProjectDocumentLifecycleStatus => {
   if (doc.lifecycleStatus === 'archived') return 'archived';
   if (doc.learnedAt || doc.lifecycleStatus === 'learned') return 'learned';
   if (doc.completedAt || doc.lifecycleStatus === 'completed') return 'completed';
-  if (doc.lifecycleStatus === 'needs_revision' || doc.lifecycleStatus === 'reviewed') return doc.lifecycleStatus;
+  if (doc.lifecycleStatus) return doc.lifecycleStatus;
   if (doc.analyzedAt || doc.aiReport || (doc.sections?.length || 0) > 0) return 'analyzed';
   if (doc.templateId || doc.versionId || doc.sourceFilePath || doc.autoStage) return 'identified';
   return 'imported';

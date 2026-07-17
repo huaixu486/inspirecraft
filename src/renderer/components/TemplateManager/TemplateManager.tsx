@@ -1,48 +1,13 @@
 import React, { useDeferredValue, useEffect, useRef, useState, useMemo } from 'react';
-import {
-  Card,
-  Button,
-  List,
-  Modal,
-  Form,
-  Input,
-  Select,
-  Segmented,
-  Space,
-  Typography,
-  Tag,
-  message,
-  Empty,
-  Popconfirm,
-  Divider,
-  ColorPicker,
-  AutoComplete,
-  InputNumber,
-  Switch,
-  Dropdown,
-  Spin,
-} from 'antd';
-import {
-  PlusOutlined,
-  EditOutlined,
-  DeleteOutlined,
-  FileTextOutlined,
-  HolderOutlined,
-  ImportOutlined,
-  UpOutlined,
-  DownOutlined,
-  CaretRightOutlined,
-  CaretDownOutlined,
-  MinusOutlined,
-  LeftOutlined,
-} from '@ant-design/icons';
+import { Form, Typography, message } from 'antd';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
-import { WritingTemplate, TemplateNode, StageConfig, TemplateOutputFileType, TemplateFormatRules } from '../../../shared/types';
+import { AIConfig, WritingTemplate, TemplateNode, StageConfig, TemplateOutputFileType, TemplateFormatRules } from '../../../shared/types';
 import { getAllStages, getGlobalStageProgress } from '../../utils/timelineStages';
+import { requireIpcObject } from '../../utils/ipcResult';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 import {
   mapTemplateNodes,
@@ -60,9 +25,31 @@ import {
   rebuildTemplateTree,
   findEmptyNodeTitle,
 } from './templateNodeUtils';
+import { TemplateCatalog, TemplateDeleteModal } from './TemplateCatalog';
+import { ProjectStageModal, ProjectStageSection } from './ProjectStageManager';
+import { TemplateBasicInfoSection, TemplateEditorModal } from './TemplateEditorBasics';
+import { TemplateFormatRulesSection } from './TemplateFormatRulesSection';
+import { formatRuleRows, TemplateFormatRuleKey } from './templateFormatRuleConfig';
+import { ImportedTemplateFile, TemplateImportPanel } from './TemplateImportPanel';
+import { TemplateStructurePreview, TemplateStructureToolbar } from './TemplateStructurePanels';
+import { TemplateEditorNodeRows, TemplatePreviewNodeRows } from './TemplateNodeRows';
+import {
+  HeadingMatch,
+  buildTemplateNodeTree,
+  getExplicitTopLevelOrder,
+  inferHeadingLevel,
+  isLikelyBodyEnumerationTitle,
+  isLikelyGarbledText,
+  isLikelyMeasurementOrTableValue,
+  isLikelyNumericDataText,
+  matchHeadingLine,
+  normalizeImportedText,
+  normalizeTopLevelOutlineOrder,
+  stripRtfText,
+  stripTemplateHeadingPrefix,
+} from './templateDocumentParser';
 
-const { Title, Text, Paragraph } = Typography;
-const { TextArea } = Input;
+const { Text } = Typography;
 
 const templateFileTypeOptions: { value: TemplateOutputFileType; label: string }[] = [
   { value: 'docx', label: 'Word 文档 (.docx)' },
@@ -75,28 +62,8 @@ const templateFileTypeOptions: { value: TemplateOutputFileType; label: string }[
   { value: 'rtf', label: 'RTF 富文本 (.rtf)' },
 ];
 
-const fontSizeOptions = [
-  { value: 22, label: '二号 / 22pt' },
-  { value: 16, label: '三号 / 16pt' },
-  { value: 15, label: '小三 / 15pt' },
-  { value: 14, label: '四号 / 14pt' },
-  { value: 12, label: '小四 / 12pt' },
-  { value: 10.5, label: '五号 / 10.5pt' },
-  { value: 9, label: '小五 / 9pt' },
-];
-
 const fallbackFontNames = ['宋体', '黑体', '微软雅黑', '仿宋', '楷体', '等线', 'Arial', 'Calibri', 'Times New Roman'];
 const supportedTemplateFileTypes = templateFileTypeOptions.map(option => option.value);
-const formatRuleRows = [
-  { key: 'heading1', label: '一级标题', defaultFont: '黑体', defaultSize: 16, defaultLineHeight: 1.5, defaultBold: true },
-  { key: 'heading2', label: '二级标题', defaultFont: '黑体', defaultSize: 15, defaultLineHeight: 1.5, defaultBold: true },
-  { key: 'heading3', label: '三级标题', defaultFont: '黑体', defaultSize: 14, defaultLineHeight: 1.5, defaultBold: true },
-  { key: 'heading4', label: '四级标题', defaultFont: '黑体', defaultSize: 12, defaultLineHeight: 1.5, defaultBold: true },
-  { key: 'body', label: '正文', defaultFont: '宋体', defaultSize: 12, defaultLineHeight: 1.5, defaultBold: false },
-  { key: 'caption', label: '图题/图例', defaultFont: '宋体', defaultSize: 10.5, defaultLineHeight: 1.5, defaultBold: false },
-  { key: 'tableTitle', label: '表题', defaultFont: '宋体', defaultSize: 10.5, defaultLineHeight: 1.5, defaultBold: false },
-  { key: 'tableHeader', label: '表头', defaultFont: '宋体', defaultSize: 10.5, defaultLineHeight: 1.5, defaultBold: true },
-] as const;
 
 const getImportedBaseName = (filePath: string, fileName?: string) =>
   (fileName || filePath.split(/[/\\]/).pop() || '').replace(/\.[^.]+$/, '');
@@ -109,142 +76,6 @@ const inferOutputFileType = (filePath: string): TemplateOutputFileType => {
   return ext && supportedTemplateFileTypes.includes(ext) ? ext : 'docx';
 };
 
-const normalizeImportedText = (value: string): string =>
-  value
-    .replace(/\r/g, '\n')
-    .replace(/\u0000/g, '')
-    .replace(/[\u0001-\u0008\u000b\u000c\u000e-\u001f]+/g, ' ')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
-const stripRtfText = (value: string): string =>
-  normalizeImportedText(
-    value
-      .replace(/\\par[d]?/g, '\n')
-      .replace(/\\'[0-9a-fA-F]{2}/g, ' ')
-      .replace(/\\[a-zA-Z]+\d* ?/g, '')
-      .replace(/[{}]/g, ' ')
-  );
-
-function isLikelyGarbledText(value: string): boolean {
-  const compact = value.replace(/\s/g, '');
-  if (!compact) return false;
-  const replacementCount = compact.match(/�/g)?.length || 0;
-  const readableCount = compact.match(/[\u4e00-\u9fa5A-Za-z0-9，。、；：！？（）()《》.\-_/]/g)?.length || 0;
-  return replacementCount / compact.length > 0.03 || readableCount / compact.length < 0.55;
-}
-
-function isLikelyReadableHeading(value: string): boolean {
-  const titlePart = value.replace(/^([一二三四五六七八九十十一十二]+[、.．）\)]|第[一-龥]{1,4}[章节部篇]|[\d]+([.．]\d+)*[、.．）\)]?|[\(（][\d一-龥]+[）\)])\s*/, '');
-  const compact = titlePart.replace(/\s/g, '');
-  if (compact.length < 2) return false;
-  return !isLikelyGarbledText(compact);
-}
-
-function stripTemplateHeadingPrefix(value: string): string {
-  return String(value || '')
-    .trim()
-    .replace(/^第[一二三四五六七八九十百千万\d]+[章节部篇][\s　]*/, '')
-    .replace(/^[一二三四五六七八九十百千万]+[、.．）\)][\s　]*/, '')
-    .replace(/^[\(（][一二三四五六七八九十百千万\d]+[）\)][\s　]*/, '')
-    .replace(/^\d+(?:[.．]\d+)*[、.．）\)]?[\s　]*/, '');
-}
-
-function isLikelyBodyEnumerationTitle(value: string, kind?: HeadingMatch['kind']): boolean {
-  const text = stripTemplateHeadingPrefix(value).replace(/\s+/g, '');
-  if (!text || text.length < 4) return false;
-  if (kind === 'chapter' || kind === 'chinese' || kind === 'parenChinese') return false;
-
-  const bodyStart = /^(?:\u80fd\u591f|\u80fd|\u53ef\u4ee5|\u53ef|\u5e94|\u9700|\u9700\u8981|\u5c06|\u5f53|\u5bf9|\u6839\u636e|\u91c7\u7528|\u901a\u8fc7|\u57fa\u4e8e|\u5229\u7528|\u5728|\u4e3a|\u7531|\u4f9d\u6b21|\u5206\u522b|\u540c\u65f6)/;
-  const actionPhrase = /(?:\u80fd\u591f|\u53ef\u4ee5|\u53ef\u5b9e\u73b0|\u5b9e\u73b0|\u652f\u6301|\u91c7\u7528|\u6839\u636e|\u901a\u8fc7|\u7ecf\u8fc7|\u5bf9\u63a5|\u8bbe\u8ba1\u5236\u4f5c|\u5236\u4f5c|\u9a71\u52a8|\u63a5\u5165|\u8f93\u51fa|\u8f93\u5165|\u5c55\u793a|\u5224\u65ad|\u8865\u507f|\u63a7\u5236|\u7ba1\u7406|\u5904\u7406|\u901a\u4fe1|\u4f20\u8f93|\u68c0\u6d4b|\u76d1\u6d4b|\u5206\u6790)/;
-  const headingEnding = /(?:\u6982\u8ff0|\u6982\u51b5|\u7b80\u4ecb|\u7cfb\u7edf|\u65b9\u6848|\u8bbe\u8ba1|\u67b6\u6784|\u529f\u80fd|\u6a21\u5757|\u6d41\u7a0b|\u65b9\u6cd5|\u7b97\u6cd5|\u6a21\u578b|\u5e73\u53f0|\u88c5\u7f6e|\u5e94\u7528|\u8bd5\u9a8c|\u6d4b\u8bd5|\u9a8c\u8bc1|\u603b\u7ed3|\u5c55\u671b|\u95ee\u9898|\u63aa\u65bd|\u7ed3\u8bba|\u80cc\u666f|\u9700\u6c42|\u76ee\u6807|\u7ec4\u6210|\u539f\u7406|\u5206\u6790|\u7ed3\u679c|\u60c5\u51b5|\u5185\u5bb9|\u8981\u70b9|\u521b\u65b0|\u7a81\u7834|\u6210\u6548)$/;
-  const taskEnumerationStart = /^(?:\u68b3\u7406|\u8c03\u7814|\u7814\u7a76|\u5206\u6790|\u5b8c\u6210|\u5f00\u5c55|\u63d0\u51fa|\u63a2\u7d22|\u63a8\u8fdb|\u5efa\u7acb|\u5f62\u6210|\u603b\u7ed3|\u660e\u786e|\u89e3\u51b3|\u4f18\u5316|\u6539\u8fdb|\u9a8c\u8bc1|\u6574\u7406|\u6536\u96c6|\u5bf9\u6bd4|\u9009\u53d6|\u6784\u5efa|\u8bbe\u8ba1|\u5f00\u53d1)/;
-
-  if (/[，,；;。]/.test(text) && actionPhrase.test(text)) return true;
-  if (bodyStart.test(text) && actionPhrase.test(text)) return true;
-  if (/^(?:\u80fd\u591f|\u80fd|\u53ef\u4ee5|\u53ef).{0,8}\u5b9e\u73b0/.test(text)) return true;
-  if (/^(?:\u6839\u636e|\u91c7\u7528|\u901a\u8fc7|\u57fa\u4e8e|\u5229\u7528).{2,}/.test(text) && actionPhrase.test(text)) return true;
-  if (/^\u5bf9\u63a5.{2,}(?:\u4f20\u611f\u5668|\u6570\u636e|\u63a5\u53e3|\u7cfb\u7edf)/.test(text)) return true;
-  if (/^\u8bbe\u8ba1\u5236\u4f5c/.test(text)) return true;
-  if ((kind === 'number' || kind === 'parenNumber') && taskEnumerationStart.test(text) && text.length >= 8 && !headingEnding.test(text)) return true;
-  if (text.length >= 16 && actionPhrase.test(text) && !headingEnding.test(text)) return true;
-  return false;
-}
-
-
-function normalizeMeasurementText(value: string): string {
-  return String(value || '')
-    .replace(/[，]/g, ',')
-    .replace(/[．。]/g, '.')
-    .replace(/[：]/g, ':')
-    .replace(/[（]/g, '(')
-    .replace(/[）]/g, ')')
-    .replace(/[－–—]/g, '-')
-    .replace(/[～]/g, '~')
-    .replace(/\s+/g, '');
-}
-
-function isLikelyMeasurementOrTableValue(value: string): boolean {
-  const original = normalizeMeasurementText(value);
-  const stripped = normalizeMeasurementText(stripTemplateHeadingPrefix(value));
-  const raw = original || stripped;
-  if (!raw) return false;
-
-  const lower = raw.toLowerCase();
-  const hasCjk = /[\u4e00-\u9fa5]/.test(lower);
-  const unit = '(?:km/h|m/s|kn|mn|mpa|kpa|pa|kg|mm|cm|km|kv|ma|hz|min|ms|rpm|kw|db|n|g|t|m|v|a|s|h|w|%|deg|rad|°|℃)';
-  const number = '[+-]?\\d+(?:\\.\\d+)?';
-  const headingLikeEnding = /(?:\u7cfb\u7edf|\u65b9\u6848|\u8bbe\u8ba1|\u67b6\u6784|\u529f\u80fd|\u6a21\u5757|\u6d41\u7a0b|\u65b9\u6cd5|\u7b97\u6cd5|\u6a21\u578b|\u5e73\u53f0|\u88c5\u7f6e|\u5e94\u7528|\u8bd5\u9a8c|\u6d4b\u8bd5|\u9a8c\u8bc1|\u5206\u6790|\u7ed3\u679c|\u539f\u7406|\u7ed3\u6784)$/;
-  if (hasCjk && headingLikeEnding.test(raw)) return false;
-
-  const valueWithUnit = new RegExp(`^${number}${unit}(?:[~\\-至到,，;；、/]?${number}${unit}?)*`, 'i');
-  if ((valueWithUnit.test(raw) || valueWithUnit.test(stripped)) && !headingLikeEnding.test(raw)) return true;
-
-  const pureValueList = new RegExp(`^(?:${number}|${number}${unit})(?:[~\\-至到,，;；、/]?(?:${number}|${number}${unit}))*$`, 'i');
-  if (!hasCjk && (pureValueList.test(raw) || pureValueList.test(stripped))) return true;
-
-  const strippedKnown = lower
-    .replace(new RegExp(unit, 'gi'), '')
-    .replace(/\d+(?:\.\d+)?/g, '')
-    .replace(/[+\-~～至到,，;；、:：\/\\()[\]{}<>≤≥=×x*%°℃′'″"·]/g, '');
-  if (!hasCjk && strippedKnown.length === 0 && /\d/.test(lower)) return true;
-
-  const hasUnit = new RegExp(unit, 'i').test(lower);
-  if (!hasCjk && hasUnit && /^[\d.+\-~～,，;；、:：\/\\()[\]{}<>≤≥=×x*%°℃′'″"·a-z]+$/i.test(lower)) return true;
-  return false;
-}
-function isLikelyNumericDataText(value: string): boolean {
-  const raw = String(value || '').replace(/\s+/g, '');
-  const text = stripTemplateHeadingPrefix(value).replace(/\s+/g, '');
-  const source = text || raw;
-  if (!source) return false;
-  if (isLikelyMeasurementOrTableValue(source) || isLikelyMeasurementOrTableValue(raw)) return true;
-  const hasWord = /[\u4e00-\u9fa5A-Za-z]/.test(source);
-  const measurementUnit = /(?:m\/s|km\/h|mm|cm|kg|kv|hz|mpa|pa|℃|°|%|‰)/i;
-  if (/^[\d.．+\-~～°℃%'"/:：,，;；\[\]【】（）()]+$/.test(source)) return true;
-  if (/^(?:m\/s|km\/h|mm|cm|m|kg|kv|v|a|hz|n|mpa|pa|s|min|h|°|℃|%|‰)/i.test(source)) return true;
-  if (/^\d+(?:\.\d+)?(?:m\/s|km\/h|mm|cm|m|kg|kv|v|a|hz|n|mpa|pa|s|min|h|°|℃|%|‰)/i.test(source)) return true;
-  if (!hasWord && measurementUnit.test(raw)) return true;
-  if (!hasWord && /(?:\d+[°%℃])|(?:[°%℃]\d+)/.test(raw)) return true;
-  return false;
-}
-
-function isLikelyNumericDataHeading(token: string, titleText: string, kind: HeadingMatch['kind']): boolean {
-  if (kind === 'chapter' || kind === 'chinese' || kind === 'parenChinese') return false;
-  const title = String(titleText || '').trim();
-  const compactTitle = title.replace(/\s+/g, '');
-  const normalizedToken = String(token || '').replace(/[()（）]/g, '').replace(/[、.．）)]$/, '');
-  const tokenParts = normalizedToken.split(/[.．]/).filter(Boolean);
-
-  if (kind === 'decimal') {
-    if (tokenParts.some(part => part.length > 2)) return true;
-    if (tokenParts.length <= 2 && !/^[\u4e00-\u9fa5A-Za-z]/.test(compactTitle)) return true;
-  }
-
-  if (!/[\u4e00-\u9fa5A-Za-z]/.test(compactTitle)) return true;
-  return isLikelyNumericDataText(`${token} ${titleText}`);
-}
 async function parseImportedDocument(filePath: string): Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; convertedFilePath?: string; error?: string }> {
   const ext = filePath.split('.').pop()?.toLowerCase();
   const fileName = filePath.split(/[/\\]/).pop();
@@ -358,8 +189,6 @@ const flattenFormatRulesForForm = (rules?: TemplateFormatRules) => {
   return fallback;
 };
 
-type TemplateFormatRuleKey = typeof formatRuleRows[number]['key'];
-
 const fontSizeNameMap: Record<string, number> = {
   初号: 42,
   小初: 36,
@@ -453,75 +282,6 @@ const inferFormatRulesFromText = (content: string): { values: Record<string, any
 
   return { values, evidence };
 };
-
-// ==================== 标题提取逻辑 ====================
-
-interface HeadingMatch {
-  title: string;
-  level: number;
-  token: string;
-  kind: 'chapter' | 'chinese' | 'parenChinese' | 'number' | 'decimal' | 'parenNumber';
-  numericDepth?: number;
-  recoveredFromStructure?: boolean;
-}
-
-function isLikelyTableOfContentsLine(value: string): boolean {
-  const line = String(value || '').trim();
-  if (!line) return false;
-  if (/\.{3,}\s*\d+\s*$/.test(line)) return true;
-  if (/[·•…]{3,}\s*\d+\s*$/.test(line)) return true;
-  if (/\s{2,}\d+\s*$/.test(line) && /^(?:第[\u4e00-\u9fa5\d]+[章节部篇]|[一二三四五六七八九十百千万]+[、.．）)]|\d+(?:[.．]\d+)+)/.test(line)) return true;
-  return false;
-}
-function matchHeadingLine(line: string): HeadingMatch | null {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.length > 80) return null;
-  if (isLikelyTableOfContentsLine(trimmed)) return null;
-  if (!isLikelyReadableHeading(trimmed)) return null;
-
-  const patterns: Array<{
-    regex: RegExp;
-    kind: HeadingMatch['kind'];
-    level: (token: string) => number;
-    numericDepth?: (token: string) => number;
-  }> = [
-    { regex: /^(第[一二三四五六七八九十百千万\d]+[章节部篇])[\s　]*(\S.*)$/, kind: 'chapter', level: () => 1 },
-    { regex: /^([一二三四五六七八九十百千万]+[、.．）\)])[\s　]*(\S.*)$/, kind: 'chinese', level: () => 1 },
-    { regex: /^([一二三四五六七八九十百千万]+)[\s　]+(?!是|为|要|个|种|类|方面)(\S.*)$/, kind: 'chinese', level: () => 1 },
-    { regex: /^([\(（][一二三四五六七八九十百千万]+[）\)])[\s　]*(\S.*)$/, kind: 'parenChinese', level: () => 2 },
-    {
-      regex: /^(\d+(?:[.．]\d+){1,3})[、.．）\)]?[\s　]*(\S.*)$/,
-      kind: 'decimal',
-      level: (token) => Math.min(token.split(/[.．]/).length, 4),
-      numericDepth: (token) => token.split(/[.．]/).length,
-    },
-  ];
-
-  for (const pattern of patterns) {
-    const match = trimmed.match(pattern.regex);
-    if (!match) continue;
-    const titleText = match[2]?.trim();
-    if (!titleText || isLikelyGarbledText(titleText)) continue;
-    const token = match[1].trim();
-    const compactTechnicalTerm = titleText.replace(/\s+/g, '');
-    const knownTechnicalAcronym = /^(?:Mesh|LoRa|CAN|EtherCAT|MOD|TCP|IP|HTTP|MQTT|ZMP|CNN|YOLO|GPS|GNSS|GIS|BIM|AI)$/i;
-    const technicalTermWithSuffix = /^[A-Za-z][A-Za-z0-9+#.-]{1,24}(?:技术|系统|协议|网络|模块|算法|平台|架构|设计)$/i;
-    const numberedTechnicalTerm = pattern.kind === 'decimal'
-      && (knownTechnicalAcronym.test(compactTechnicalTerm) || technicalTermWithSuffix.test(compactTechnicalTerm));
-    if (!numberedTechnicalTerm && (isLikelyMeasurementOrTableValue(titleText) || isLikelyMeasurementOrTableValue(token + ' ' + titleText))) continue;
-    if (!numberedTechnicalTerm && isLikelyNumericDataHeading(token, titleText, pattern.kind)) continue;
-    if (isLikelyBodyEnumerationTitle(`${token} ${titleText}`, pattern.kind)) continue;
-    return {
-      title: `${token} ${titleText}`.trim(),
-      level: pattern.level(token),
-      token,
-      kind: pattern.kind,
-      numericDepth: pattern.numericDepth?.(token),
-    };
-  }
-
-  return null;
-}
 
 function normalizeHeadingDescription(value?: string): string | undefined {
   if (!value) return undefined;
@@ -1007,133 +767,6 @@ function parseAiHeadingResponse(response: string): AiTemplateExtractionResult {
 
 
 
-const chineseOutlineOrderMap: Record<string, number> = {
-  一: 1,
-  二: 2,
-  三: 3,
-  四: 4,
-  五: 5,
-  六: 6,
-  七: 7,
-  八: 8,
-  九: 9,
-  十: 10,
-};
-
-function parseChineseOutlineOrder(value: string): number | undefined {
-  const text = String(value || '').replace(/\s/g, '');
-  if (!text) return undefined;
-  if (chineseOutlineOrderMap[text] !== undefined) return chineseOutlineOrderMap[text];
-  const digit = Number(text);
-  if (Number.isFinite(digit) && digit > 0) return digit;
-  if (!/^[一二三四五六七八九十百千万]+$/.test(text)) return undefined;
-
-  let total = 0;
-  let section = 0;
-  const unitMap: Record<string, number> = { 十: 10, 百: 100, 千: 1000, 万: 10000 };
-  Array.from(text).forEach(char => {
-    const digitValue = chineseOutlineOrderMap[char];
-    const unitValue = unitMap[char];
-    if (unitValue) {
-      section = (section || 1) * unitValue;
-      total += section;
-      section = 0;
-    } else if (digitValue !== undefined) {
-      section = digitValue;
-    }
-  });
-  return total + section || undefined;
-}
-
-function getExplicitTopLevelOrder(title: string): number | undefined {
-  const text = String(title || '').trim();
-  const chapterMatch = text.match(/^第([一二三四五六七八九十百千万]+|\d+)[章节部篇]/);
-  const chineseMatch = text.match(/^([一二三四五六七八九十百千万]+|\d+)(?:[、.．）\)]|\s)/);
-  const value = chapterMatch?.[1] || chineseMatch?.[1];
-  if (!value) return undefined;
-  return parseChineseOutlineOrder(value);
-}
-
-function normalizeTopLevelOutlineOrder(nodes: TemplateNode[]): TemplateNode[] {
-  const orderedCount = nodes.filter(node => node.level === 1 && getExplicitTopLevelOrder(node.title) !== undefined).length;
-  if (orderedCount < 2) return nodes;
-  return [...nodes].sort((a, b) => {
-    const aOrder = a.level === 1 ? getExplicitTopLevelOrder(a.title) : undefined;
-    const bOrder = b.level === 1 ? getExplicitTopLevelOrder(b.title) : undefined;
-    if (aOrder === undefined || bOrder === undefined) return 0;
-    return aOrder - bOrder;
-  });
-}
-
-function getDecimalHeadingParts(match?: HeadingMatch): number[] {
-  if (!match || match.kind !== 'decimal') return [];
-  return match.token
-    .split(/[.．]/)
-    .map(part => Number(part))
-    .filter(part => Number.isFinite(part) && part > 0);
-}
-
-function getDecimalRootOrder(match?: HeadingMatch): number | undefined {
-  const first = getDecimalHeadingParts(match)[0];
-  return Number.isFinite(first) && first > 0 ? first : undefined;
-}
-
-function getNodeOrderParts(node: TemplateNode): number[] | undefined {
-  if ((node.level || 1) <= 1) {
-    const order = getExplicitTopLevelOrder(node.title);
-    return order === undefined ? undefined : [order];
-  }
-  const decimalMatch = String(node.title || '').trim().match(/^(\d+(?:[.．]\d+){1,3})/);
-  if (!decimalMatch) return undefined;
-  const parts = decimalMatch[1].split(/[.．]/).map(part => Number(part));
-  return parts.every(part => Number.isFinite(part)) ? parts : undefined;
-}
-
-function compareNumberParts(a: number[], b: number[]): number {
-  const length = Math.max(a.length, b.length);
-  for (let index = 0; index < length; index += 1) {
-    const diff = (a[index] || 0) - (b[index] || 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
-
-function sortTemplateNodesByDetectedOrder(nodes: TemplateNode[]): TemplateNode[] {
-  return nodes
-    .map((node, originalIndex) => ({
-      node: {
-        ...node,
-        children: node.children?.length ? sortTemplateNodesByDetectedOrder(node.children) : undefined,
-      },
-      originalIndex,
-      orderParts: getNodeOrderParts(node),
-    }))
-    .sort((a, b) => {
-      if (!a.orderParts || !b.orderParts) return a.originalIndex - b.originalIndex;
-      const diff = compareNumberParts(a.orderParts, b.orderParts);
-      return diff || a.originalIndex - b.originalIndex;
-    })
-    .map(item => item.node);
-}
-
-function inferHeadingLevel(heading: HeadingMatch, previous: HeadingMatch[]): number {
-  const recent = previous.slice(-8);
-  const hasChineseOutline = recent.some(item => item.kind === 'chinese' || item.kind === 'chapter' || item.kind === 'parenChinese');
-  const hasParenChinese = recent.some(item => item.kind === 'parenChinese');
-
-  if (heading.kind === 'chapter' || heading.kind === 'chinese') return 1;
-  if (heading.kind === 'parenChinese') return hasChineseOutline ? 2 : 1;
-  if (heading.kind === 'parenNumber') return hasParenChinese ? 4 : hasChineseOutline ? 3 : 2;
-  if (heading.kind === 'number') return hasParenChinese ? 3 : hasChineseOutline ? 2 : 1;
-  if (heading.kind === 'decimal') {
-    const depth = heading.numericDepth || 1;
-    if (hasParenChinese && depth === 1) return 3;
-    if (hasChineseOutline && depth === 1) return 2;
-    return Math.min(depth, 4);
-  }
-  return heading.level;
-}
-
 // 从文档内容提取章节结构为 TemplateNode[]（保留各章节内容）
 function extractTemplateNodes(content: string): TemplateNode[] {
   const lines = content.split('\n');
@@ -1227,99 +860,13 @@ function extractTemplateNodes(content: string): TemplateNode[] {
     });
   }
 
-  // 第三步：构建树结构。先锁定明确的一级章，再把 2.x/3.x 小节挂回对应章，避免 PDF 抽取顺序抖动导致小节乱窜。
-  const nodes: TemplateNode[] = [];
-  const stack: TemplateNode[] = [];
-  const topLevelByOrder = new Map<number, TemplateNode>();
-  const rootNodeByContentIndex = new Map<number, TemplateNode>();
-  const decimalStacksByRoot = new Map<number, TemplateNode[]>();
-  let idCounter = 0;
-
-  const createNode = (h: { title: string; level: number; description: string }, level = h.level): TemplateNode => {
-    idCounter += 1;
-    const guidance = splitTemplateGuidanceText(h.description, h.title);
-    return {
-      id: String(idCounter),
-      title: h.title,
-      level,
-      isRequired: !isExampleHeadingText(h.title),
-      description: guidance.requirementText || undefined,
-      requirementText: guidance.requirementText || undefined,
-      exampleText: guidance.exampleText || undefined,
-    };
-  };
-
-  headingContents.forEach((h, index) => {
-    if (isInvalidTemplateHeadingTitle(h.title, h.match)) return;
-    if (h.level !== 1) return;
-    const order = getExplicitTopLevelOrder(h.title);
-    if (order === undefined || topLevelByOrder.has(order)) return;
-    const node = createNode(h, 1);
-    nodes.push(node);
-    topLevelByOrder.set(order, node);
-    rootNodeByContentIndex.set(index, node);
+  return buildTemplateNodeTree(headingContents, {
+    splitGuidance: splitTemplateGuidanceText,
+    isExampleHeading: isExampleHeadingText,
+    isInvalidHeading: isInvalidTemplateHeadingTitle,
+    dedupeNodes: dedupeTemplateNodesByExactTitle,
   });
-
-  const hasExplicitTopLevelOutlines = topLevelByOrder.size > 0;
-
-  for (let index = 0; index < headingContents.length; index += 1) {
-    const h = headingContents[index];
-    if (isInvalidTemplateHeadingTitle(h.title, h.match)) continue;
-
-    const existingRoot = rootNodeByContentIndex.get(index);
-    if (existingRoot) {
-      stack.splice(0, stack.length, existingRoot);
-      const order = getExplicitTopLevelOrder(existingRoot.title);
-      if (order !== undefined) decimalStacksByRoot.set(order, [existingRoot]);
-      continue;
-    }
-
-    if (h.level === 1) {
-      const explicitOrder = getExplicitTopLevelOrder(h.title);
-      if (explicitOrder !== undefined && topLevelByOrder.has(explicitOrder)) continue;
-    }
-
-    const decimalRootOrder = getDecimalRootOrder(h.match);
-    const explicitRoot = decimalRootOrder === undefined ? undefined : topLevelByOrder.get(decimalRootOrder);
-    if (h.match.kind === 'decimal' && explicitRoot) {
-      const parts = getDecimalHeadingParts(h.match);
-      const level = Math.min(Math.max(parts.length, 2), 4);
-      const node = createNode(h, level);
-      const rootStack = decimalStacksByRoot.get(decimalRootOrder!) || [explicitRoot];
-      while (rootStack.length > 1 && rootStack[rootStack.length - 1].level >= node.level) {
-        rootStack.pop();
-      }
-      const parent = rootStack[rootStack.length - 1] || explicitRoot;
-      if (!parent.children) parent.children = [];
-      parent.children.push(node);
-      rootStack.push(node);
-      decimalStacksByRoot.set(decimalRootOrder!, rootStack);
-      continue;
-    }
-
-    if (h.match.kind === 'decimal' && decimalRootOrder !== undefined && hasExplicitTopLevelOutlines) {
-      continue;
-    }
-
-    const node = createNode(h);
-    while (stack.length && stack[stack.length - 1].level >= node.level) {
-      stack.pop();
-    }
-
-    const parent = stack[stack.length - 1];
-    if (parent) {
-      if (!parent.children) parent.children = [];
-      parent.children.push(node);
-    } else {
-      nodes.push(node);
-    }
-    stack.push(node);
-  }
-
-  return dedupeTemplateNodesByExactTitle(normalizeTopLevelOutlineOrder(sortTemplateNodesByDetectedOrder(nodes)));
 }
-
-type ImportedTemplateFile = { filePath: string; text: string; fileName?: string };
 
 function isInvalidTemplateHeadingTitle(title: string, detectedHeading?: HeadingMatch): boolean {
   // matchHeadingLine already validates readability, measurements and body enumerations.
@@ -1890,7 +1437,7 @@ const TemplateManager: React.FC<{ onBack?: () => void; hideHeader?: boolean }> =
   const [aiExtractStatus, setAiExtractStatus] = useState('');
   const [aiExtractStartedAt, setAiExtractStartedAt] = useState<number | null>(null);
   const [aiExtractElapsedSeconds, setAiExtractElapsedSeconds] = useState(0);
-  const [importedFiles, setImportedFiles] = useState<Array<{ filePath: string; text: string; fileName?: string }>>([]);
+  const [importedFiles, setImportedFiles] = useState<ImportedTemplateFile[]>([]);
   const [exampleStructureView, setExampleStructureView] = useState('merged');
   const [aiMergedExampleNodes, setAiMergedExampleNodes] = useState<TemplateNode[]>([]);
   const [aiMergedExampleEvidence, setAiMergedExampleEvidence] = useState('');
@@ -1899,7 +1446,6 @@ const TemplateManager: React.FC<{ onBack?: () => void; hideHeader?: boolean }> =
   const [headingLevelFilter, setHeadingLevelFilter] = useState<number[]>([1, 2, 3, 4]);
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const lastSelectedNodeIdRef = useRef<string>('');
-  const [isStageSectionExpanded, setIsStageSectionExpanded] = useState(false);
   const hasRequestedTemplateRefreshRef = useRef(false);
   const hasRequestedFontsRef = useRef(false);
   const aiExtractStaleNotifiedRef = useRef(false);
@@ -1978,6 +1524,24 @@ const TemplateManager: React.FC<{ onBack?: () => void; hideHeader?: boolean }> =
       label: `范文${index + 1}结构`,
     })),
   ], [importedFiles]);
+
+  const handleRemoveImportedFile = (index: number) => {
+    const newFiles = importedFiles.filter((_, fileIndex) => fileIndex !== index);
+    setImportedFiles(newFiles);
+    if (templateType !== 'example') return;
+
+    setAiMergedExampleNodes([]);
+    setAiMergedExampleEvidence('');
+    if (newFiles.length === 0) {
+      setTemplateNodes([]);
+      setExampleStructureView('merged');
+      return;
+    }
+
+    const nextView = newFiles.length > 1 ? 'merged' : 'file:0';
+    applyExampleStructureView(nextView, newFiles);
+  };
+
   useEffect(() => {
     document.body.classList.toggle('template-editor-modal-open', isModalOpen);
     return () => document.body.classList.remove('template-editor-modal-open');
@@ -2248,231 +1812,6 @@ const TemplateManager: React.FC<{ onBack?: () => void; hideHeader?: boolean }> =
   const countRequiredNodes = (nodes: TemplateNode[]): number =>
     nodes.reduce((count, node) => count + (node.isRequired ? 1 : 0) + (node.children ? countRequiredNodes(node.children) : 0), 0);
 
-  const renderLevelControl = (node: TemplateNode) => {
-    const level = Math.min(Math.max(node.level || 1, 1), 4);
-    const setLevel = (nextLevel: number) => updateTemplateNodeLevel(node.id, Math.min(Math.max(nextLevel, 1), 4));
-    return (
-      <div className="template-node-level-stepper">
-        <Button
-          className="template-node-level-step"
-          type="text"
-          size="small"
-          icon={<MinusOutlined />}
-          disabled={level <= 1}
-          onClick={() => setLevel(level - 1)}
-        />
-        <Dropdown
-          trigger={['click']}
-          menu={{
-            selectedKeys: [String(level)],
-            items: [1, 2, 3, 4].map(itemLevel => ({
-              key: String(itemLevel),
-              label: `第 ${itemLevel} 级`,
-              onClick: () => setLevel(itemLevel),
-            })),
-          }}
-        >
-          <Button className="template-node-level-current" size="small">
-            第 {level} 级
-          </Button>
-        </Dropdown>
-        <Button
-          className="template-node-level-step"
-          type="text"
-          size="small"
-          icon={<PlusOutlined />}
-          disabled={level >= 4}
-          onClick={() => setLevel(level + 1)}
-        />
-      </div>
-    );
-  };
-
-  const renderNodeRows = (nodes: TemplateNode[], depth = 0, prefix: number[] = []): React.ReactNode[] =>
-    nodes
-      .filter(node => nodeMatchesFilter(node, activeHeadingLevelFilter))
-      .map((node, index) => {
-        const hasChildren = Boolean(node.children?.length);
-        const isCollapsed = collapsedNodeIds.has(node.id);
-        const nodeNumber = [...prefix, index + 1];
-        const nodeVisible = activeHeadingLevelFilter.includes(node.level);
-        const isSelected = selectedNodeIds.has(node.id);
-        const rowClassName = [
-          'template-node-preview-row',
-          activeNodeId === node.id ? 'active' : '',
-          isSelected ? 'selected' : '',
-        ].filter(Boolean).join(' ');
-        return (
-          <React.Fragment key={node.id}>
-          <div
-            className={rowClassName}
-            style={{ paddingLeft: 8 + depth * 16, opacity: nodeVisible ? 1 : 0.4 }}
-            onClick={() => focusTemplateNode(node.id)}
-          >
-            {hasChildren ? (
-              <Button
-                className="template-preview-collapse"
-                type="text"
-                size="small"
-                icon={isCollapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  toggleTemplateNodeCollapsed(node.id);
-                }}
-              />
-            ) : (
-              <span className="template-preview-collapse-spacer" />
-            )}
-            <input
-              type="checkbox"
-              className="template-node-preview-selectbox"
-              checked={nodeVisible && isSelected}
-              disabled={!nodeVisible}
-              title={nodeVisible ? '选择该章节' : '仅作为层级上下文显示'}
-              onClick={(event) => event.stopPropagation()}
-              onChange={(event) => {
-                if (!nodeVisible) return;
-                updateTemplateNodeSelection(node.id, event.target.checked, (event.nativeEvent as MouseEvent).shiftKey);
-              }}
-            />
-            <span className="template-node-level">{nodeNumber.join('.')}</span>
-            <Text strong style={{ fontSize: 12 }} ellipsis={{ tooltip: node.title }}>{node.title}</Text>
-          </div>
-          {hasChildren && !isCollapsed && (
-            <div className="template-node-preview-children">
-              <div className="template-node-preview-children-inner">
-                {renderNodeRows(node.children || [], depth + 1, nodeNumber)}
-              </div>
-            </div>
-        )}
-        </React.Fragment>
-      );
-    });
-
-  // 递归检查节点或其子节点是否匹配筛选
-  const nodeMatchesFilter = (node: TemplateNode, filter: number[]): boolean => {
-    if (filter.includes(node.level)) return true;
-    return node.children?.some(c => nodeMatchesFilter(c, filter)) || false;
-  };
-
-  const renderEditorNodeRows = (nodes: TemplateNode[], depth = 0, prefix: number[] = []): React.ReactNode[] =>
-    nodes
-      .filter(node => nodeMatchesFilter(node, activeHeadingLevelFilter))
-      .map((node, index) => {
-        const hasChildren = Boolean(node.children?.length);
-        const isCollapsed = collapsedNodeIds.has(node.id);
-        const nodeNumber = [...prefix, index + 1];
-        const isSelected = selectedNodeIds.has(node.id);
-        const nodeVisible = activeHeadingLevelFilter.includes(node.level);
-        return (
-          <React.Fragment key={node.id}>
-            <div
-              ref={(element) => { nodeCardRefs.current[node.id] = element; }}
-              className={`template-node-card${activeNodeId === node.id ? ' active' : ''}${nodeVisible ? '' : ' filtered-context'}`}
-              style={{ marginLeft: depth * 18 }}
-            >
-              <div className="template-node-order">
-                <input
-                  type="checkbox"
-                  className="template-node-selectbox"
-                  checked={nodeVisible && isSelected}
-                  disabled={!nodeVisible}
-                  title={nodeVisible ? '选择该筛选结果' : '仅作为层级上下文显示'}
-                  onChange={(e) => {
-                    if (!nodeVisible) return;
-                    updateTemplateNodeSelection(node.id, e.target.checked, (e.nativeEvent as MouseEvent).shiftKey);
-                  }}
-                />
-                {hasChildren ? (
-                  <Button
-                    className="template-node-collapse"
-                    type="text"
-                    size="small"
-                    icon={isCollapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
-                    onClick={() => toggleTemplateNodeCollapsed(node.id)}
-                  />
-                ) : (
-                  <span className="template-node-collapse-spacer" />
-                )}
-                <HolderOutlined className="template-node-handle" />
-                <span className="template-node-index">{nodeNumber.join('.')}</span>
-              </div>
-
-            <div className="template-node-content">
-              <Input
-                className="template-node-title-input"
-                value={node.title}
-                onChange={(e) => updateTemplateNode(node.id, { title: e.target.value })}
-                placeholder="例如：一、项目概述"
-              />
-              <div className="template-node-subline">
-                {renderLevelControl(node)}
-                <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
-                  {getTemplateNodeRuleText(node) ? '已识别章节写作规则/要求，可继续修改' : '可填写该章节的写作规则与审阅重点'}
-                </Text>
-              </div>
-              <TextArea
-                className="template-node-description-input"
-                value={getTemplateNodeRuleText(node)}
-                onChange={(e) => updateTemplateNode(node.id, { description: e.target.value, requirementText: e.target.value })}
-                placeholder="填写该章节的写作规则、内容要求、格式要求、写作方法或审阅重点"
-                autoSize={{ minRows: 1, maxRows: 4 }}
-              />
-            </div>
-
-            <div className="template-node-actions">
-              <Button
-                className={node.isRequired ? 'template-node-required active' : 'template-node-required'}
-                size="small"
-                onClick={() => updateTemplateNode(node.id, { isRequired: !node.isRequired })}
-              >
-                {node.isRequired ? '必需' : '可选'}
-              </Button>
-              <div className="template-node-move">
-                <Button
-                  type="text"
-                  size="small"
-                  disabled={!templateNodeMoveAvailability.up.has(node.id)}
-                  icon={<UpOutlined />}
-                  onClick={() => moveTemplateNode(node.id, 'up')}
-                />
-                <Button
-                  type="text"
-                  size="small"
-                  disabled={!templateNodeMoveAvailability.down.has(node.id)}
-                  icon={<DownOutlined />}
-                  onClick={() => moveTemplateNode(node.id, 'down')}
-                />
-              </div>
-              <Button
-                className="template-node-delete"
-                type="text"
-                size="small"
-                danger
-                icon={<DeleteOutlined />}
-                onClick={() => removeTemplateNode(node.id)}
-              />
-            </div>
-          </div>
-          {hasChildren && !isCollapsed && (
-            <div className="template-node-editor-children">
-              <div className="template-node-editor-children-inner">
-                {renderEditorNodeRows(node.children || [], depth + 1, nodeNumber)}
-              </div>
-            </div>
-          )}
-        </React.Fragment>
-      );
-    });
-
-  const editorNodeRows = useMemo(
-    () => renderEditorNodeRows(templateNodes),
-    [templateNodes, activeHeadingLevelFilter, collapsedNodeIds, activeNodeId, selectedNodeIds, templateType, templateNodeMoveAvailability]
-  );
-  const previewNodeRows = useMemo(
-    () => renderNodeRows(deferredPreviewNodes),
-    [deferredPreviewNodes, activeHeadingLevelFilter, collapsedNodeIds, activeNodeId, selectedNodeIds]
-  );
   const nodeTotal = useMemo(() => flattenNodeCount(templateNodes), [templateNodes]);
   const requiredTotal = useMemo(() => countRequiredNodes(templateNodes), [templateNodes]);
   const templateCardItems = useMemo(
@@ -2605,7 +1944,7 @@ ${content.slice(0, 22000)}`;
 `;
     const prompt = `${currentType === 'example' ? examplePrompt : directPrompt}${strictJsonInstruction}`;
 
-    const aiConfig = await window.electronAPI.loadAIConfig();
+    const aiConfig = requireIpcObject<AIConfig>(await window.electronAPI.loadAIConfig(), '加载 AI 配置失败');
     const useParallel = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1 && window.electronAPI.callAIParallelDetails;
     let response = '';
     let parallelEvidence: string[] = [];
@@ -3147,386 +2486,89 @@ ${content.slice(0, 22000)}`;
 
   return (
     <div className="template-manager-page">
-      <section className="template-section">
-      <div className="template-section-header" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {!hideHeader && <>
-            {onBack && <Button type="text" icon={<LeftOutlined />} onClick={onBack} />}
-            <div>
-              <Title level={4} style={{ margin: 0 }}>模板管理</Title>
-              <Text type="secondary" style={{ fontSize: 13 }}>维护写作模板结构，可从 Word、PPT、Excel、PDF、文本等文档中提取章节</Text>
-            </div>
-          </>}
-        </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
-          创建模板
-        </Button>
-      </div>
+      <TemplateCatalog
+        items={templateCardItems}
+        hideHeader={hideHeader}
+        onBack={onBack}
+        onCreate={handleCreate}
+        onEdit={handleEdit}
+        onDelete={setDeletingTemplate}
+      />
 
-      {templates.length === 0 ? (
-        <Empty description="暂无模板，请创建" />
-      ) : (
-        <List
-          className="template-card-list"
-          grid={{ gutter: 16, xs: 1, sm: 2, md: 2, lg: 3, xl: 3, xxl: 4 }}
-          pagination={templateCardItems.length > 12 ? { pageSize: 12, size: 'small', showSizeChanger: false, hideOnSinglePage: true } : false}
-          dataSource={templateCardItems}
-          renderItem={({ template, nodeCount }) => (
-            <List.Item>
-              <Card
-                className="template-card"
-                actions={[
-                  <Button
-                    key="edit"
-                    className="template-card-action"
-                    type="text"
-                    icon={<EditOutlined />}
-                    onClick={() => handleEdit(template)}
-                  />,
-                  <Button
-                    key="delete"
-                    title="确定删除此模板？"
-                    className="template-card-action"
-                    type="text"
-                    danger
-                    icon={<DeleteOutlined />}
-                    onClick={() => setDeletingTemplate(template)}
-                  />,
-                ]}
-              >
-                <Card.Meta
-                  avatar={<FileTextOutlined style={{ fontSize: 24, color: '#1677ff' }} />}
-                  title={template.name}
-                  description={
-                    <div>
-                      <Tag color="blue" style={{ marginBottom: 8 }}>{template.category}</Tag>
-                      <Tag color={template.templateType === 'example' ? 'green' : 'default'} style={{ marginBottom: 8 }}>
-                        {template.templateType === 'example' ? '范文模板' : '直接套用'}
-                      </Tag>
-                      <br />
-                      <Paragraph ellipsis={{ rows: 2 }} style={{ marginBottom: 0 }}>{template.description}</Paragraph>
-                      <br />
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {template.outputFileType?.toUpperCase() || 'DOCX'} · 包含 {nodeCount} 个章节{template.filePath ? ' · 已保存源文件' : ''}
-                      </Text>
-                      <br />
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {template.formatRules ? `已配置格式规则 · 正文 ${template.bodyFontRequirement?.fontFamily || '宋体'}` : '未配置默认格式'}
-                      </Text>
-                    </div>
-                  }
-                />
-              </Card>
-            </List.Item>
-          )}
-        />
-      )}
-      </section>
-
-      <Modal
-        className="template-editor-modal"
-        rootClassName="template-editor-modal-root"
-        title={editingTemplate ? '编辑模板' : '创建模板'}
+      <TemplateEditorModal
+        editingTemplate={editingTemplate}
         open={isModalOpen}
-        onOk={handleSubmit}
+        form={form}
+        preparing={isPreparingTemplateEditor}
+        onSubmit={() => { void handleSubmit(); }}
         onCancel={() => setIsModalOpen(false)}
-        afterClose={() => document.body.classList.remove('template-editor-modal-open')}
-        destroyOnClose
-        width="min(88vw, 1560px)"
-        okText="保存模板"
-        cancelText="取消"
-        transitionName="template-modal-motion"
-        maskTransitionName="template-modal-mask-motion"
-        style={{ top: 0, maxHeight: 'calc(100vh - 16px)' }}
-        styles={{ body: { overflow: 'hidden' } }}
-        okButtonProps={{ disabled: isPreparingTemplateEditor }}
       >
-        {isPreparingTemplateEditor ? (
-          <div className="template-editor-loading">
-            <Spin tip="正在准备模板..." />
-          </div>
-        ) : (
-        <Form form={form} layout="vertical" className="template-editor-form">
           <div className="template-editor-grid">
             <div className="template-editor-main">
               <div className="template-form-section">
-                <Text strong>基础信息</Text>
-                <div className="template-form-row">
-                  <Form.Item
-                    name="name"
-                    label="模板名称"
-                    rules={[{ required: true, message: '请输入模板名称' }]}
-                  >
-                    <Input placeholder="例如：可研报告模板" />
-                  </Form.Item>
+                <TemplateBasicInfoSection stages={allStages} fileTypeOptions={templateFileTypeOptions} />
 
-                  <Form.Item
-                    name="category"
-                    label="关联阶段"
-                    rules={[{ required: true, message: '请选择关联阶段' }]}
-                  >
-                    <Select
-                      placeholder="选择阶段"
-                      options={allStages.map(s => ({ value: s.name, label: s.name }))}
-                    />
-                  </Form.Item>
-
-                  <Form.Item
-                    name="outputFileType"
-                    label="创建文件类型"
-                    rules={[{ required: true, message: '请选择创建文件类型' }]}
-                  >
-                    <Select
-                      placeholder="选择文件类型"
-                      options={templateFileTypeOptions}
-                    />
-                  </Form.Item>
-                </div>
-
-                <Form.Item
-                  name="templateType"
-                  label="模板类型"
-                  extra="直接套用模板：要求文字作为硬性检查标准；范文模板：作为格式和风格参考，字数为建议值"
-                >
-                  <Select
-                    options={[
-                      { value: 'direct', label: '直接套用模板' },
-                      { value: 'example', label: '范文模板' },
-                    ]}
-                  />
-                </Form.Item>
-
-                <Form.Item
-                  name="description"
-                  label="模板说明"
-                >
-                  <TextArea rows={2} placeholder="简要说明模板用途、适用范围或填写要求" />
-                </Form.Item>
-
-
-                <div className="template-format-toggle">
-                  <div>
-                    <Text strong>默认格式规则</Text>
-                    <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
-                      可选；开启后会在脚本创建 Word 文档时写入标题和正文样式。
-                    </Text>
-                  </div>
-                  <Form.Item name="enableFormatRules" valuePropName="checked" style={{ margin: 0 }}>
-                    <Switch checkedChildren="启用" unCheckedChildren="关闭" />
-                  </Form.Item>
-                </div>
-
-                {enableFormatRules && formatRuleEvidence.length > 0 && (
-                  <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 10, background: '#f8fbff', marginBottom: 10 }}>
-                    <Text strong style={{ fontSize: 12 }}>格式识别依据</Text>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-                      {formatRuleEvidence.map(item => <Tag key={item} color="blue" style={{ margin: 0 }}>{item}</Tag>)}
-                    </div>
-                  </div>
-                )}
-
-                {enableFormatRules && (
-                  <div className="template-format-table">
-                    <div className="template-format-head">
-                      <span>样式</span>
-                      <span>字体</span>
-                      <span>字号</span>
-                      <span>字间距</span>
-                      <span>行间距</span>
-                      <span>字重</span>
-                    </div>
-                    {formatRuleRows.map(row => (
-                      <div className="template-format-row" key={row.key}>
-                        <Text strong style={{ fontSize: 12 }}>{row.label}</Text>
-                        <Form.Item name={['formatRules', row.key, 'fontFamily']} style={{ margin: 0 }}>
-                          <AutoComplete
-                            options={fontOptions}
-                            placeholder="字体"
-                            filterOption={(input, option) =>
-                              String(option?.value || '').toLowerCase().includes(input.toLowerCase())
-                            }
-                          />
-                        </Form.Item>
-                        <Form.Item name={['formatRules', row.key, 'fontSize']} style={{ margin: 0 }}>
-                          <Select options={fontSizeOptions} placeholder="字号" />
-                        </Form.Item>
-                        <Form.Item name={['formatRules', row.key, 'letterSpacing']} style={{ margin: 0 }}>
-                          <InputNumber min={0} max={20} step={0.5} addonAfter="pt" />
-                        </Form.Item>
-                        <Form.Item name={['formatRules', row.key, 'lineHeight']} style={{ margin: 0 }}>
-                          <InputNumber min={1} max={3} step={0.1} />
-                        </Form.Item>
-                        <Form.Item name={['formatRules', row.key, 'fontWeight']} style={{ margin: 0 }}>
-                          <Select options={[{ value: 'normal', label: '常规' }, { value: 'bold', label: '加粗' }]} />
-                        </Form.Item>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <TemplateFormatRulesSection
+                  enabled={Boolean(enableFormatRules)}
+                  evidence={formatRuleEvidence}
+                  fontOptions={fontOptions}
+                />
               </div>
 
-              <div className="template-import-panel">
-                <div>
-                  <Text strong>从文件导入结构</Text>
-                  <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 2 }}>
-                    {templateType === 'example'
-                      ? '支持导入多个范文文件；可切换查看单篇范文结构，合并结构由 AI 综合生成建议性写作大纲。'
-                      : '支持 .doc/.docx/.ppt/.pptx/.xls/.xlsx/.pdf/.txt/.md/.rtf，自动识别章节标题并保留源文件用于后续创建文件。'}
-                  </Text>
-                  {importedFiles.length > 0 && (
-                    <div style={{ marginTop: 6 }}>
-                      {importedFiles.map((f, idx) => (
-                        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                          <Text type="secondary" ellipsis style={{ flex: 1 }}>
-                            {idx + 1}. {f.fileName || f.filePath.split(/[/\\]/).pop()}
-                          </Text>
-                          <Button
-                            type="text"
-                            size="small"
-                            danger
-                            icon={<DeleteOutlined />}
-                            onClick={() => {
-                              const newFiles = importedFiles.filter((_, i) => i !== idx);
-                              setImportedFiles(newFiles);
-                              if (templateType === 'example') {
-                                setAiMergedExampleNodes([]);
-                                setAiMergedExampleEvidence('');
-                                if (newFiles.length === 0) {
-                                  setTemplateNodes([]);
-                                  setExampleStructureView('merged');
-                                } else {
-                                  const nextView = newFiles.length > 1 ? 'merged' : 'file:0';
-                                  applyExampleStructureView(nextView, newFiles);
-                                }
-                              }
-                            }}
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {templateType === 'example' && importedFiles.length > 0 && (
-                    <div className="template-example-view-switch">
-                      <Text type="secondary" style={{ fontSize: 12 }}>结构视图</Text>
-                      <Segmented
-                        size="small"
-                        value={exampleStructureView}
-                        onChange={(value) => applyExampleStructureView(String(value))}
-                        options={exampleStructureViewOptions}
-                      />
-                    </div>
-                  )}
-                </div>
-                <div className="template-import-actions">
-                  <Button
-                    block
-                    icon={<ImportOutlined />}
-                    loading={isExtracting}
-                    onClick={handleImportFromDoc}
-                  >
-                    {templateType === 'example' && importedFiles.length > 0 ? '继续添加文件' : '选择文件'}
-                  </Button>
-                  <Button
-                    block
-                    className={isAiExtracting ? 'template-ai-running-button' : undefined}
-                    disabled={importedFiles.length === 0}
-                    loading={isAiExtracting}
-                    onClick={handleAiExtract}
-                  >
-                    {isAiExtracting
-                      ? `AI识别中 ${aiExtractElapsedSeconds}s`
-                      : 'AI识别结构/规则/格式'}
-                  </Button>
-                  {(isAiExtracting || aiExtractStatus) && (
-                    <div className="template-ai-status">
-                      {isAiExtracting && <span className="template-ai-status-dot" />}
-                      <span>{aiExtractStatus || 'AI 正在运行'}</span>
-                      {isAiExtracting && (
-                        <Button
-                          type="link"
-                          size="small"
-                          className="template-ai-status-reset"
-                          onClick={() => {
-                            resetAiExtractState();
-                            message.info('已重置 AI 识别状态，可以重新点击识别');
-                          }}
-                        >
-                          重置
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
+              <TemplateImportPanel
+                templateType={templateType}
+                files={importedFiles}
+                structureView={exampleStructureView}
+                structureViewOptions={exampleStructureViewOptions}
+                extracting={isExtracting}
+                aiExtracting={isAiExtracting}
+                aiExtractStatus={aiExtractStatus}
+                aiExtractElapsedSeconds={aiExtractElapsedSeconds}
+                onRemoveFile={handleRemoveImportedFile}
+                onStructureViewChange={value => applyExampleStructureView(value)}
+                onImport={() => { void handleImportFromDoc(); }}
+                onAiExtract={() => { void handleAiExtract(); }}
+                onResetAiExtract={() => {
+                  resetAiExtractState();
+                  message.info('已重置 AI 识别状态，可以重新点击识别');
+                }}
+              />
 
           {/* 模板结构编辑器 */}
           <div className="template-node-editor" style={{ marginBottom: 16 }}>
-            <div className="template-node-toolbar">
-              <div className="template-node-toolbar-title">
-                <div className="template-node-bulk-select">
-                  <input
-                    type="checkbox"
-                    className="template-node-selectbox"
-                    checked={allFilteredSelected}
-                    ref={el => { if (el) el.indeterminate = someFilteredSelected; }}
-                    disabled={filteredNodeIds.length === 0}
-                    onChange={toggleSelectFilteredNodes}
-                  />
-                </div>
-                <div>
-                  <Text strong>模板章节结构</Text>
-                  <div className="template-node-toolbar-meta">
-                    <span>共 {nodeTotal} 个章节</span>
-                    <span>{requiredTotal} 个必需项</span>
-                    <span>当前筛选 {filteredNodeIds.length} 项</span>
-                    {selectedFilteredCount > 0 && <Tag color="blue">已选 {selectedFilteredCount} 项</Tag>}
-                    {selectedCascadeCount > selectedFilteredCount && <Tag color="orange">含子章节共 {selectedCascadeCount} 项</Tag>}
-                  </div>
-                </div>
-              </div>
-              <Space wrap size={8}>
-                {availableLevels.length > 0 && (
-                  <Select
-                    mode="multiple"
-                    size="small"
-                    className="template-node-filter-select"
-                    placeholder="筛选标题级别"
-                    value={activeHeadingLevelFilter}
-                    onChange={handleHeadingLevelFilterChange}
-                    maxTagCount={2}
-                    options={availableLevels.map(l => ({ value: l, label: `${['一','二','三','四'][l - 1] || l}级标题` }))}
-                  />
-                )}
-                <Button
-                  size="small"
-                  disabled={filteredNodeIds.length === 0}
-                  onClick={toggleSelectFilteredNodes}
-                >
-                  {allFilteredSelected ? '取消全选' : '全选筛选结果'}
-                </Button>
-                {selectedFilteredCount > 0 && (
-                  <Popconfirm
-                    title={`确定删除当前选中的 ${selectedFilteredCount} 个筛选结果？`}
-                    description={selectedCascadeCount > selectedFilteredCount ? `其中包含父章节，删除后会连同子章节共删除 ${selectedCascadeCount} 个章节。` : '删除后会重新计算模板结构。'}
-                    onConfirm={deleteSelectedTemplateNodes}
-                  >
-                    <Button size="small" danger>
-                      删除选中 ({selectedFilteredCount})
-                    </Button>
-                  </Popconfirm>
-                )}
-                <Button
-                  type="dashed"
-                  size="small"
-                  icon={<PlusOutlined />}
-                  onClick={addTemplateNode}
-                >
-                  添加章节
-                </Button>
-              </Space>
-            </div>
+            <TemplateStructureToolbar
+              allFilteredSelected={allFilteredSelected}
+              someFilteredSelected={someFilteredSelected}
+              filteredCount={filteredNodeIds.length}
+              nodeTotal={nodeTotal}
+              requiredTotal={requiredTotal}
+              selectedFilteredCount={selectedFilteredCount}
+              selectedCascadeCount={selectedCascadeCount}
+              availableLevels={availableLevels}
+              activeLevels={activeHeadingLevelFilter}
+              onToggleFilteredSelection={toggleSelectFilteredNodes}
+              onLevelsChange={handleHeadingLevelFilterChange}
+              onDeleteSelected={deleteSelectedTemplateNodes}
+              onAddNode={addTemplateNode}
+            />
             <div className="template-node-list">
-              {editorNodeRows}
+              <TemplateEditorNodeRows
+                nodes={templateNodes}
+                activeLevels={activeHeadingLevelFilter}
+                collapsedNodeIds={collapsedNodeIds}
+                activeNodeId={activeNodeId}
+                selectedNodeIds={selectedNodeIds}
+                canMoveUp={nodeId => templateNodeMoveAvailability.up.has(nodeId)}
+                canMoveDown={nodeId => templateNodeMoveAvailability.down.has(nodeId)}
+                getRuleText={getTemplateNodeRuleText}
+                onCardRef={(nodeId, element) => { nodeCardRefs.current[nodeId] = element; }}
+                onToggleCollapsed={toggleTemplateNodeCollapsed}
+                onSelectionChange={updateTemplateNodeSelection}
+                onUpdate={updateTemplateNode}
+                onLevelChange={updateTemplateNodeLevel}
+                onMove={moveTemplateNode}
+                onRemove={removeTemplateNode}
+              />
             </div>
             {templateNodes.length === 0 && (
               <div style={{ textAlign: 'center', padding: 16, color: '#999', fontSize: 12 }}>
@@ -3538,130 +2580,44 @@ ${content.slice(0, 22000)}`;
             </Text>
           </div>
             </div>
-            <div className="template-editor-side">
-              <Text strong>结构预览</Text>
-              <div className="template-node-preview">
-                {templateNodes.length > 0 ? previewNodeRows : (
-                  <Text type="secondary" style={{ fontSize: 12 }}>暂无章节</Text>
-                )}
-              </div>
-            </div>
-          </div>
-        </Form>
-        )}
-      </Modal>
-
-      <Modal
-        title="删除模板"
-        open={Boolean(deletingTemplate)}
-        onOk={() => deletingTemplate && handleDelete(deletingTemplate.id)}
-        onCancel={() => setDeletingTemplate(null)}
-        okText="删除"
-        cancelText="取消"
-        okButtonProps={{ danger: true }}
-      >
-        <Text>
-          确定删除“{deletingTemplate?.name}”吗？此操作不会删除已保存的项目文档。
-        </Text>
-      </Modal>
-
-      {/* ========== 项目阶段管理 ========== */}
-      <Divider className="template-page-divider" />
-      <section className="template-section stage-section">
-        <div className="template-section-header" style={{ marginBottom: isStageSectionExpanded ? 16 : 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <Title level={4} style={{ margin: 0 }}>项目阶段管理</Title>
-            <Text type="secondary" style={{ fontSize: 13 }}>
-              阶段会参与文件识别、进度计算、统计卡片、甘特图和项目表；列表已按需展开，避免进入模板页时卡顿。
-            </Text>
-          </div>
-          <Space>
-            <Button onClick={() => setIsStageSectionExpanded(prev => !prev)}>
-              {isStageSectionExpanded ? '收起阶段' : `展开阶段（${allStages.length}）`}
-            </Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateStage}>
-              新增阶段
-            </Button>
-          </Space>
-        </div>
-
-        {isStageSectionExpanded && (
-          <>
-            <Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 13 }}>
-              新增或修改阶段后，系统会重新扫描所有项目文件夹，并按新的阶段规则刷新项目进度。
-            </Text>
-
-            <List
-              className="stage-list"
-              dataSource={allStages}
-              renderItem={(stage) => (
-                <List.Item
-                  actions={[
-                    <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEditStage(stage)}>编辑</Button>,
-                    <Popconfirm title="确定删除此阶段？删除后会重新计算所有项目进度。" onConfirm={() => handleDeleteStage(stage.id)}>
-                      <Button type="link" danger size="small" icon={<DeleteOutlined />}>删除</Button>
-                    </Popconfirm>,
-                  ]}
-                >
-                  <List.Item.Meta
-                    avatar={
-                      <div style={{
-                        width: 32, height: 32, borderRadius: 6,
-                        background: stage.color,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        color: '#fff', fontSize: 14, fontWeight: 'bold',
-                      }}>
-                        {stage.name.charAt(0)}
-                      </div>
-                    }
-                    title={stage.name}
-                    description={
-                      <span style={{ fontSize: 12, color: '#999' }}>
-                        关键词：{stage.keywords.length > 0 ? stage.keywords.join('、') : '（无）'}
-                      </span>
-                    }
-                  />
-                </List.Item>
+            <TemplateStructurePreview
+              hasNodes={templateNodes.length > 0}
+              rows={(
+                <TemplatePreviewNodeRows
+                  nodes={deferredPreviewNodes}
+                  activeLevels={activeHeadingLevelFilter}
+                  collapsedNodeIds={collapsedNodeIds}
+                  activeNodeId={activeNodeId}
+                  selectedNodeIds={selectedNodeIds}
+                  onToggleCollapsed={toggleTemplateNodeCollapsed}
+                  onSelectionChange={updateTemplateNodeSelection}
+                  onFocus={focusTemplateNode}
+                />
               )}
             />
-          </>
-        )}
-      </section>
+          </div>
+      </TemplateEditorModal>
 
-      {/* 新增/编辑阶段弹窗 */}
-      <Modal
-        title={editingStage ? '编辑阶段' : '新增阶段'}
+      <TemplateDeleteModal
+        template={deletingTemplate}
+        onDelete={template => { void handleDelete(template.id); }}
+        onCancel={() => setDeletingTemplate(null)}
+      />
+
+      <ProjectStageSection
+        stages={allStages}
+        onCreate={handleCreateStage}
+        onEdit={handleEditStage}
+        onDelete={stageId => { void handleDeleteStage(stageId); }}
+      />
+
+      <ProjectStageModal
+        editingStage={editingStage}
         open={isStageModalOpen}
-        onOk={handleStageSubmit}
+        form={stageForm}
+        onSubmit={() => { void handleStageSubmit(); }}
         onCancel={() => setIsStageModalOpen(false)}
-        okText="保存"
-        cancelText="取消"
-        width={420}
-      >
-        <Form form={stageForm} layout="vertical">
-          <Form.Item
-            name="name"
-            label="阶段名称"
-            rules={[{ required: true, message: '请输入阶段名称' }]}
-          >
-            <Input placeholder="例如：立项、招标、验收" />
-          </Form.Item>
-          <Form.Item
-            name="keywords"
-            label="识别关键词"
-            extra="多个关键词用逗号分隔，文件名包含任一关键词即识别为该阶段"
-          >
-            <Input placeholder="例如：立项, 招标, 验收" />
-          </Form.Item>
-          <Form.Item
-            name="color"
-            label="阶段颜色"
-            rules={[{ required: true, message: '请选择颜色' }]}
-          >
-            <ColorPicker format="hex" showText />
-          </Form.Item>
-        </Form>
-      </Modal>
+      />
     </div>
   );
 };

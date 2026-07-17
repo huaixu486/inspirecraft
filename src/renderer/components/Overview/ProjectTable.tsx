@@ -779,7 +779,7 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => 
       bordered={false}
       style={{}}
       extra={
-        <Space size={4}>
+        <Space size={4} className="overview-project-actions">
           <Input
             allowClear
             size="small"

@@ -3,9 +3,10 @@ import {
   Card, Form, Input, Select, Button, Typography, message, Space,
   InputNumber, Checkbox, Alert,
 } from 'antd';
-import { SaveOutlined, ApiOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons';
+import { SaveOutlined, ApiOutlined, PlusOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons';
 import { AIConfig, AIModelConfig, AIProvider } from '../../../shared/types';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
+import { assertIpcMutationSucceeded } from '../../utils/ipcResult';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -39,7 +40,7 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
   });
 
   const makeDefaultModel = (): AIModelConfig => ({
-    id: `model-${Date.now()}`,
+    id: `model-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     name: '',
     provider: 'openai' as AIProvider,
     apiKey: '',
@@ -52,7 +53,8 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
     setIsLoading(true);
     try {
       const normalized = normalizeAIConfig(values);
-      await window.electronAPI.saveAIConfig(normalized);
+      const result = await window.electronAPI.saveAIConfig(normalized);
+      assertIpcMutationSucceeded(result, '保存 AI 配置失败');
       onConfigChange(normalized);
       message.success('AI 配置已保存');
     } catch {
@@ -65,6 +67,11 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
   const handleTest = async () => {
     setIsTesting(true);
     try {
+      const values = await form.validateFields();
+      const normalized = normalizeAIConfig(values);
+      const saveResult = await window.electronAPI.saveAIConfig(normalized);
+      assertIpcMutationSucceeded(saveResult, '测试前保存 AI 配置失败');
+      onConfigChange(normalized);
       await useAIJobStore.getState().runAIJob<string>(
         {
           scene: 'general',
@@ -81,7 +88,9 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
       );
       message.success('AI 连接正常');
     } catch (error: any) {
-      if (isAIJobCancelledError(error)) {
+      if (error?.errorFields) {
+        message.warning('请先完整填写接口和模型信息');
+      } else if (isAIJobCancelledError(error)) {
         message.info('已取消 AI 连接测试');
       } else {
         message.error('连接失败：' + (error.message || String(error)));
@@ -94,6 +103,11 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
   const handleTestModel = async (index: number) => {
     setTestingModelId(`model-${index}`);
     try {
+      const values = await form.validateFields();
+      const normalized = normalizeAIConfig(values);
+      const saveResult = await window.electronAPI.saveAIConfig(normalized);
+      assertIpcMutationSucceeded(saveResult, '测试前保存 AI 配置失败');
+      onConfigChange(normalized);
       await useAIJobStore.getState().runAIJob<string>(
         {
           scene: 'general',
@@ -113,7 +127,8 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
       );
       message.success('模型连接正常');
     } catch (error: any) {
-      message.error('连接失败：' + (error.message || String(error)));
+      if (error?.errorFields) message.warning('请先完整填写该接口和模型信息');
+      else message.error('连接失败：' + (error.message || String(error)));
     } finally {
       setTestingModelId(null);
     }
@@ -174,8 +189,11 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
             {(fields, { add, remove }) => (
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                  <Text strong>模型配置</Text>
-                  <Button icon={<PlusOutlined />} onClick={() => add(makeDefaultModel())}>添加模型</Button>
+                  <div>
+                    <Text strong style={{ display: 'block' }}>接口与模型配置</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>一个接口可配置多个模型；使用“添加同接口模型”会自动复用供应商、密钥和端点。</Text>
+                  </div>
+                  <Button icon={<PlusOutlined />} onClick={() => add(makeDefaultModel())}>添加新接口/模型</Button>
                 </div>
                 {fields.map((field, index) => {
                   const model = watchedModels?.[field.name];
@@ -188,6 +206,20 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
                       extra={
                         <Space>
                           <Button size="small" icon={<ApiOutlined />} loading={testingModelId === `model-${index}`} onClick={() => handleTestModel(index)}>测试</Button>
+                          <Button
+                            size="small"
+                            icon={<CopyOutlined />}
+                            onClick={() => {
+                              const source = form.getFieldValue(['models', field.name]) as AIModelConfig | undefined;
+                              add({
+                                ...makeDefaultModel(),
+                                provider: source?.provider || 'openai',
+                                apiKey: source?.apiKey || '',
+                                endpoint: source?.endpoint || '',
+                              }, field.name + 1);
+                              message.success('已添加同接口模型，请填写新的模型名称');
+                            }}
+                          >添加同接口模型</Button>
                           <Form.Item name={[field.name, 'enabled']} valuePropName="checked" style={{ margin: 0 }}><Checkbox>启用</Checkbox></Form.Item>
                           <Button danger size="small" icon={<DeleteOutlined />} onClick={() => remove(field.name)} />
                         </Space>
@@ -195,14 +227,16 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
                     >
                       <Form.Item name={[field.name, 'id']} hidden><Input /></Form.Item>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                        <Form.Item name={[field.name, 'name']} label="显示名称"><Input placeholder="我的模型" /></Form.Item>
-                        <Form.Item name={[field.name, 'provider']} label="提供商">
+                        <Form.Item name={[field.name, 'name']} label="显示名称"><Input placeholder="例如：日常写作模型" /></Form.Item>
+                        <Form.Item name={[field.name, 'provider']} label="接口类型" rules={[{ required: true, message: '请选择接口类型' }]}>
                           <Select options={[{ value: 'claude', label: 'Claude' }, { value: 'openai', label: 'OpenAI' }, { value: 'custom', label: '自定义' }]} />
                         </Form.Item>
-                        <Form.Item name={[field.name, 'apiKey']} label="API Key"><Input.Password placeholder="sk-..." /></Form.Item>
-                        <Form.Item name={[field.name, 'model']} label="模型名称"><Input placeholder={provider === 'claude' ? 'claude-sonnet-4-20250514' : 'gpt-4o'} /></Form.Item>
+                        <Form.Item name={[field.name, 'apiKey']} label="API Key" rules={[{ required: true, message: '请输入 API Key' }]}><Input.Password placeholder="sk-..." /></Form.Item>
+                        <Form.Item name={[field.name, 'model']} label="模型标识" rules={[{ required: true, message: '请输入接口支持的模型标识' }]} extra="填写接口实际接受的 model 值，例如 gpt-4o、deepseek-chat。">
+                          <Input placeholder={provider === 'claude' ? 'claude-sonnet-4-20250514' : 'gpt-4o'} />
+                        </Form.Item>
                         {provider === 'custom' && (
-                          <Form.Item name={[field.name, 'endpoint']} label="自定义端点" style={{ gridColumn: '1 / -1' }}><Input placeholder="https://api.example.com/v1/chat/completions" /></Form.Item>
+                          <Form.Item name={[field.name, 'endpoint']} label="接口端点" rules={[{ required: true, message: '请输入接口端点' }]} style={{ gridColumn: '1 / -1' }}><Input placeholder="https://api.example.com/v1/chat/completions" /></Form.Item>
                         )}
                       </div>
                     </Card>
@@ -228,7 +262,7 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
           <li><Text strong>OpenAI</Text>: 访问 <Text code>platform.openai.com</Text> 获取 API Key</li>
           <li><Text strong>自定义</Text>: 支持任何兼容 OpenAI 格式的 API 端点</li>
         </ul>
-        <Alert message="安全提示" description="API Key 将保存在本地配置文件中，请勿分享或泄露。" type="warning" showIcon style={{ marginTop: 16 }} />
+        <Alert message="安全提示" description="API Key 使用系统安全存储加密后保存在本机，请勿通过截图、日志或聊天分享密钥。" type="warning" showIcon style={{ marginTop: 16 }} />
       </Card>
     </>
   );

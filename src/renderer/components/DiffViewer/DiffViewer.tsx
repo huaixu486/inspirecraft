@@ -5,7 +5,7 @@ import { DocumentVersion, ProjectDocument } from '../../../shared/types';
 import { useProjectStore } from '../../stores/projectStore';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
-import { composePrompt } from '../../utils/promptComposer';
+import { composePromptAsync } from '../../utils/promptComposer';
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -307,7 +307,7 @@ const buildDifferences = (versionA?: ComparableDocument, versionB?: ComparableDo
   return differences;
 };
 
-const buildAiPrompt = (versionA: ComparableDocument, versionB: ComparableDocument, differences: DifferenceItem[]) => {
+const buildAiPrompt = async (versionA: ComparableDocument, versionB: ComparableDocument, differences: DifferenceItem[]) => {
   const diffText = differences.slice(0, 30).map((item, index) => [
     `${index + 1}. [${kindMeta[item.kind].label}/${severityMeta[item.severity].label}] ${item.title}`,
     item.detail,
@@ -315,7 +315,7 @@ const buildAiPrompt = (versionA: ComparableDocument, versionB: ComparableDocumen
     item.after ? `B: ${item.after}` : '',
   ].filter(Boolean).join('\n')).join('\n\n');
 
-  return composePrompt('diff', {
+  return composePromptAsync('diff', {
     versionAName: `${versionA.fileName}，时间：${formatDate(versionA.updatedAt || versionA.createdAt)}`,
     contentA: diffText || '未发现明显差异。',
     versionBName: `${versionB.fileName}，时间：${formatDate(versionB.updatedAt || versionB.createdAt)}`,
@@ -444,7 +444,8 @@ const VersionCompareViewer: React.FC<{ onBack?: () => void }> = ({ onBack }) => 
         },
         async ({ setProgress, throwIfCancelled }) => {
           setProgress(35);
-          const value = await window.electronAPI.callAI(buildAiPrompt(versionA, versionB, differences));
+          const prompt = await buildAiPrompt(versionA, versionB, differences);
+          const value = await window.electronAPI.callAI(prompt);
           throwIfCancelled();
           setProgress(85);
           return String(value || '');

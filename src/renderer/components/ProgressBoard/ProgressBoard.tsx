@@ -1,25 +1,26 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Card, Progress, List, Tag, Typography, Empty, Space, Divider, Select, Input, message, Alert } from 'antd';
-import {
-  CheckCircleOutlined,
-  ClockCircleOutlined,
-  ExclamationCircleOutlined,
-  FileTextOutlined,
-  LeftOutlined,
-  TeamOutlined,
-  EditOutlined,
-} from '@ant-design/icons';
-
-const { TextArea } = Input;
-import dayjs from 'dayjs';
+import { Button, Empty, Space, Tag, Typography, message } from 'antd';
+import { FileTextOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
 import { useTemplateStore } from '../../stores/templateStore';
-import { buildProjectStageSegments, getAllStages, getProjectProgress, getStageMeta } from '../../utils/timelineStages';
-import { composePrompt } from '../../utils/promptComposer';
+import { useKnowledgeStore } from '../../stores/knowledgeStore';
+import { useStageLifecycleStore } from '../../stores/stageLifecycleStore';
+import { useNavigationStore } from '../../stores/navigationStore';
+import { getAllStages, getProjectProgress } from '../../utils/timelineStages';
+import { composePromptAsync } from '../../utils/promptComposer';
+import { buildQuickDraftTaskInstructions, buildQuickDraftTemplateContext } from '../../utils/quickDraftPrompt';
+import { mapDraftToTemplateSections } from '../../utils/draftSectionMapper';
+import { isRevisionWorkflowFocus } from '../../utils/workflowTaskRouting';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
+import { type CollaborationActivity, useCollaborationActivityStore } from '../../stores/collaborationActivityStore';
+import { pickProjectFiles } from '../../stores/projectPickerStore';
+import TeamWritingStudio from './studios/TeamWritingStudio';
+import RevisionStudio from './studios/RevisionStudio';
+import CollaborationDispatch from './studios/CollaborationDispatch';
+import ExecutionHistory from './studios/ExecutionHistory';
 
 const { Text, Title } = Typography;
 
@@ -28,742 +29,615 @@ interface ProgressBoardProps {
   hideHeader?: boolean;
 }
 
-type AiRewritePreview = {
-  id: string;
-  title: string;
-  original: string;
-  replacement: string;
-  reason?: string;
-  status?: 'pending' | 'accepted';
-};
+type ExternalReference = { path: string; name: string; content?: string };
+
+const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
 
 const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack, hideHeader = false }) => {
-  const {
-    currentProject,
-    versions,
-    pendingWorkflowFocus,
-    setPendingWorkflowFocus,
-    setCurrentStageName,
-    loadVersions,
-  } = useProjectStore();
+  const { currentProject, versions, setCurrentStageName, loadVersions } = useProjectStore();
+  const pendingWorkflowFocus = useNavigationStore(state => state.activeFocus);
+  const acknowledgeWorkflowFocus = useNavigationStore(state => state.acknowledgeActiveFocus);
   const { projectDocs, loadProjectDocs } = useProjectDocStore();
-  const { customStages, userProfile } = useSettingsStore();
-  const { tasks, loadTasks } = useTaskStore();
+  const { customStages } = useSettingsStore();
+  const { tasks, loadTasks, updateTask, setTaskExecutor } = useTaskStore();
   const { templates, reviews, loadTemplates, loadReviews } = useTemplateStore();
-  const [selectedWritingTemplateId, setSelectedWritingTemplateId] = useState<string>('');
+  const { stageMemories, loadKnowledge } = useKnowledgeStore();
+  const removeStageMemory = useStageLifecycleStore(state => state.removeStageMemory);
+  const collaborationActivities = useCollaborationActivityStore(state => state.activities);
+  const recordActivity = useCollaborationActivityStore(state => state.recordActivity);
+
+  const [selectedWritingTemplateId, setSelectedWritingTemplateId] = useState('');
   const [selectedWritingDocIds, setSelectedWritingDocIds] = useState<string[]>([]);
-  const [writingContent, setWritingContent] = useState('');
+  const [externalReferences, setExternalReferences] = useState<ExternalReference[]>([]);
+  const [writingInstruction, setWritingInstruction] = useState('');
+  const [writingDraft, setWritingDraft] = useState('');
   const [workflowPromptSuggestion, setWorkflowPromptSuggestion] = useState('');
   const [focusedWorkflowTaskId, setFocusedWorkflowTaskId] = useState('');
-  const [aiRewritePreviews, setAiRewritePreviews] = useState<AiRewritePreview[]>([]);
-  const [isGeneratingRewritePlan, setIsGeneratingRewritePlan] = useState(false);
-  const [applyingRewriteId, setApplyingRewriteId] = useState('');
-  const [collaborationStatus, setCollaborationStatus] = useState<{ running: boolean; port?: number; urls?: string[]; addresses?: string[] }>({ running: false });
-  const [lanPeers, setLanPeers] = useState<CollaborationPeerInfo[]>([]);
-  const [lanFriends, setLanFriends] = useState<CollaborationPeerInfo[]>([]);
-  const [selectedFriendId, setSelectedFriendId] = useState('');
-  const [sendingTaskId, setSendingTaskId] = useState('');
+  const [isGeneratingDraft, setIsGeneratingDraft] = useState(false);
+  const [excludedMemoryIds, setExcludedMemoryIds] = useState<string[]>([]);
+
+  const [selectedRevisionDocId, setSelectedRevisionDocId] = useState('');
+  const [revisionDocumentContent, setRevisionDocumentContent] = useState('');
+  const [revisionSelection, setRevisionSelection] = useState('');
+  const [revisionRange, setRevisionRange] = useState<{ start: number; end: number } | null>(null);
+  const [revisionInstruction, setRevisionInstruction] = useState('');
+  const [revisionPromptSuggestion, setRevisionPromptSuggestion] = useState('');
+  const [revisionProposal, setRevisionProposal] = useState('');
+  const [revisionProposalSelection, setRevisionProposalSelection] = useState('');
+  const [revisionModalOpen, setRevisionModalOpen] = useState(false);
+  const [isGeneratingRevision, setIsGeneratingRevision] = useState(false);
+  const [isApplyingRevision, setIsApplyingRevision] = useState(false);
+  const [collaborationFriends, setCollaborationFriends] = useState<CollaborationPeerInfo[]>([]);
+  const [selectedDispatchTaskIds, setSelectedDispatchTaskIds] = useState<string[]>([]);
+  const [selectedDispatchFriendId, setSelectedDispatchFriendId] = useState('');
+  const [attachTaskFile, setAttachTaskFile] = useState(true);
+  const [isSendingTask, setIsSendingTask] = useState(false);
   const writingStudioRef = useRef<HTMLDivElement>(null);
+  const revisionStudioRef = useRef<HTMLDivElement>(null);
+  const collaborationStudioRef = useRef<HTMLDivElement>(null);
 
-  const refreshCollaborationStatus = async () => {
-    const result = await window.electronAPI.getCollaborationStatus?.();
-    if (result?.success) {
-      setCollaborationStatus({
-        running: Boolean(result.running),
-        port: result.port,
-        urls: result.urls || [],
-        addresses: result.addresses || [],
-      });
-      setLanPeers(result.peers || []);
-      setLanFriends(result.friends || []);
+  useEffect(() => {
+    void Promise.all([loadProjectDocs(), loadTasks(), loadTemplates(), loadReviews(), loadKnowledge()]);
+    void window.electronAPI.listCollaborationFriends?.().then(result => {
+      if (result?.success) setCollaborationFriends(result.friends || []);
+    });
+  }, []);
+
+  const allStages = useMemo(() => getAllStages(customStages), [customStages]);
+  const projectVersions = useMemo(() => currentProject ? versions.filter(v => v.projectId === currentProject.id) : [], [currentProject, versions]);
+  const projectDocsList = useMemo(() => currentProject ? projectDocs.filter(d => d.projectId === currentProject.id) : [], [currentProject, projectDocs]);
+  const projectTasks = useMemo(() => currentProject ? tasks.filter(t => t.projectId === currentProject.id) : [], [currentProject, tasks]);
+  const projectReviews = useMemo(() => currentProject ? reviews.filter(r => r.projectId === currentProject.id) : [], [currentProject, reviews]);
+  const projectMemories = useMemo(() => currentProject ? stageMemories.filter(memory => memory.projectId === currentProject.id) : [], [currentProject, stageMemories]);
+  const enabledProjectMemories = useMemo(() => projectMemories.filter(memory => !excludedMemoryIds.includes(memory.id)), [excludedMemoryIds, projectMemories]);
+  const selectedWritingTemplate = templates.find(template => template.id === selectedWritingTemplateId);
+  const selectedRevisionDoc = projectDocsList.find(doc => doc.id === selectedRevisionDocId);
+  const selectedRevisionDocPath = selectedRevisionDoc ? (selectedRevisionDoc.sourceFilePath || projectVersions.find(version => version.id === selectedRevisionDoc.versionId)?.filePath || '') : '';
+  const projectProgress = currentProject ? getProjectProgress(currentProject, projectDocsList, templates, projectVersions, allStages) : 0;
+  const openTasks = useMemo(() => projectTasks.filter(task => task.status !== 'completed'), [projectTasks]);
+  const highPriorityTasks = useMemo(() => openTasks.filter(task => task.priority === 'high'), [openTasks]);
+  const latestReview = [...projectReviews].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+  const dispatchableTasks = useMemo(() => openTasks
+    .filter(task => {
+      const isAggregateReportTask = task.source === 'report' && !task.workflowId;
+      return !isAggregateReportTask;
+    })
+    .sort((a, b) =>
+      Number(b.source === 'review') - Number(a.source === 'review')
+      || Number(b.priority === 'high') - Number(a.priority === 'high')
+      || (a.workflowOrder || Number.MAX_SAFE_INTEGER) - (b.workflowOrder || Number.MAX_SAFE_INTEGER)
+    ),
+  [openTasks]);
+  const selectedDispatchTasks = dispatchableTasks.filter(task => selectedDispatchTaskIds.includes(task.id));
+  const getDispatchTaskPath = (task: (typeof dispatchableTasks)[number]) => {
+    const document = task.relatedDocId ? projectDocsList.find(doc => doc.id === task.relatedDocId) : undefined;
+    const version = document?.versionId ? projectVersions.find(item => item.id === document.versionId) : undefined;
+    return document?.sourceFilePath || version?.filePath || '';
+  };
+  const selectedDispatchPaths = [...new Set(selectedDispatchTasks.map(getDispatchTaskPath).filter(Boolean))];
+
+  useEffect(() => {
+    const validIds = selectedDispatchTaskIds.filter(id => dispatchableTasks.some(task => task.id === id));
+    if (validIds.length !== selectedDispatchTaskIds.length || validIds.some((id, index) => id !== selectedDispatchTaskIds[index])) {
+      setSelectedDispatchTaskIds(validIds);
     }
+  }, [dispatchableTasks, selectedDispatchTaskIds]);
+
+  const handleToggleDispatchTask = (taskId: string) => {
+    setSelectedDispatchTaskIds(ids => ids.includes(taskId) ? ids.filter(id => id !== taskId) : [...ids, taskId]);
   };
 
-  const handleStartCollaborationReceiver = async () => {
-    const result = await window.electronAPI.startCollaborationReceiver?.();
-    if (!result?.success) {
-      message.error(result?.error || '局域网接收服务启动失败');
+  const handleToggleAllDispatchTasks = (selected: boolean) => {
+    setSelectedDispatchTaskIds(selected ? dispatchableTasks.map(task => task.id) : []);
+  };
+
+  const handleSendCollaborationTask = async () => {
+    if (!currentProject || selectedDispatchTasks.length === 0 || !selectedDispatchFriendId) {
+      message.warning('请选择至少一个任务和在线好友');
       return;
     }
-    setCollaborationStatus({ running: true, port: result.port, urls: result.urls || [], addresses: result.addresses || [] });
-    setLanPeers(result.peers || []);
-    setLanFriends(result.friends || []);
-    message.success('已开启局域网任务接收');
-  };
-
-  const handleStopCollaborationReceiver = async () => {
-    const result = await window.electronAPI.stopCollaborationReceiver?.();
-    if (!result?.success) {
-      message.error(result?.error || '局域网接收服务停止失败');
+    const friend = collaborationFriends.find(item => item.id === selectedDispatchFriendId);
+    if (!friend?.online) {
+      message.warning('请选择在线好友');
       return;
     }
-    setCollaborationStatus({ running: false });
-  };
-
-  const handleAddCollaborationFriend = async (peer: CollaborationPeerInfo) => {
-    const result = await window.electronAPI.addCollaborationFriend?.(peer);
-    if (!result?.success) {
-      message.error(result?.error || '添加好友失败');
-      return;
-    }
-    setLanFriends(result.friends || []);
-    setLanPeers(prev => prev.map(item => item.id === peer.id ? { ...item, added: true } : item));
-    message.success('已添加局域网好友');
-  };
-
-  const handleRemoveCollaborationFriend = async (friendId: string) => {
-    const result = await window.electronAPI.removeCollaborationFriend?.(friendId);
-    if (!result?.success) {
-      message.error(result?.error || '移除好友失败');
-      return;
-    }
-    setLanFriends(result.friends || []);
-    if (selectedFriendId === friendId) setSelectedFriendId('');
-  };
-
-  const parseAiRewritePreviews = (raw: string): AiRewritePreview[] => {
-    const text = String(raw || '').trim();
-    const jsonText = text.match(/\[[\s\S]*\]/)?.[0] || text.match(/\{[\s\S]*\}/)?.[0] || '';
-    try {
-      const parsed = JSON.parse(jsonText);
-      const items = Array.isArray(parsed) ? parsed : Array.isArray(parsed.items) ? parsed.items : [];
-      return items
-        .map((item: any, index: number) => ({
-          id: 'team-rewrite-' + Date.now() + '-' + index,
-          title: String(item.title || item.section || '修改建议 ' + (index + 1)).trim(),
-          original: String(item.original || item.originalText || '').trim(),
-          replacement: String(item.replacement || item.revised || item.revisedText || item.suggestion || '').trim(),
-          reason: String(item.reason || item.explanation || '').trim(),
-          status: 'pending' as const,
-        }))
-        .filter((item: AiRewritePreview) => item.original && item.replacement);
-    } catch {
-      return [];
-    }
-  };
-
-  const updateAiRewritePreview = (id: string, updates: Partial<AiRewritePreview>) => {
-    setAiRewritePreviews(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
-  };
-
-  const getTargetWritingDoc = () => {
-    const docId = selectedWritingDocIds[0];
-    return docId ? projectDocsList.find(doc => doc.id === docId) : undefined;
-  };
-
-  const getTargetWritingDocPath = () => {
-    const doc = getTargetWritingDoc();
-    if (!doc) return '';
-    const version = doc.versionId ? projectVersions.find(item => item.id === doc.versionId) : undefined;
-    return doc.sourceFilePath || version?.filePath || '';
-  };
-
-  const handleGenerateRewritePlan = async () => {
-    const instruction = (writingContent || workflowPromptSuggestion).trim();
-    const filePath = getTargetWritingDocPath();
-    if (!filePath) {
-      message.warning('请先在参考文档中选择要修改的文档');
-      return;
-    }
-    if (!instruction) {
-      message.warning('请先填写或按 Tab 填充工作流提示词');
-      return;
-    }
-
-    setIsGeneratingRewritePlan(true);
-    try {
-      const parsed = await window.electronAPI.parseDocument(filePath);
-      if (!parsed.success || !parsed.content) {
-        message.error(parsed.error || '未能读取文档内容');
-        return;
+    setIsSendingTask(true);
+    const sentFilePaths = new Set<string>();
+    const succeededTaskIds: string[] = [];
+    const failedTasks: Array<{ title: string; error: string }> = [];
+    for (const selectedTask of selectedDispatchTasks) {
+      try {
+        const attachmentPath = attachTaskFile ? getDispatchTaskPath(selectedTask) : '';
+        const attachmentName = attachmentPath ? fileName(attachmentPath) : undefined;
+        if (attachmentPath && !sentFilePaths.has(attachmentPath)) {
+          const fileResult = await window.electronAPI.sendCollaborationFile?.({ friendId: friend.id, filePath: attachmentPath, projectName: currentProject.name });
+          if (!fileResult?.success) throw new Error(fileResult?.error || '关联文件发送失败');
+          sentFilePaths.add(attachmentPath);
+        }
+        const task = {
+          ...selectedTask,
+          description: [
+            selectedTask.description,
+            selectedTask.source === 'review' ? `审查问题定位：${selectedTask.sectionTitle || '未标注章节'}` : '',
+            selectedTask.sourceLineNumber ? `原始行号：第 ${selectedTask.sourceLineNumber} 行` : '',
+          ].filter(Boolean).join('\n'),
+        };
+        const result = await window.electronAPI.sendCollaborationTask?.({ friendId: friend.id, task, projectName: currentProject.name, attachmentName });
+        if (!result?.success) throw new Error(result?.error || '任务发送失败');
+        await setTaskExecutor(selectedTask.id, 'friend');
+        await updateTask(selectedTask.id, { action: 'dispatch', updatedAt: new Date().toISOString() });
+        succeededTaskIds.push(selectedTask.id);
+        recordActivity({
+          projectId: currentProject.id,
+          projectName: currentProject.name,
+          kind: 'friend',
+          status: 'success',
+          title: `已发送给 ${friend.name || friend.email || '好友'}`,
+          detail: `${selectedTask.title}${attachmentName ? ` · 附件 ${attachmentName}` : ''}`,
+        });
+      } catch (error: any) {
+        failedTasks.push({ title: selectedTask.title, error: error?.message || '发送失败' });
       }
-      const prompt = composePrompt('rewrite', {
-        sectionTitle: '（全文改稿）',
-        requirement: `修改要求：${instruction}`,
-        example: 'None',
-        stageMemory: 'None',
-        reference: 'None',
-        currentContent: parsed.content.slice(0, 16000),
+    }
+    setIsSendingTask(false);
+    setSelectedDispatchTaskIds(ids => ids.filter(id => !succeededTaskIds.includes(id)));
+    if (failedTasks.length === 0) {
+      message.success(`已发送 ${succeededTaskIds.length} 个协作任务，等待对方接受`);
+    } else if (succeededTaskIds.length > 0) {
+      message.warning(`已发送 ${succeededTaskIds.length} 个任务，${failedTasks.length} 个发送失败`);
+    } else {
+      message.error(failedTasks[0]?.error || '批量发送协作任务失败');
+    }
+  };
+
+  const readProjectDoc = async (docId: string) => {
+    const doc = projectDocsList.find(item => item.id === docId);
+    if (!doc) return '';
+    const version = projectVersions.find(item => item.id === doc.versionId);
+    if (version?.content?.trim()) return version.content.trim();
+    const sourcePath = doc.sourceFilePath || version?.filePath;
+    if (!sourcePath) return '';
+    const parsed = await window.electronAPI.parseDocumentSilent?.(sourcePath);
+    return parsed?.success && parsed.content ? parsed.content.trim() : '';
+  };
+
+  const locateRevisionRange = (content: string, sectionTitle?: string, sourceLineNumber?: number) => {
+    if (!content.trim()) return null;
+    const lines = content.split(/\r?\n/);
+    if (sourceLineNumber && sourceLineNumber > 0 && sourceLineNumber <= lines.length) {
+      const start = lines.slice(0, sourceLineNumber - 1).join('\n').length + (sourceLineNumber > 1 ? 1 : 0);
+      const end = Math.min(content.length, start + 1800);
+      return { start, end };
+    }
+    const normalizedTitle = sectionTitle?.trim() || '';
+    const start = normalizedTitle ? content.indexOf(normalizedTitle) : -1;
+    if (start < 0) return null;
+    const remainder = content.slice(start + normalizedTitle.length);
+    const nextHeading = remainder.search(/\n\s*(?:\d+(?:\.\d+)*[、.．\s]|第[一二三四五六七八九十\d]+[章节]|[一二三四五六七八九十]+、)/);
+    const end = nextHeading > 0
+      ? start + normalizedTitle.length + nextHeading
+      : Math.min(content.length, start + 1800);
+    return { start, end: Math.max(end, Math.min(content.length, start + normalizedTitle.length)) };
+  };
+
+  const handleAddExternalReferences = async () => {
+    const paths = await window.electronAPI.openFiles([{ name: '可解析文档', extensions: ['docx', 'doc', 'pdf', 'txt', 'md', 'xlsx', 'xls', 'pptx', 'ppt'] }]);
+    if (!paths?.length) return;
+    const additions = await Promise.all(paths.map(async (path: string) => {
+      const parsed = await window.electronAPI.parseDocumentSilent?.(path);
+      return { path, name: fileName(path), content: parsed?.success ? String(parsed.content || '').trim() : '' };
+    }));
+    const readable = additions.filter(item => item.content);
+    setExternalReferences(previous => [...previous, ...readable.filter(item => !previous.some(existing => existing.path === item.path))]);
+    if (readable.length) message.success(`已临时加入 ${readable.length} 份外部参考资料`);
+    else message.warning('未能读取所选资料中的文本内容');
+  };
+
+  const handleAddProjectReferences = async () => {
+    if (!currentProject) return;
+    const selected = await pickProjectFiles({
+      projectId: currentProject.id,
+      title: '选择项目内参考资料',
+      selectedPaths: selectedWritingDocIds.map(id => {
+        const doc = projectDocsList.find(item => item.id === id);
+        return doc?.sourceFilePath || projectVersions.find(version => version.id === doc?.versionId)?.filePath || '';
+      }).filter(Boolean),
+    });
+    if (!selected.length) return;
+    const selectedPathSet = new Set(selected.map(item => item.path));
+    const matchingDocIds = projectDocsList
+      .filter(doc => selectedPathSet.has(doc.sourceFilePath || projectVersions.find(version => version.id === doc.versionId)?.filePath || ''))
+      .map(doc => doc.id);
+    setSelectedWritingDocIds(previous => [...new Set([...previous, ...matchingDocIds])]);
+    const unmatched = selected.filter(item => !projectDocsList.some(doc => (doc.sourceFilePath || projectVersions.find(version => version.id === doc.versionId)?.filePath) === item.path));
+    if (unmatched.length) {
+      const additions = await Promise.all(unmatched.map(async item => {
+        const parsed = await window.electronAPI.parseDocumentSilent?.(item.path);
+        return { path: item.path, name: item.name, content: parsed?.success ? String(parsed.content || '').trim() : '' };
+      }));
+      setExternalReferences(previous => [...previous, ...additions.filter(item => item.content && !previous.some(existing => existing.path === item.path))]);
+    }
+    message.success(`已加入 ${selected.length} 份项目参考资料`);
+  };
+
+  const collectWritingReferences = async () => {
+    const projectContents = await Promise.all(selectedWritingDocIds.map(async id => {
+      const doc = projectDocsList.find(item => item.id === id);
+      const content = await readProjectDoc(id);
+      return content ? `【项目文件：${doc?.name || '未命名'}】\n${content}` : '';
+    }));
+    const externalContents = externalReferences.map(item => item.content ? `【临时外部资料：${item.name}】\n${item.content}` : '');
+    return [...projectContents, ...externalContents].filter(Boolean).join('\n\n').slice(0, 24000);
+  };
+
+  const handleGenerateDraft = async () => {
+    if (!currentProject || !selectedWritingTemplate) {
+      message.warning('请先选择用于起草的写作模板');
+      return;
+    }
+    const reference = await collectWritingReferences();
+    const memories = enabledProjectMemories.map(item => `【${item.stageName}】${item.summary}`).join('\n').slice(0, 8000) || '暂无可用阶段记忆';
+    const instruction = (writingInstruction || workflowPromptSuggestion).trim() || '请依据模板完成一版可供人工继续编辑的初稿。';
+    const templateContext = buildQuickDraftTemplateContext(selectedWritingTemplate);
+    const projectContext = [
+      `【当前项目】${currentProject.name}`,
+      currentProject.description?.trim() ? `【项目简介】${currentProject.description.trim()}` : '',
+      reference,
+    ].filter(Boolean).join('\n\n') || '当前仅有项目名称，暂无其他项目资料。';
+    setIsGeneratingDraft(true);
+    try {
+      const base = await composePromptAsync('rewrite', {
+        sectionTitle: selectedWritingTemplate.name,
+        requirement: `${instruction}\n\n${templateContext.requirements}`,
+        example: templateContext.examples,
+        stageMemory: memories,
+        reference: projectContext,
+        currentContent: '当前尚无初稿。请从零起草一份完整、连贯、可继续修改的第一稿。',
       });
+      const prompt = `${base}\n\n${buildQuickDraftTaskInstructions(templateContext.mode)}`;
       const result = await useAIJobStore.getState().runAIJob<string>(
-        {
-          scene: 'rewrite',
-          title: '生成修订预览',
-          projectId: currentProject?.id,
-          resultPreview: (value) => value,
-        },
-        async ({ setProgress, throwIfCancelled }) => {
-          setProgress(35);
-          const value = await window.electronAPI.callAI({ prompt });
+        { scene: 'rewrite', title: `AI 写作：${selectedWritingTemplate.name}`, projectId: currentProject.id, resultPreview: value => String(value || '').slice(0, 240) },
+        async ({ jobId, setProgress, throwIfCancelled }) => {
+          setProgress(25);
+          const value = await window.electronAPI.callAI({ prompt, usageRequestId: jobId, usageTitle: `AI 写作：${selectedWritingTemplate.name}`, usageScene: 'rewrite' });
           throwIfCancelled();
-          setProgress(85);
-          return String(value || '');
+          setProgress(88);
+          return String(value || '').trim();
         },
       );
-      const previews = parseAiRewritePreviews(result);
-      if (previews.length === 0) {
-        message.warning('AI 未生成可直接替换的原文块，请补充更明确的问题描述后重试');
-      }
-      setAiRewritePreviews(previews);
-    } catch (error: any) {
-      message.error('生成修改预览失败：' + (error.message || String(error)));
-    } finally {
-      setIsGeneratingRewritePlan(false);
-    }
-  };
-
-  const handleAcceptRewrite = async (preview: AiRewritePreview) => {
-    const filePath = getTargetWritingDocPath();
-    if (!filePath) {
-      message.warning('未找到当前文档的源文件路径');
-      return;
-    }
-
-    setApplyingRewriteId(preview.id);
-    try {
-      const result = await window.electronAPI.replaceDocumentText({
-        filePath,
-        originalText: preview.original,
-        replacementText: preview.replacement,
-      });
-      if (!result.success) {
-        message.error(result.error || '替换失败');
-        return;
-      }
-      updateAiRewritePreview(preview.id, { status: 'accepted' });
-      await loadVersions();
-      message.success(result.backupPath ? '已替换原文，并已自动备份原文件' : '已替换原文');
-    } catch (error: any) {
-      message.error('接受修改失败：' + (error.message || String(error)));
-    } finally {
-      setApplyingRewriteId('');
-    }
-  };
-
-  const handleQuickExport = async () => {
-    const template = templates.find(t => t.id === selectedWritingTemplateId);
-    if (!template || !currentProject) return;
-    try {
-      const result = await window.electronAPI.generateFromContent({
-        template,
-        sectionContents: { 'main': writingContent },
-        folderPath: currentProject.folderPath,
-        fileName: `${currentProject.name}-${template.name}`,
-      });
-      if (result.success) {
-        message.success('文档已导出');
-        if (result.filePath) await window.electronAPI.openInExplorer(result.filePath);
-      } else {
-        message.error(result.error || '导出失败');
-      }
-    } catch (error: any) {
-      message.error(`导出失败：${error.message}`);
-    }
-  };
-
-  const handleImportWritingDoc = async (docId: string): Promise<string> => {
-    const doc = projectDocsList.find(d => d.id === docId);
-    if (!doc) return '';
-    const version = doc.versionId ? projectVersions.find(v => v.id === doc.versionId) : undefined;
-    let content = version?.content || '';
-    if (!content && doc.sourceFilePath) {
-      try {
-        const parsed = await window.electronAPI.parseDocument(doc.sourceFilePath);
-        if (parsed.success && parsed.content?.trim()) content = parsed.content.trim();
-      } catch {}
-    }
-    return content;
-  };
-
-  const handleBatchImportDocs = async (docIds: string[]) => {
-    const contents: string[] = [];
-    for (const docId of docIds) {
-      const content = await handleImportWritingDoc(docId);
-      if (content) contents.push(content);
-    }
-    if (contents.length > 0) {
-      setWritingContent(prev => prev ? prev + '\n\n' + contents.join('\n\n') : contents.join('\n\n'));
-      message.success(`已导入 ${contents.length} 个文档内容`);
-    } else {
-      message.warning('所选文档暂无文本内容');
-    }
-  };
-
-  const handleImportAllDocs = async () => {
-    const allDocIds = projectDocsList.map(d => d.id);
-    if (allDocIds.length === 0) {
-      message.warning('项目暂无关联文档');
-      return;
-    }
-    await handleBatchImportDocs(allDocIds);
-  };
-
-  useEffect(() => {
-    loadProjectDocs();
-    loadTasks();
-    loadTemplates();
-    loadReviews();
-  }, []);
-
-  useEffect(() => {
-    void refreshCollaborationStatus();
-    const offPeers = window.electronAPI.onCollaborationPeersChanged?.((payload) => {
-      setLanPeers(payload.peers || []);
-      setLanFriends(payload.friends || []);
-    });
-    return () => { offPeers?.(); };
-  }, []);
-
-
-  const allStages = getAllStages(customStages);
-  const stageMeta = getStageMeta(allStages);
-  const projectVersions = currentProject ? versions.filter((v) => v.projectId === currentProject.id) : [];
-  const projectDocsList = currentProject ? projectDocs.filter((d) => d.projectId === currentProject.id) : [];
-  const projectTasks = currentProject ? tasks.filter((t) => t.projectId === currentProject.id) : [];
-  const projectReviews = currentProject ? reviews.filter((r) => r.projectId === currentProject.id) : [];
-  const projectProgress = currentProject ? getProjectProgress(currentProject, projectDocsList, templates, projectVersions, allStages) : 0;
-  const stageSegments = currentProject ? buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages) : [];
-
-  const openTasks = projectTasks.filter(task => task.status !== 'completed');
-  const completedTasks = projectTasks.filter(task => task.status === 'completed');
-  const highPriorityTasks = openTasks.filter(task => task.priority === 'high');
-  const reviewTasks = openTasks.filter(task => task.source === 'review');
-  const latestReview = [...projectReviews].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
-
-  useEffect(() => {
-    if (!pendingWorkflowFocus || !['team', 'writing'].includes(pendingWorkflowFocus.target)) return;
-    if (!currentProject || pendingWorkflowFocus.projectId !== currentProject.id) return;
-
-    if (pendingWorkflowFocus.stageName) {
-      setCurrentStageName(pendingWorkflowFocus.stageName);
-    }
-
-    if (pendingWorkflowFocus.relatedDocId) {
-      const targetDoc = projectDocsList.find(doc => doc.id === pendingWorkflowFocus.relatedDocId);
-      if (targetDoc) {
-        if (targetDoc.templateId) setSelectedWritingTemplateId(targetDoc.templateId);
-        setSelectedWritingDocIds([targetDoc.id]);
-      }
-    }
-
-    setFocusedWorkflowTaskId(pendingWorkflowFocus.taskId || '');
-    setWorkflowPromptSuggestion(pendingWorkflowFocus.prompt || '');
-    setWritingContent('');
-    setAiRewritePreviews([]);
-    setPendingWorkflowFocus(null);
-    window.requestAnimationFrame(() => {
-      writingStudioRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-  }, [
-    currentProject?.id,
-    pendingWorkflowFocus,
-    projectDocsList,
-    setCurrentStageName,
-    setPendingWorkflowFocus,
-  ]);
-
-  const stageRows = stageSegments.map(segment => {
-    const docs = projectDocsList.filter(doc => segment.sourceDocIds.includes(doc.id));
-    const progress = docs.length
-      ? Math.round(docs.reduce((sum, doc) => sum + doc.overallProgress, 0) / docs.length)
-      : segment.completedAt ? 100 : 0;
-    const overdue = !segment.completedAt && segment.deadline && new Date(segment.deadline).getTime() < Date.now();
-    const stageTasks = openTasks.filter(task => task.stageName === segment.stage || segment.sourceDocIds.includes(task.relatedDocId || ''));
-    return { segment, progress, overdue, taskCount: stageTasks.length };
-  });
-
-  const workload = useMemo(() => {
-    const map = new Map<string, { name: string; open: number; high: number; completed: number }>();
-    projectTasks.forEach(task => {
-      const name = task.assigneeName || (task.type === 'ai' ? 'AI 助手' : '未分配');
-      const row = map.get(name) || { name, open: 0, high: 0, completed: 0 };
-      if (task.status === 'completed') row.completed += 1;
-      else {
-        row.open += 1;
-        if (task.priority === 'high') row.high += 1;
-      }
-      map.set(name, row);
-    });
-    return [...map.values()].sort((a, b) => b.open - a.open || b.high - a.high);
-  }, [projectTasks]);
-
-  const handleCopyCollaborationAddress = async () => {
-    const url = collaborationStatus.urls?.[0] || '';
-    if (!url) return;
-    try {
-      await navigator.clipboard.writeText(url.replace(/^http:\/\//, '').replace(/\/tasks$/, ''));
-      message.success('已复制局域网地址');
-    } catch {
-      message.info(url);
-    }
-  };
-
-  const handleSendCollaborationTask = async (task: any) => {
-    if (!currentProject) return;
-    const targetFriendId = selectedFriendId || lanFriends.find(friend => friend.online)?.id || '';
-    if (!targetFriendId) {
-      message.warning('请先选择在线好友');
-      return;
-    }
-    setSendingTaskId(task.id);
-    try {
-      const result = await window.electronAPI.sendCollaborationTask?.({
-        friendId: targetFriendId,
-        task: { ...task, assigneeName: task.assigneeName || '' },
+      if (!result.trim()) throw new Error('AI 未返回可用初稿');
+      setWritingDraft(result);
+      recordActivity({
+        projectId: currentProject.id,
         projectName: currentProject.name,
-        senderName: userProfile?.nickname || currentProject.name,
+        kind: 'ai-writing',
+        status: 'success',
+        title: `AI 写作完成：${selectedWritingTemplate.name}`,
+        detail: `生成 ${result.length.toLocaleString()} 字符的初稿`,
+        resumeData: {
+          type: 'ai-writing',
+          prompt: instruction,
+          content: result,
+          templateId: selectedWritingTemplate.id,
+          templateName: selectedWritingTemplate.name,
+          selectedDocIds: [...selectedWritingDocIds],
+        },
       });
-      if (!result?.success) {
-        message.error(result?.error || '任务发送失败');
-        return;
+      message.success('已生成初稿，可先人工编辑后导出 Word');
+    } catch (error: any) {
+      if (!isAIJobCancelledError(error)) {
+        recordActivity({
+          projectId: currentProject.id,
+          projectName: currentProject.name,
+          kind: 'ai-writing',
+          status: 'failed',
+          title: `AI 写作失败：${selectedWritingTemplate.name}`,
+          detail: error.message || String(error),
+        });
+        message.error(`AI 写作失败：${error.message || String(error)}`);
       }
-      message.success('任务已发送到对方');
     } finally {
-      setSendingTaskId('');
+      setIsGeneratingDraft(false);
     }
   };
 
-  const recentActivities = [
-    ...projectTasks.map(task => ({
-      id: `task-${task.id}`,
-      title: task.title,
-      type: task.source === 'review' ? '审查任务' : task.source === 'report' ? '报告任务' : '任务',
-      time: task.completedAt || task.createdAt,
-      status: task.status,
-    })),
-    ...projectReviews.map(review => ({
-      id: `review-${review.id}`,
-      title: review.summary,
-      type: '审查记录',
-      time: review.createdAt,
-      status: review.score >= 80 ? 'completed' : 'pending',
-    })),
-  ].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()).slice(0, 8);
+  const handleExportDraft = async () => {
+    if (!currentProject || !selectedWritingTemplate || !writingDraft.trim()) return;
+    try {
+      const exportBaseName = `${currentProject.name}-${selectedWritingTemplate.name}-初稿`;
+      const result = await window.electronAPI.generateFromContent({
+        template: selectedWritingTemplate,
+        sectionContents: mapDraftToTemplateSections(selectedWritingTemplate, writingDraft),
+        folderPath: currentProject.folderPath,
+        fileName: exportBaseName,
+      });
+      if (!result.success) throw new Error(result.error || '导出失败');
+      const outputType = String(selectedWritingTemplate.outputFileType || 'docx').replace(/^\./, '').toLowerCase();
+      const expectedFileName = `${exportBaseName}.${outputType}`;
+      const actualFileName = result.filePath?.split(/[\\/]/).pop();
+      message.success(actualFileName && actualFileName !== expectedFileName
+        ? `原文件正在使用，已另存为：${actualFileName}`
+        : '初稿已导出到项目文件夹');
+      if (result.filePath) await window.electronAPI.openInExplorer(result.filePath);
+    } catch (error: any) {
+      message.error(`导出失败：${error.message || String(error)}`);
+    }
+  };
 
-  if (!currentProject) {
-    return (
-      <Empty
-        description="请先选择一个项目"
-        image={Empty.PRESENTED_IMAGE_SIMPLE}
-      />
-    );
-  }
+  const handleLoadRevisionDocument = async () => {
+    if (!selectedRevisionDocId) {
+      message.warning('请先选择要修订的项目文件');
+      return;
+    }
+    const content = await readProjectDoc(selectedRevisionDocId);
+    if (!content) {
+      message.warning('该文件没有可读取的文本内容');
+      return;
+    }
+    setRevisionDocumentContent(content);
+    setRevisionSelection('');
+    setRevisionRange(null);
+    setRevisionProposal('');
+    setRevisionProposalSelection('');
+    message.success('已载入全文；用鼠标拖选要修改的段落');
+  };
 
-  return (
-    <div className="team-workbench-page">
-      {!hideHeader && (
-        <div className="team-page-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
-            <Title level={4} style={{ margin: 0 }}>{currentProject.name}</Title>
-            <Tag color="blue" style={{ marginLeft: 4 }}>团队协同</Tag>
-          </div>
-          <Text type="secondary" style={{ fontSize: 13 }}>阶段、审查和任务汇总，方便判断下一步该谁推进什么。</Text>
+  const captureRevisionSelection = (target: HTMLTextAreaElement) => {
+    const start = target.selectionStart || 0;
+    const end = target.selectionEnd || 0;
+    if (end <= start) return;
+    setRevisionRange({ start, end });
+    setRevisionSelection(revisionDocumentContent.slice(start, end));
+  };
+
+  const handleOpenRevisionDialog = () => {
+    if (!selectedRevisionDocId || !revisionDocumentContent) {
+      message.warning('请先选择并载入要修订的文件');
+      return;
+    }
+    if (!revisionSelection.trim() || !revisionRange) {
+      message.warning('请先在全文中用鼠标拖选需要修订的内容');
+      return;
+    }
+    setRevisionProposal('');
+    setRevisionModalOpen(true);
+  };
+
+  const handleGenerateRevision = async () => {
+    if (!currentProject || !revisionSelection.trim()) return;
+    const instruction = revisionInstruction.trim() || '请提升表达的清晰度、专业性与逻辑连贯性，不改变事实。';
+    setIsGeneratingRevision(true);
+    try {
+      const base = await composePromptAsync('rewrite', {
+        sectionTitle: selectedRevisionDoc?.name || '选中文本',
+        requirement: instruction,
+        example: '无',
+        stageMemory: projectMemories.map(item => item.summary).join('\n').slice(0, 5000) || '无',
+        reference: '无',
+        currentContent: revisionSelection,
+      });
+      const prompt = `${base}\n\n[精确修订]\n仅修订下方选中的原文，不要增删选区外内容。直接返回修改后的文本，不要使用 Markdown、不解释修改过程。\n\n原文：\n${revisionSelection}`;
+      const result = await useAIJobStore.getState().runAIJob<string>(
+        { scene: 'rewrite', title: `AI 修订：${selectedRevisionDoc?.name || '选中文本'}`, projectId: currentProject.id, docId: selectedRevisionDocId, resultPreview: value => String(value || '').slice(0, 240) },
+        async ({ jobId, setProgress, throwIfCancelled }) => {
+          setProgress(30);
+          const value = await window.electronAPI.callAI({ prompt, usageRequestId: jobId, usageTitle: `AI 修订：${selectedRevisionDoc?.name || '选中文本'}`, usageScene: 'rewrite' });
+          throwIfCancelled();
+          setProgress(88);
+          return String(value || '').trim();
+        },
+      );
+      if (!result) throw new Error('AI 未返回修订内容');
+      setRevisionProposal(result);
+      setRevisionProposalSelection('');
+      recordActivity({
+        projectId: currentProject.id,
+        projectName: currentProject.name,
+        kind: 'ai-revision',
+        status: 'success',
+        title: `AI 修订完成：${selectedRevisionDoc?.name || '选中文本'}`,
+        detail: `已生成 ${result.length.toLocaleString()} 字符的修订建议`,
+        resumeData: {
+          type: 'ai-revision',
+          prompt: instruction,
+          content: result,
+          documentId: selectedRevisionDocId || undefined,
+          documentName: selectedRevisionDoc?.name,
+          sourceText: revisionSelection,
+        },
+      });
+    } catch (error: any) {
+      if (!isAIJobCancelledError(error)) {
+        recordActivity({
+          projectId: currentProject.id,
+          projectName: currentProject.name,
+          kind: 'ai-revision',
+          status: 'failed',
+          title: `AI 修订失败：${selectedRevisionDoc?.name || '选中文本'}`,
+          detail: error.message || String(error),
+        });
+        message.error(`生成修订失败：${error.message || String(error)}`);
+      }
+    } finally {
+      setIsGeneratingRevision(false);
+    }
+  };
+
+  const applyRevision = async (replacement: string) => {
+    if (!selectedRevisionDocPath || !revisionSelection || !replacement.trim()) {
+      message.warning('缺少可写回的文件或修订内容');
+      return;
+    }
+    setIsApplyingRevision(true);
+    try {
+      const result = await window.electronAPI.replaceDocumentText({ filePath: selectedRevisionDocPath, originalText: revisionSelection, replacementText: replacement.trim() });
+      if (!result.success) throw new Error(result.error || '写回失败');
+      const start = revisionRange?.start ?? 0;
+      const end = revisionRange?.end ?? start;
+      const next = revisionDocumentContent.slice(0, start) + replacement.trim() + revisionDocumentContent.slice(end);
+      setRevisionDocumentContent(next);
+      setRevisionRange({ start, end: start + replacement.trim().length });
+      setRevisionSelection(replacement.trim());
+      setRevisionModalOpen(false);
+      setRevisionProposal('');
+      await loadVersions();
+      message.success(result.backupPath ? '已写回修订，并已创建原文件备份' : '已写回修订');
+    } catch (error: any) {
+      message.error(`接受修订失败：${error.message || String(error)}`);
+    } finally {
+      setIsApplyingRevision(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!pendingWorkflowFocus || !['team', 'writing'].includes(pendingWorkflowFocus.target) || !currentProject || pendingWorkflowFocus.projectId !== currentProject.id) return;
+    let cancelled = false;
+    if (pendingWorkflowFocus.stageName) setCurrentStageName(pendingWorkflowFocus.stageName);
+    if (pendingWorkflowFocus.intent === 'dispatch') {
+      if (pendingWorkflowFocus.taskId) setSelectedDispatchTaskIds([pendingWorkflowFocus.taskId]);
+      acknowledgeWorkflowFocus();
+      requestAnimationFrame(() => collaborationStudioRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      return () => { cancelled = true; };
+    }
+    const isRevisionFlow = isRevisionWorkflowFocus(pendingWorkflowFocus);
+    const target = pendingWorkflowFocus.docId
+      ? projectDocsList.find(doc => doc.id === pendingWorkflowFocus.docId)
+      : undefined;
+    // 懒加载团队页时，项目文档可能尚未进 store。保留 focus 等待数据到位，
+    // 不能先清空它再退回 AI 初稿区。
+    if (pendingWorkflowFocus.docId && !target) return;
+    if (target) {
+      setSelectedRevisionDocId(target.id);
+      if (target.templateId) setSelectedWritingTemplateId(target.templateId);
+      if (!isRevisionFlow) setSelectedWritingDocIds([target.id]);
+    }
+    setFocusedWorkflowTaskId(pendingWorkflowFocus.taskId || '');
+    if (!isRevisionFlow) {
+      setWorkflowPromptSuggestion(pendingWorkflowFocus.prompt || '');
+      setWritingInstruction(pendingWorkflowFocus.prompt || '');
+    }
+    if (isRevisionFlow && target) {
+      const focus = { ...pendingWorkflowFocus };
+      void (async () => {
+        const content = await readProjectDoc(target.id);
+        if (cancelled || !content) return;
+        const range = locateRevisionRange(content, focus.sectionTitle, focus.sourceLineNumber);
+        setRevisionDocumentContent(content);
+        setRevisionProposal('');
+        setRevisionProposalSelection('');
+        setRevisionPromptSuggestion(focus.prompt || '');
+        setRevisionInstruction('');
+        if (range) {
+          setRevisionRange(range);
+          setRevisionSelection(content.slice(range.start, range.end));
+          setRevisionModalOpen(true);
+        } else {
+          setRevisionRange(null);
+          setRevisionSelection('');
+          message.info('已载入关联文件；请在全文中拖选审查问题对应的内容后修订');
+        }
+        requestAnimationFrame(() => revisionStudioRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      })();
+    } else {
+      requestAnimationFrame(() => writingStudioRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
+    acknowledgeWorkflowFocus();
+    return () => { cancelled = true; };
+  }, [acknowledgeWorkflowFocus, currentProject, pendingWorkflowFocus, projectDocsList, setCurrentStageName]);
+
+  const recentActivities = collaborationActivities.filter(activity => (
+    activity.projectId === currentProject?.id
+    || (!activity.projectId && activity.projectName === currentProject?.name)
+  ));
+
+  const handleRestoreActivity = async (activity: CollaborationActivity) => {
+    const snapshot = activity.resumeData;
+    if (!snapshot || activity.status !== 'success') {
+      message.info('这条历史动态没有可恢复的写作内容');
+      return;
+    }
+
+    if (snapshot.type === 'ai-writing') {
+      if (snapshot.templateId && templates.some(template => template.id === snapshot.templateId)) {
+        setSelectedWritingTemplateId(snapshot.templateId);
+      }
+      setSelectedWritingDocIds((snapshot.selectedDocIds || []).filter(id => projectDocsList.some(doc => doc.id === id)));
+      setWritingInstruction(snapshot.prompt);
+      setWorkflowPromptSuggestion('');
+      setFocusedWorkflowTaskId('');
+      setWritingDraft(snapshot.content);
+      requestAnimationFrame(() => writingStudioRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      message.success('已恢复该次 AI 写作的提示词和初稿内容');
+      return;
+    }
+
+    const target = snapshot.documentId
+      ? projectDocsList.find(doc => doc.id === snapshot.documentId)
+      : undefined;
+    let documentContent = '';
+    if (target) {
+      setSelectedRevisionDocId(target.id);
+      documentContent = await readProjectDoc(target.id);
+    } else {
+      setSelectedRevisionDocId('');
+    }
+    let start = documentContent.indexOf(snapshot.sourceText);
+    if (start < 0) {
+      documentContent = snapshot.sourceText;
+      start = 0;
+    }
+    setRevisionDocumentContent(documentContent);
+    setRevisionRange({ start, end: start + snapshot.sourceText.length });
+    setRevisionSelection(snapshot.sourceText);
+    setRevisionInstruction(snapshot.prompt);
+    setRevisionPromptSuggestion('');
+    setRevisionProposal(snapshot.content);
+    setRevisionProposalSelection('');
+    setRevisionModalOpen(true);
+    requestAnimationFrame(() => revisionStudioRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    message.success(target
+      ? '已恢复该次 AI 修订的提示词、原文和建议内容'
+      : '关联文件已不存在，已恢复当时的选区、提示词和建议内容');
+  };
+
+  if (!currentProject) return <Empty description="请先选择一个项目" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
+
+  return <div className="team-workbench-page">
+    {!hideHeader && <div className="team-page-header"><Space><Button type="text" size="small" icon={<FileTextOutlined />} onClick={onBack}>返回</Button><Title level={4}>{currentProject.name}</Title><Tag color="blue">团队协同</Tag></Space><Text type="secondary">围绕项目任务、初稿与精确修订协同推进。</Text></div>}
+    <div className="team-stats-row">
+      {[{ label: '阶段进度', value: projectProgress, suffix: '%', color: '#1677ff' }, { label: '待处理任务', value: openTasks.length, color: '#faad14' }, { label: '高优先级', value: highPriorityTasks.length, color: highPriorityTasks.length ? '#ff4d4f' : '#52c41a' }, { label: '最近审查', value: latestReview?.score || 0, suffix: latestReview ? '分' : '', color: '#722ed1' }].map(stat => <div key={stat.label} className="team-stat-card"><div className="team-stat-value" style={{ color: stat.color }}>{stat.value}<span className="team-stat-suffix">{stat.suffix || ''}</span></div><div className="team-stat-label">{stat.label}</div></div>)}
+    </div>
+    <div className="team-main-grid">
+      <div className="team-main-left">
+        <div ref={writingStudioRef} className="team-ai-studio-anchor">
+          <TeamWritingStudio templates={templates} projectDocs={projectDocsList} selectedTemplateId={selectedWritingTemplateId} selectedDocIds={selectedWritingDocIds} externalReferences={externalReferences} instruction={writingInstruction} draft={writingDraft} workflowPromptSuggestion={workflowPromptSuggestion} focusedWorkflowTaskId={focusedWorkflowTaskId} memories={projectMemories} excludedMemoryIds={excludedMemoryIds} generating={isGeneratingDraft} onTemplateChange={setSelectedWritingTemplateId} onInstructionChange={setWritingInstruction} onDraftChange={setWritingDraft} onAddProjectReferences={() => void handleAddProjectReferences()} onAddExternalReferences={() => void handleAddExternalReferences()} onRemoveDoc={id => setSelectedWritingDocIds(previous => previous.filter(item => item !== id))} onRemoveExternalReference={path => setExternalReferences(previous => previous.filter(item => item.path !== path))} onMemoryEnabledChange={(id, enabled) => setExcludedMemoryIds(previous => enabled ? previous.filter(item => item !== id) : [...new Set([...previous, id])])} onDeleteMemory={id => { if (currentProject) void removeStageMemory(currentProject, id); }} onGenerate={() => void handleGenerateDraft()} onExport={() => void handleExportDraft()} />
         </div>
-      )}
-
-      {/* 统计卡片 */}
-      <div className="team-stats-row">
-        {[
-          { label: '阶段进度', value: projectProgress, suffix: '%', color: '#1677ff' },
-          { label: '待处理任务', value: openTasks.length, color: '#faad14' },
-          { label: '高优先级', value: highPriorityTasks.length, color: highPriorityTasks.length ? '#ff4d4f' : '#52c41a' },
-          { label: '最近审查', value: latestReview ? latestReview.score : 0, suffix: latestReview ? '分' : '', color: '#722ed1' },
-        ].map((stat, i) => (
-          <div key={i} className="team-stat-card">
-            <div className="team-stat-value" style={{ color: stat.color }}>{stat.value}<span className="team-stat-suffix">{stat.suffix || ''}</span></div>
-            <div className="team-stat-label">{stat.label}</div>
-          </div>
-        ))}
+        <div ref={revisionStudioRef} className="team-ai-studio-anchor">
+          <RevisionStudio documents={projectDocsList} selectedDocumentId={selectedRevisionDocId} documentContent={revisionDocumentContent} selection={revisionSelection} instruction={revisionInstruction} promptSuggestion={revisionPromptSuggestion} proposal={revisionProposal} proposalSelection={revisionProposalSelection} modalOpen={revisionModalOpen} generating={isGeneratingRevision} applying={isApplyingRevision} onDocumentChange={setSelectedRevisionDocId} onLoad={() => void handleLoadRevisionDocument()} onCaptureSelection={captureRevisionSelection} onOpenDialog={handleOpenRevisionDialog} onInstructionChange={setRevisionInstruction} onGenerate={() => void handleGenerateRevision()} onProposalChange={setRevisionProposal} onProposalSelectionChange={setRevisionProposalSelection} onApply={value => void applyRevision(value)} onClose={() => setRevisionModalOpen(false)} onDiscard={() => setRevisionProposal('')} />
+        </div>
       </div>
-
-      {/* 主体两栏布局 */}
-      <div className="team-main-grid">
-        {/* 左栏 */}
-        <div className="team-main-left">
-          <div ref={writingStudioRef} className="team-ai-studio-anchor">
-            <Card
-              title={<Space size={8}><EditOutlined style={{ color: '#1677ff' }} /><span>AI 修订写作</span></Space>}
-              extra={<Space size={4}><Tag color="blue" style={{ margin: 0 }}>报告修订</Tag><Tag color="purple" style={{ margin: 0 }}>审查问题</Tag></Space>}
-              size="small"
-              className="team-ai-studio-card"
-            >
-            <Space direction="vertical" size={8} style={{ width: '100%' }}>
-              <Text type="secondary" className="team-ai-studio-description">
-                选择需要处理的报告或审查文档，填写修改要求后生成可确认的修订预览；从问题任务进入时会自动带入目标文档和提示词。
-              </Text>
-              <div className="team-ai-studio-controls">
-                <div>
-                  <Text type="secondary" className="team-ai-studio-label">写作模板</Text>
-                  <Select
-                    placeholder="选择模板"
-                    style={{ width: '100%' }}
-                    value={selectedWritingTemplateId || undefined}
-                    onChange={setSelectedWritingTemplateId}
-                    options={templates.map(t => ({ value: t.id, label: t.name }))}
-                  />
-                </div>
-                <div>
-                  <Text type="secondary" className="team-ai-studio-label">参考文档</Text>
-                  <Select
-                    mode="multiple"
-                    placeholder="多选参考文档"
-                    style={{ width: '100%' }}
-                    value={selectedWritingDocIds}
-                    onChange={setSelectedWritingDocIds}
-                    options={projectDocsList.map(d => ({ value: d.id, label: d.name }))}
-                    maxTagCount={2}
-                    maxTagTextLength={12}
-                  />
-                </div>
-                <div className="team-ai-studio-imports">
-                  <Text type="secondary" className="team-ai-studio-label">导入</Text>
-                  <Space size={6} wrap>
-                    <Button size="small" onClick={() => handleBatchImportDocs(selectedWritingDocIds)} disabled={selectedWritingDocIds.length === 0}>导入选中</Button>
-                    <Button size="small" onClick={handleImportAllDocs} disabled={projectDocsList.length === 0}>全部</Button>
-                  </Space>
-                </div>
-              </div>
-              {workflowPromptSuggestion && (
-                <Alert
-                  type="info"
-                  showIcon
-                  message={<Space wrap><Tag color="blue">来自工作流</Tag>{focusedWorkflowTaskId && <Tag>当前问题</Tag>}</Space>}
-                  description="点击输入框后按 Tab，自动填充提示词。"
-                  style={{ fontSize: 12 }}
-                />
-              )}
-              <TextArea
-                value={writingContent}
-                onChange={(e) => setWritingContent(e.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Tab' && workflowPromptSuggestion && !writingContent.trim()) {
-                    event.preventDefault();
-                    setWritingContent(workflowPromptSuggestion);
-                  }
-                }}
-                placeholder={workflowPromptSuggestion ? '按 Tab 填充提示词' : '填写 AI 修改要求，或导入参考文档后生成修改预览...'}
-                autoSize={{ minRows: 3, maxRows: 8 }}
-                style={{ fontSize: 13 }}
-              />
-              <Space wrap>
-                {workflowPromptSuggestion && (
-                  <Button size="small" onClick={() => setWritingContent(workflowPromptSuggestion)}>填充提示词</Button>
-                )}
-                <Button size="small" type="primary" loading={isGeneratingRewritePlan} onClick={handleGenerateRewritePlan} disabled={selectedWritingDocIds.length === 0}>
-                  生成修改预览
-                </Button>
-                <Button size="small" icon={<FileTextOutlined />} onClick={handleQuickExport} disabled={!writingContent.trim() || !selectedWritingTemplateId}>
-                  导出 Word
-                </Button>
-              </Space>
-
-              {aiRewritePreviews.length > 0 && (
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  {aiRewritePreviews.map(preview => (
-                    <Card key={preview.id} size="small" title={preview.title} extra={preview.status === 'accepted' ? <Tag color="green">已接受</Tag> : <Tag color="blue">待确认</Tag>} style={{ background: '#fbfdff' }}>
-                      <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                        {preview.reason && <Text type="secondary">{preview.reason}</Text>}
-                        <div>
-                          <Text strong style={{ display: 'block', marginBottom: 6 }}>原文内容</Text>
-                          <TextArea value={preview.original} autoSize={{ minRows: 3, maxRows: 8 }} disabled={preview.status === 'accepted'} onChange={(event) => updateAiRewritePreview(preview.id, { original: event.target.value })} />
-                        </div>
-                        <div>
-                          <Text strong style={{ display: 'block', marginBottom: 6 }}>建议修改</Text>
-                          <TextArea value={preview.replacement} autoSize={{ minRows: 3, maxRows: 10 }} disabled={preview.status === 'accepted'} onChange={(event) => updateAiRewritePreview(preview.id, { replacement: event.target.value })} />
-                        </div>
-                        <Space wrap>
-                          <Button type="primary" size="small" disabled={preview.status === 'accepted'} loading={applyingRewriteId === preview.id} onClick={() => handleAcceptRewrite(preview)}>接受并替换</Button>
-                          <Button size="small" disabled={preview.status === 'accepted'} onClick={() => setAiRewritePreviews(prev => prev.filter(item => item.id !== preview.id))}>忽略</Button>
-                        </Space>
-                      </Space>
-                    </Card>
-                  ))}
-                </Space>
-              )}
-            </Space>
-            </Card>
-          </div>
-
-          <Card title="阶段推进" size="small" className="team-stage-card">
-            {stageRows.length === 0 ? (
-              <Empty description="暂无阶段数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-            ) : (
-              <List
-                dataSource={stageRows}
-                renderItem={({ segment, progress, overdue, taskCount }) => (
-                  <List.Item>
-                    <div style={{ width: '100%' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: 2, background: stageMeta[segment.stage]?.color || '#1677ff' }} />
-                        <Text strong>{segment.label}</Text>
-                        {segment.completedAt && <Tag color="green">已完成</Tag>}
-                        {overdue && <Tag color="red">逾期</Tag>}
-                        {taskCount > 0 && <Tag color="blue">{taskCount} 个待办</Tag>}
-                        {segment.deadline && <Text type="secondary" style={{ marginLeft: 'auto' }}>截止 {dayjs(segment.deadline).format('MM-DD')}</Text>}
-                      </div>
-                      <Progress percent={progress} size="small" strokeColor={overdue ? '#ff4d4f' : stageMeta[segment.stage]?.color} />
-                    </div>
-                  </List.Item>
-                )}
-              />
-            )}
-          </Card>
-
-          <Card title="风险与待办" size="small">
-            <List
-              dataSource={openTasks.slice(0, 6)}
-              locale={{ emptyText: '暂无待办任务' }}
-              renderItem={(task) => (
-                <List.Item>
-                  <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                    <Space wrap>
-                      {task.priority === 'high'
-                        ? <ExclamationCircleOutlined style={{ color: '#ff4d4f' }} />
-                        : <ClockCircleOutlined style={{ color: '#faad14' }} />}
-                      <Text strong>{task.title}</Text>
-                      <Tag>{task.source === 'review' ? '审查' : task.source === 'report' ? '报告' : '任务'}</Tag>
-                      {task.assigneeName && <Tag color="blue">{task.assigneeName}</Tag>}
-                    </Space>
-                    {task.description && <Text type="secondary" ellipsis>{task.description}</Text>}
-                  </Space>
-                </List.Item>
-              )}
-            />
-            <Divider style={{ margin: '12px 0' }} />
-            <Space>
-              <Tag color="red">审查待办 {reviewTasks.length}</Tag>
-              <Tag color="green">已完成 {completedTasks.length}</Tag>
-            </Space>
-          </Card>
+      <div className="team-main-right">
+        <div ref={collaborationStudioRef} className="team-ai-studio-anchor">
+          <CollaborationDispatch
+            tasks={dispatchableTasks}
+            friends={collaborationFriends}
+            selectedTaskIds={selectedDispatchTaskIds}
+            selectedFriendId={selectedDispatchFriendId}
+            attachmentPaths={selectedDispatchPaths}
+            attachFile={attachTaskFile}
+            sending={isSendingTask}
+            fileName={fileName}
+            onTaskToggle={handleToggleDispatchTask}
+            onToggleAllTasks={handleToggleAllDispatchTasks}
+            onFriendChange={setSelectedDispatchFriendId}
+            onAttachFileChange={setAttachTaskFile}
+            onSend={() => void handleSendCollaborationTask()}
+          />
         </div>
-
-        {/* 右栏 */}
-        <div className="team-main-right">
-          <Card title="局域网协同" size="small" styles={{ body: { padding: 12 } }}>
-            <Space direction="vertical" size={10} style={{ width: '100%' }}>
-              <Alert
-                type={collaborationStatus.running ? 'success' : 'info'}
-                showIcon
-                message={collaborationStatus.running ? '已在局域网中在线' : '未开启接收'}
-                description={collaborationStatus.running
-                  ? (collaborationStatus.urls?.[0] || '正在等待局域网地址')
-                  : '开启后，同网段设备可自动发现这台电脑。'}
-              />
-              <Space wrap size={6}>
-                {collaborationStatus.running ? (
-                  <Button size="small" onClick={handleStopCollaborationReceiver}>停止接收</Button>
-                ) : (
-                  <Button size="small" type="primary" onClick={handleStartCollaborationReceiver}>开启接收</Button>
-                )}
-                <Button size="small" disabled={!collaborationStatus.urls?.length} onClick={handleCopyCollaborationAddress}>复制地址</Button>
-                <Button size="small" onClick={refreshCollaborationStatus}>刷新</Button>
-              </Space>
-              <div>
-                <Text strong style={{ fontSize: 12 }}>好友</Text>
-                <Select
-                  size="small"
-                  allowClear
-                  style={{ width: '100%', marginTop: 6 }}
-                  placeholder="选择在线好友后发送任务"
-                  value={selectedFriendId || undefined}
-                  onChange={(value) => setSelectedFriendId(value || '')}
-                  options={lanFriends.map(friend => ({
-                    value: friend.id,
-                    disabled: !friend.online,
-                    label: `${friend.name || friend.host} ${friend.online ? '· 在线' : '· 离线'}`,
-                  }))}
-                />
-              </div>
-              <List
-                size="small"
-                dataSource={lanPeers.filter(peer => !peer.added).slice(0, 4)}
-                locale={{ emptyText: '暂未发现新设备' }}
-                renderItem={(peer) => (
-                  <List.Item actions={[<Button key="add" size="small" type="link" onClick={() => handleAddCollaborationFriend(peer)}>加好友</Button>]}>
-                    <List.Item.Meta
-                      title={<Space><Text>{peer.name || peer.host}</Text><Tag color={peer.online ? 'green' : 'default'}>{peer.online ? '在线' : '离线'}</Tag></Space>}
-                      description={<Text type="secondary">{peer.host}:{peer.port}</Text>}
-                    />
-                  </List.Item>
-                )}
-              />
-              {lanFriends.length > 0 && (
-                <List
-                  size="small"
-                  dataSource={lanFriends.slice(0, 5)}
-                  renderItem={(friend) => (
-                    <List.Item actions={[<Button key="remove" size="small" type="link" onClick={() => handleRemoveCollaborationFriend(friend.id)}>移除</Button>]}>
-                      <List.Item.Meta
-                        title={<Space><Text>{friend.name || friend.host}</Text><Tag color={friend.online ? 'green' : 'default'}>{friend.online ? '在线' : '离线'}</Tag></Space>}
-                        description={<Text type="secondary">{friend.host}:{friend.port}</Text>}
-                      />
-                    </List.Item>
-                  )}
-                />
-              )}
-              <List
-                size="small"
-                dataSource={openTasks.slice(0, 5)}
-                locale={{ emptyText: '暂无可分派任务' }}
-                renderItem={(task) => (
-                  <List.Item actions={[<Button key="send" size="small" type="link" loading={sendingTaskId === task.id} onClick={() => handleSendCollaborationTask(task)}>发给好友</Button>]}>
-                    <List.Item.Meta
-                      title={<Text ellipsis={{ tooltip: task.title }}>{task.title}</Text>}
-                      description={<Text type="secondary">{task.stageName || task.source || '任务'} · {task.priority}</Text>}
-                    />
-                  </List.Item>
-                )}
-              />
-            </Space>
-          </Card>
-
-          <Card title="协同负载" size="small" styles={{ body: { padding: 12 } }}>
-            {workload.length === 0 ? (
-              <Empty description="暂无任务分配" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-            ) : (
-              <List
-                dataSource={workload}
-                renderItem={(row) => (
-                  <List.Item>
-                    <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                      <Space><TeamOutlined /><Text>{row.name}</Text></Space>
-                      <Space>
-                        <Tag color={row.high ? 'red' : 'default'}>高 {row.high}</Tag>
-                        <Tag color="blue">待办 {row.open}</Tag>
-                        <Tag color="green">完成 {row.completed}</Tag>
-                      </Space>
-                    </Space>
-                  </List.Item>
-                )}
-              />
-            )}
-          </Card>
-
-          <Card title="最近动态" size="small" styles={{ body: { padding: 12 } }}>
-            <List
-              dataSource={recentActivities}
-              locale={{ emptyText: '暂无动态' }}
-              renderItem={(item) => (
-                <List.Item>
-                  <Space>
-                    {item.status === 'completed'
-                      ? <CheckCircleOutlined style={{ color: '#52c41a' }} />
-                      : <FileTextOutlined style={{ color: '#1677ff' }} />}
-                    <div>
-                      <Text style={{ fontSize: 13 }}>{item.title}</Text>
-                      <br />
-                      <Text type="secondary" style={{ fontSize: 11 }}>{item.type} · {dayjs(item.time).format('MM-DD HH:mm')}</Text>
-                    </div>
-                  </Space>
-                </List.Item>
-              )}
-            />
-          </Card>
-        </div>
+        <ExecutionHistory activities={recentActivities} onRestore={activity => void handleRestoreActivity(activity)} />
       </div>
     </div>
-  );
+  </div>;
 };
 
 export default ProgressBoard;

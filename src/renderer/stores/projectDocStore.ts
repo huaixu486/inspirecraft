@@ -1,5 +1,16 @@
 import { create } from 'zustand';
 import { ProjectDocument } from '../../shared/types';
+import { assertIpcMutationSucceeded, requireIpcArray } from '../utils/ipcResult';
+
+export const normalizeNewProjectDocument = (doc: ProjectDocument): ProjectDocument => {
+  if (doc.lifecycleStatus) return doc;
+  const lifecycleStatus = doc.templateId || doc.versionId || doc.sourceFilePath || doc.autoStage ? 'identified' : 'imported';
+  return {
+    ...doc,
+    lifecycleStatus,
+    lifecycleUpdatedAt: doc.createdAt,
+  };
+};
 
 interface ProjectDocState {
   projectDocs: ProjectDocument[];
@@ -18,7 +29,7 @@ export const useProjectDocStore = create<ProjectDocState>((set, get) => ({
   loadProjectDocs: async () => {
     set({ isLoading: true });
     try {
-      const docs = await window.electronAPI.loadProjectDocs();
+      const docs = requireIpcArray<ProjectDocument>(await window.electronAPI.loadProjectDocs(), '加载项目文档失败');
       set({ projectDocs: docs, isLoading: false });
     } catch (error) {
       console.error('Failed to load project docs:', error);
@@ -27,11 +38,13 @@ export const useProjectDocStore = create<ProjectDocState>((set, get) => ({
   },
 
   addProjectDoc: async (doc) => {
+    doc = normalizeNewProjectDocument(doc);
     const prev = get().projectDocs;
     const newDocs = [...prev, doc];
     set({ projectDocs: newDocs });
     try {
-      await window.electronAPI.saveProjectDoc(doc);
+      const result = await window.electronAPI.saveProjectDoc(doc);
+      assertIpcMutationSucceeded(result, '保存项目文档失败');
     } catch (error) {
       console.error('Failed to save project doc:', error);
       set({ projectDocs: prev });
@@ -47,7 +60,8 @@ export const useProjectDocStore = create<ProjectDocState>((set, get) => ({
     const updated = docs.find(d => d.id === id);
     if (updated) {
       try {
-        await window.electronAPI.saveProjectDoc(updated);
+        const result = await window.electronAPI.saveProjectDoc(updated);
+        assertIpcMutationSucceeded(result, '更新项目文档失败');
       } catch (error) {
         console.error('Failed to update project doc:', error);
         set({ projectDocs: prev });
@@ -60,7 +74,8 @@ export const useProjectDocStore = create<ProjectDocState>((set, get) => ({
     const newDocs = prev.filter(d => d.id !== id);
     set({ projectDocs: newDocs });
     try {
-      await window.electronAPI.deleteProjectDoc(id);
+      const result = await window.electronAPI.deleteProjectDoc(id);
+      assertIpcMutationSucceeded(result, '删除项目文档失败');
     } catch (error) {
       console.error('Failed to delete project doc:', error);
       set({ projectDocs: prev });

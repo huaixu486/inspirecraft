@@ -27,9 +27,12 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useStageLifecycleStore } from '../../stores/stageLifecycleStore';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 import { buildProjectStageSegments, getAllStages, getStageMeta, getGlobalStageProgress as calcProjectProgress, TimelineStageSegment, StageConfig } from '../../utils/timelineStages';
 import { Project, ProjectDocument } from '../../../shared/types';
+import { promptFolderImportMode } from './FolderImportModeSelector';
+import { useFolderImportPreferenceStore } from '../../stores/folderImportPreferenceStore';
 
 const { Text } = Typography;
 
@@ -50,7 +53,8 @@ const ProjectList: React.FC<Props> = ({ onEnterProject }) => {
     useProjectStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const { templates } = useTemplateStore();
-  const { workspacePath, customStages } = useSettingsStore();
+  const { workspacePath, customStages, autoStageMemoryEnabled } = useSettingsStore();
+  const completeStage = useStageLifecycleStore(state => state.completeStage);
   const allStages = getAllStages(customStages);
   const stageMeta = getStageMeta(allStages);
 
@@ -167,13 +171,39 @@ const ProjectList: React.FC<Props> = ({ onEnterProject }) => {
   };
 
   const handleImportFromFolder = async () => {
-    const folderPath = await window.electronAPI.openFolder();
-    if (!folderPath) return;
+    const selectedFolderPath = await window.electronAPI.openFolder({
+      title: '选择要导入的项目文件夹',
+      buttonLabel: '导入此项目',
+    });
+    if (!selectedFolderPath) return;
 
     const { projects } = useProjectStore.getState();
-    if (projects.some(p => p.folderPath === folderPath)) {
+    const normalizePath = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    if (projects.some(project => normalizePath(project.folderPath) === normalizePath(selectedFolderPath))) {
       message.warning('该文件夹已导入为项目');
       return;
+    }
+
+    const mode = useFolderImportPreferenceStore.getState().defaultMode
+      || await promptFolderImportMode('导入项目文件夹');
+    if (!mode) return;
+
+    let folderPath = selectedFolderPath;
+    if (mode === 'move') {
+      if (!workspacePath) {
+        message.warning('请先在设置中配置工作区路径');
+        return;
+      }
+      const moveResult = await window.electronAPI.importFolder({
+        sourcePath: selectedFolderPath,
+        targetFolder: workspacePath,
+        mode: 'move',
+      });
+      if (!moveResult.success || !moveResult.item?.path) {
+        message.error(moveResult.error || '移动项目文件夹失败');
+        return;
+      }
+      folderPath = moveResult.item.path;
     }
 
     const folderName = folderPath.split(/[/\\]/).pop() || '未命名项目';
@@ -207,11 +237,13 @@ const ProjectList: React.FC<Props> = ({ onEnterProject }) => {
 
   const handleImportCompleteOk = async () => {
     if (!importProject) return;
-    const now = new Date().toISOString();
-
     for (const segment of importSegments) {
       if (selectedCompletedStages.includes(segment.stage)) {
-        await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { completedAt: now })));
+        await completeStage({
+          project: importProject,
+          scope: { projectId: importProject.id, stageName: segment.stage, sourceDocIds: segment.sourceDocIds },
+          autoLearn: autoStageMemoryEnabled,
+        });
       }
     }
 
@@ -301,6 +333,25 @@ const ProjectList: React.FC<Props> = ({ onEnterProject }) => {
     } else {
       message.error(`导出失败: ${result.error}`);
     }
+  };
+
+  const confirmDeleteProject = (project: Project, mode: 'unregister' | 'delete-folder') => {
+    const deletingFolder = mode === 'delete-folder';
+    Modal.confirm({
+      title: deletingFolder ? '删除项目文件夹？' : '移除项目注册关系？',
+      content: deletingFolder
+        ? `“${project.name}”的文件夹和项目记录将移入回收站，可在回收站恢复。`
+        : `仅从项目列表移除“${project.name}”及其软件记录，原文件夹不会被删除，也不会进入回收站。`,
+      okText: deletingFolder ? '移入回收站' : '移除注册关系',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        const result = await deleteProject(project.id, { mode });
+        message.success(mode === 'unregister'
+          ? '已移除项目注册关系，原文件夹未作改动'
+          : result.recycleEntry ? '项目文件夹已移入回收站' : '已移除项目记录，原文件夹不存在');
+      },
+    });
   };
 
   const statusColors = {
@@ -424,19 +475,17 @@ const ProjectList: React.FC<Props> = ({ onEnterProject }) => {
                 >
                   导出
                 </Button>,
-                <Button
-                  type="link"
-                  danger
-                  icon={<DeleteOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void deleteProject(project.id)
-                      .then(() => message.success('项目已移入回收站'))
-                      .catch((error: Error) => message.error(error.message || '删除项目失败'));
-                  }}
+                <Dropdown
+                  key="delete-project"
+                  trigger={['click']}
+                  menu={{ items: [
+                    { key: 'unregister', label: '仅移除注册关系', onClick: () => confirmDeleteProject(project, 'unregister') },
+                    { type: 'divider' },
+                    { key: 'delete-folder', danger: true, label: '删除项目文件夹', onClick: () => confirmDeleteProject(project, 'delete-folder') },
+                  ] }}
                 >
-                  删除
-                </Button>,
+                  <Button type="link" danger icon={<DeleteOutlined />} onClick={(event) => event.stopPropagation()}>删除</Button>
+                </Dropdown>,
               ]}
             >
               <Card.Meta

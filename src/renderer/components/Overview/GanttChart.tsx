@@ -1,7 +1,7 @@
 import React, { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { flushSync } from 'react-dom';
-import { Card, Modal, Typography } from 'antd';
-import { WarningOutlined } from '@ant-design/icons';
+import { createPortal, flushSync } from 'react-dom';
+import { Button, Card, Typography } from 'antd';
+import { CloseOutlined, WarningOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
@@ -26,7 +26,13 @@ const PROJECT_COL = 100;
 const STAGE_COL = 100;
 
 const COMPACT_GANTT_HEIGHT = 315;
-const EXPANDED_GANTT_HEIGHT = 620;
+
+interface TimelineOverlayRect {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
 
 // ── 工具函数 ──────────────────────────────────────────────────
 
@@ -170,8 +176,6 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
   const rafRef = useRef(0);
   const panFrameRef = useRef(0);
   const longPressTimerRef = useRef(0);
-  const zoomArmedRef = useRef(false);
-  const [zoomArmed, setZoomArmed] = useState(false);
   const flushPendingView = useCallback(() => {
     if (pendingViewRef.current) {
       const nextView = pendingViewRef.current;
@@ -212,7 +216,11 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
     const apply = () => {
       const bodyWidth = scrollRef.current?.clientWidth || 0;
       const headerWidth = timeAreaRef.current?.getBoundingClientRect().width || 0;
-      const measured = bodyWidth > PROJECT_COL + STAGE_COL ? bodyWidth - PROJECT_COL - STAGE_COL : headerWidth;
+      // The body owns a native vertical scrollbar. Chromium may repaint or
+      // slightly alter that scrollbar's client box as the pointer approaches
+      // it, so it must not be the primary width source for the timeline. The
+      // header has no scrollbar and represents the plot width directly.
+      const measured = headerWidth || (bodyWidth > PROJECT_COL + STAGE_COL ? bodyWidth - PROJECT_COL - STAGE_COL : 0);
       const nextWidth = Math.max(240, Math.floor(measured || 900));
       setViewportWidth(prev => prev === nextWidth ? prev : nextWidth);
     };
@@ -226,9 +234,17 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
 
   useLayoutEffect(() => {
     updateViewportWidth(true);
-    const observer = new ResizeObserver(() => updateViewportWidth());
+    const observedWidths = new WeakMap<Element, number>();
+    const observer = new ResizeObserver(entries => {
+      const widthChanged = entries.some(entry => {
+        const width = Math.round(entry.contentRect.width);
+        const previous = observedWidths.get(entry.target);
+        observedWidths.set(entry.target, width);
+        return previous === undefined || previous !== width;
+      });
+      if (widthChanged) updateViewportWidth();
+    });
     if (timeAreaRef.current) observer.observe(timeAreaRef.current);
-    if (scrollRef.current) observer.observe(scrollRef.current);
     const handleWindowResize = () => updateViewportWidth(true);
     window.addEventListener('resize', handleWindowResize);
     return () => {
@@ -274,10 +290,6 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
         window.clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = 0;
       }
-      if (zoomArmedRef.current) {
-        zoomArmedRef.current = false;
-        setZoomArmed(false);
-      }
     };
     const flushPanPreview = () => {
       const pan = panRef.current;
@@ -296,10 +308,10 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
     const stopPan = (e?: PointerEvent) => {
       const pan = panRef.current;
       if (!pan.active) return;
+      panRef.current = { ...pan, active: false };
       if (e && pan.pointerId === e.pointerId) { try { el.releasePointerCapture(e.pointerId); } catch {} }
       if (panFrameRef.current) {
-        cancelAnimationFrame(panFrameRef.current);
-        panFrameRef.current = 0;
+        flushPanPreview();
         if (pan.pendingScrollTop >= 0) el.scrollTop = pan.pendingScrollTop;
       }
       if (pan.dragging) {
@@ -328,12 +340,13 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
         longPressTimerRef.current = window.setTimeout(() => {
           const current = panRef.current;
           if (!current.active || current.pointerId !== e.pointerId || current.dragging) return;
-          zoomArmedRef.current = true;
-          setZoomArmed(true);
-          // Long-press keeps the compact timeline's free panning interaction.
-          // It is also an interaction rather than an open click.
-          onDraggingChange?.(true);
+          // A long press is a dedicated compact-card panning gesture.  Mark it
+          // as a drag before the first move so pointer-up can never fall
+          // through to the card's click-to-expand handler.
+          current.dragging = true;
           longPressTimerRef.current = 0;
+          setIsPanning(true);
+          onDraggingChange?.(true);
         }, 360);
       }
     };
@@ -341,24 +354,29 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
     const onPointerMove = (e: PointerEvent) => {
       const pan = panRef.current;
       if (!pan.active || pan.pointerId !== e.pointerId) return;
+      // Pointer capture can occasionally survive a window/layout transition.
+      // Never pan when the primary button is no longer physically pressed.
+      if ((e.buttons & 1) === 0) {
+        stopPan(e);
+        return;
+      }
       const plotWidth = pan.plotWidth;
       if (plotWidth <= 0) return;
       const totalDx = e.clientX - pan.startX;
       const totalDy = e.clientY - pan.startY;
       if (!pan.dragging && Math.hypot(totalDx, totalDy) < 4) return;
-      // In the compact card, a long press deliberately enters free panning.
-      // Moving before the hold threshold neither pans nor opens the modal.
-      // Once a long press has started a drag, keep that drag alive even though
-      // the visual long-press marker is cleared on its first movement.
-      if (compact && !pan.dragging && !zoomArmedRef.current) {
+      // The compact card only pans after a hold.  A pointer movement before
+      // the threshold cancels both gestures: it must not accidentally open
+      // the expanded timeline when the pointer is released.
+      if (compact && !pan.dragging) {
         clearLongPress();
-        panRef.current = { ...pan, active: false };
+        pan.active = false;
         onDraggingChange?.(true);
         return;
       }
       if (!pan.dragging) {
         clearLongPress();
-        panRef.current = { ...pan, dragging: true };
+        pan.dragging = true;
         setIsPanning(true);
         onDraggingChange?.(true);
       }
@@ -368,27 +386,40 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       const dy = e.clientY - pan.lastY;
       if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
       if (Math.abs(dx) >= 0.5) {
-        panRef.current = { ...panRef.current, previewX: totalDx };
+        pan.previewX = totalDx;
       }
       if (Math.abs(dy) >= 0.5) {
-        const baseScrollTop = panRef.current.pendingScrollTop >= 0 ? panRef.current.pendingScrollTop : el.scrollTop;
-        panRef.current = { ...panRef.current, pendingScrollTop: Math.max(0, baseScrollTop - dy) };
+        const baseScrollTop = pan.pendingScrollTop >= 0 ? pan.pendingScrollTop : el.scrollTop;
+        pan.pendingScrollTop = Math.max(0, baseScrollTop - dy);
       }
-      panRef.current = { ...panRef.current, lastX: e.clientX, lastY: e.clientY };
+      pan.lastX = e.clientX;
+      pan.lastY = e.clientY;
       schedulePanPreview();
     };
 
-    const onPointerUp = (e: PointerEvent) => stopPan(e);
+    const onPointerUp = (e: PointerEvent) => {
+      if (panRef.current.dragging) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      stopPan(e);
+    };
     const onPointerCancel = (e: PointerEvent) => stopPan(e);
+    const onLostPointerCapture = (e: PointerEvent) => stopPan(e);
+    const onWindowBlur = () => stopPan();
     el.addEventListener('pointerdown', onPointerDown, { capture: true });
     el.addEventListener('pointermove', onPointerMove, { capture: true });
     el.addEventListener('pointerup', onPointerUp, { capture: true });
     el.addEventListener('pointercancel', onPointerCancel, { capture: true });
+    el.addEventListener('lostpointercapture', onLostPointerCapture);
+    window.addEventListener('blur', onWindowBlur);
     return () => {
       el.removeEventListener('pointerdown', onPointerDown, { capture: true });
       el.removeEventListener('pointermove', onPointerMove, { capture: true });
       el.removeEventListener('pointerup', onPointerUp, { capture: true });
       el.removeEventListener('pointercancel', onPointerCancel, { capture: true });
+      el.removeEventListener('lostpointercapture', onLostPointerCapture);
+      window.removeEventListener('blur', onWindowBlur);
       clearLongPress();
       if (panFrameRef.current) cancelAnimationFrame(panFrameRef.current);
     };
@@ -438,7 +469,7 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       {/* 时间头 */}
       <div style={{ display: 'grid', gridTemplateColumns: `${PROJECT_COL + STAGE_COL}px minmax(0, 1fr)`, height: 30, overflow: 'hidden' }}>
         <div />
-        <div ref={timeAreaRef} className={`gantt-time-header${isPanning ? ' gantt-panning' : ''}${zoomArmed ? ' gantt-zoom-armed' : ''}`} style={{ position: 'relative', overflow: 'hidden', cursor: isPanning ? 'grabbing' : 'grab' }}>
+        <div ref={timeAreaRef} className={`gantt-time-header${isPanning ? ' gantt-panning' : ''}`} style={{ position: 'relative', overflow: 'hidden', cursor: isPanning ? 'grabbing' : 'grab' }}>
           <div className="gantt-time-layer" style={{ position: 'absolute', inset: 0 }}>
             {ticks.map((tick, index) => (
               <span key={`${tick.text}-${index}`} style={{ position: 'absolute', left: `${tick.pct}%`, transform: 'translateX(-50%)', fontSize: tick.major ? 11 : 10, color: tick.major ? '#555' : '#aaa', whiteSpace: 'nowrap', userSelect: 'none', pointerEvents: 'none' }}>
@@ -455,7 +486,7 @@ const GanttTimelineView: React.FC<GanttTimelineViewProps> = ({ height, compact =
       </div>
 
       {/* 滚动区域 */}
-      <div className={`gantt-scroll-area${isPanning ? ' gantt-panning' : ''}${zoomArmed ? ' gantt-zoom-armed' : ''}`} ref={scrollRef} style={{ height, position: 'relative', overflowX: 'hidden', overflowY: compact ? 'hidden' : 'auto', userSelect: isPanning ? 'none' : undefined, cursor: isPanning ? 'grabbing' : 'grab', touchAction: 'pan-y' }}>
+      <div className={`gantt-scroll-area${isPanning ? ' gantt-panning' : ''}`} ref={scrollRef} style={{ height, position: 'relative', overflowX: 'hidden', overflowY: compact ? 'hidden' : 'scroll', userSelect: isPanning ? 'none' : undefined, cursor: isPanning ? 'grabbing' : 'grab', touchAction: isPanning ? 'none' : 'pan-y' }}>
         {/* 网格线 */}
         <div className="gantt-time-layer" style={{ position: 'absolute', left: PROJECT_COL + STAGE_COL, right: 0, top: 0, height: totalContentHeight || '100%', pointerEvents: 'none', overflow: 'hidden', zIndex: 0 }}>
           {ticks.filter(tick => tick.major).map((tick, index) => (
@@ -564,67 +595,218 @@ interface GanttChartProps {
 }
 
 const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning = false }) => {
-  const [timelineModalOpen, setTimelineModalOpen] = useState(false);
-  const [timelineContentMounted, setTimelineContentMounted] = useState(false);
+  const compactCardRef = useRef<HTMLDivElement>(null);
+  const [overlayVisible, setOverlayVisible] = useState(false);
+  const [overlayMotionReady, setOverlayMotionReady] = useState(false);
+  const [overlayExpanded, setOverlayExpanded] = useState(false);
+  const [expandedContentVisible, setExpandedContentVisible] = useState(false);
+  const [originRect, setOriginRect] = useState<TimelineOverlayRect | null>(null);
+  const [targetRect, setTargetRect] = useState<TimelineOverlayRect | null>(null);
   const suppressOpenRef = useRef(false);
-  const modalMountFrameRef = useRef(0);
+  const overlayFrameRef = useRef(0);
+  const overlaySettleTimerRef = useRef(0);
+  const overlayResizeFrameRef = useRef(0);
+  const overlayResizeTimerRef = useRef(0);
+  const overlayClosingRef = useRef(false);
+
+  const getTargetRect = useCallback((origin: TimelineOverlayRect): TimelineOverlayRect => {
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = document.documentElement.clientHeight;
+    const viewportPadding = viewportWidth <= 720 ? 12 : 24;
+    // Never make the expanded surface narrower than the source card. Keeping
+    // the rendered width fixed also prevents the Gantt chart from remeasuring
+    // itself on every animation frame.
+    const targetWidth = Math.max(
+      280,
+      Math.min(viewportWidth - viewportPadding, Math.max(origin.width, viewportWidth - viewportPadding * 2)),
+    );
+    const targetHeight = Math.max(
+      Math.min(origin.height, viewportHeight - viewportPadding * 2),
+      Math.min(760, viewportHeight - viewportPadding * 2),
+    );
+    return {
+      top: Math.max(viewportPadding, Math.round((viewportHeight - targetHeight) / 2)),
+      left: Math.max(viewportPadding, Math.round((viewportWidth - targetWidth) / 2)),
+      width: targetWidth,
+      height: targetHeight,
+    };
+  }, []);
 
   const handleCompactClick = useCallback(() => {
-    if (!suppressOpenRef.current) {
-      // Commit the mask and dialog shell inside this click.  Without this,
-      // React could batch it behind the compact chart's pointer cleanup and
-      // the user would see a blur before the dialog began opening.
+    if (!layoutTransitioning && !suppressOpenRef.current && compactCardRef.current) {
+      const rect = compactCardRef.current.getBoundingClientRect();
+      const nextOrigin = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+      overlayClosingRef.current = false;
       flushSync(() => {
-        setTimelineContentMounted(false);
-        setTimelineModalOpen(true);
+        setOriginRect(nextOrigin);
+        setTargetRect(getTargetRect(nextOrigin));
+        // Lay out the full chart before motion starts. The shell is clipped to
+        // the compact card at this point, so this work cannot interrupt the
+        // compositor-only expand animation.
+        setExpandedContentVisible(true);
+        setOverlayMotionReady(false);
+        setOverlayExpanded(false);
+        setOverlayVisible(true);
       });
-      // Let the modal paint immediately, then mount the full timeline on the
-      // next frame. The former double-frame delay made the mask appear to wait
-      // before the opening animation began.
-      modalMountFrameRef.current = requestAnimationFrame(() => {
-        modalMountFrameRef.current = 0;
-        setTimelineContentMounted(true);
+      overlayFrameRef.current = requestAnimationFrame(() => {
+        setOverlayMotionReady(true);
+        overlayFrameRef.current = requestAnimationFrame(() => {
+          overlayFrameRef.current = 0;
+          setOverlayExpanded(true);
+          setExpandedContentVisible(true);
+        });
       });
     }
     suppressOpenRef.current = false;
-  }, []);
+  }, [getTargetRect, layoutTransitioning]);
+
+  const handleOverlayClose = useCallback(() => {
+    if (!overlayVisible || overlayClosingRef.current) return;
+    if (overlaySettleTimerRef.current) window.clearTimeout(overlaySettleTimerRef.current);
+    overlayClosingRef.current = true;
+    if (compactCardRef.current) {
+      const rect = compactCardRef.current.getBoundingClientRect();
+      setOriginRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
+    }
+    setOverlayExpanded(false);
+    overlaySettleTimerRef.current = window.setTimeout(() => {
+      overlaySettleTimerRef.current = 0;
+      if (!overlayClosingRef.current) return;
+      overlayClosingRef.current = false;
+      setOverlayVisible(false);
+      setOverlayMotionReady(false);
+      setExpandedContentVisible(false);
+      setOriginRect(null);
+      setTargetRect(null);
+    }, 300);
+  }, [overlayVisible]);
+
+  const handleOverlayTransitionEnd = useCallback((event: React.TransitionEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget || event.propertyName !== 'clip-path') return;
+    if (overlayClosingRef.current) {
+      if (overlaySettleTimerRef.current) window.clearTimeout(overlaySettleTimerRef.current);
+      overlaySettleTimerRef.current = 0;
+      overlayClosingRef.current = false;
+      setOverlayVisible(false);
+      setOverlayMotionReady(false);
+      setExpandedContentVisible(false);
+      setOriginRect(null);
+      setTargetRect(null);
+      return;
+    }
+    if (overlayExpanded) setExpandedContentVisible(true);
+  }, [overlayExpanded]);
 
   const handleDraggingChange = useCallback((dragging: boolean) => {
     if (dragging) suppressOpenRef.current = true;
   }, []);
 
+  useEffect(() => {
+    if (!overlayVisible) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') handleOverlayClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [handleOverlayClose, overlayVisible]);
+
+  useEffect(() => {
+    if (!overlayVisible) return undefined;
+    const synchronizeOverlayGeometry = () => {
+      overlayResizeFrameRef.current = 0;
+      if (!compactCardRef.current || overlayClosingRef.current) return;
+      const rect = compactCardRef.current.getBoundingClientRect();
+      const nextOrigin = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+      setOverlayMotionReady(false);
+      setOriginRect(nextOrigin);
+      setTargetRect(getTargetRect(nextOrigin));
+      if (overlayResizeTimerRef.current) window.clearTimeout(overlayResizeTimerRef.current);
+      overlayResizeTimerRef.current = window.setTimeout(() => {
+        overlayResizeTimerRef.current = 0;
+        if (!overlayClosingRef.current) setOverlayMotionReady(true);
+      }, 120);
+    };
+    const handleViewportResize = () => {
+      if (overlayResizeFrameRef.current) return;
+      overlayResizeFrameRef.current = requestAnimationFrame(synchronizeOverlayGeometry);
+    };
+    window.addEventListener('resize', handleViewportResize);
+    return () => {
+      window.removeEventListener('resize', handleViewportResize);
+      if (overlayResizeFrameRef.current) cancelAnimationFrame(overlayResizeFrameRef.current);
+      if (overlayResizeTimerRef.current) window.clearTimeout(overlayResizeTimerRef.current);
+      overlayResizeFrameRef.current = 0;
+      overlayResizeTimerRef.current = 0;
+    };
+  }, [getTargetRect, overlayVisible]);
+
   useEffect(() => () => {
-    if (modalMountFrameRef.current) cancelAnimationFrame(modalMountFrameRef.current);
+    if (overlayFrameRef.current) cancelAnimationFrame(overlayFrameRef.current);
+    if (overlaySettleTimerRef.current) window.clearTimeout(overlaySettleTimerRef.current);
+    if (overlayResizeFrameRef.current) cancelAnimationFrame(overlayResizeFrameRef.current);
+    if (overlayResizeTimerRef.current) window.clearTimeout(overlayResizeTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    if (isActive === false && overlayVisible) handleOverlayClose();
+  }, [handleOverlayClose, isActive, overlayVisible]);
+
+  const hiddenRect: TimelineOverlayRect = { top: -10000, left: -10000, width: 960, height: 410 };
+  const shellRect = overlayVisible ? (targetRect || hiddenRect) : hiddenRect;
+  const animationOrigin = overlayVisible ? (originRect || shellRect) : shellRect;
+  const originOffsetX = animationOrigin.left - shellRect.left;
+  const originOffsetY = animationOrigin.top - shellRect.top;
+  const originClipRight = Math.max(0, shellRect.width - Math.min(animationOrigin.width, shellRect.width));
+  const originClipBottom = Math.max(0, shellRect.height - Math.min(animationOrigin.height, shellRect.height));
+  const overlayTimelineHeight = Math.max(COMPACT_GANTT_HEIGHT, (targetRect?.height || 720) - 98);
 
   return (
     <>
-      <Card className="dashboard-card gantt-card animate-slide-up stagger-3" title="整体计划时间线" bordered={false}>
-        <div className="gantt-compact-trigger" onClick={handleCompactClick} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCompactClick(); } }}>
-          <GanttTimelineView height={COMPACT_GANTT_HEIGHT} compact onDraggingChange={handleDraggingChange} />
-        </div>
-      </Card>
-
-      <Modal
-        open={timelineModalOpen}
-        onCancel={() => setTimelineModalOpen(false)}
-        afterClose={() => setTimelineContentMounted(false)}
-        footer={null}
-        centered
-        destroyOnClose={false}
-        width="min(1440px, calc(100vw - 72px))"
-        className="gantt-timeline-modal"
-        styles={{ mask: { background: 'rgba(15, 23, 42, 0.28)', backdropFilter: 'blur(8px) saturate(0.9)' } }}
-        title="全部项目时间线"
-      >
-        {timelineContentMounted ? (
-          <GanttTimelineView height={EXPANDED_GANTT_HEIGHT} />
-        ) : (
-          <div className="gantt-modal-loading" style={{ height: EXPANDED_GANTT_HEIGHT, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div className="skeleton-loading" style={{ width: '100%', height: '100%', borderRadius: 10 }} />
+      <div ref={compactCardRef} className={`gantt-shared-origin${overlayVisible ? ' is-transitioning' : ''}`}>
+        <Card className="dashboard-card gantt-card animate-slide-up stagger-3" title="整体计划时间线" bordered={false}>
+          <div className="gantt-compact-trigger" onClick={handleCompactClick} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCompactClick(); } }}>
+            <GanttTimelineView height={COMPACT_GANTT_HEIGHT} compact onDraggingChange={handleDraggingChange} />
           </div>
-        )}
-      </Modal>
+        </Card>
+      </div>
+
+      {createPortal(
+        <div className={`gantt-shared-overlay${overlayMotionReady ? ' is-motion-ready' : ''}${overlayExpanded ? ' is-expanded' : ''}${overlayVisible ? '' : ' is-hidden'}`}>
+          <div className="gantt-shared-mask" onClick={handleOverlayClose} />
+          <div
+            className="gantt-shared-shell"
+            style={{
+              top: shellRect.top,
+              left: shellRect.left,
+              width: shellRect.width,
+              height: shellRect.height,
+              '--gantt-origin-x': `${originOffsetX}px`,
+              '--gantt-origin-y': `${originOffsetY}px`,
+              '--gantt-origin-clip-right': `${originClipRight}px`,
+              '--gantt-origin-clip-bottom': `${originClipBottom}px`,
+            } as React.CSSProperties}
+            onTransitionEnd={handleOverlayTransitionEnd}
+          >
+            <Card
+              className="dashboard-card gantt-card gantt-expanded-card"
+              title="整体计划时间线"
+              extra={<Button type="text" icon={<CloseOutlined />} onClick={handleOverlayClose} aria-label="收起整体计划时间线" />}
+              bordered={false}
+            >
+              <GanttTimelineView
+                height={expandedContentVisible ? overlayTimelineHeight : COMPACT_GANTT_HEIGHT}
+                compact={!expandedContentVisible}
+              />
+            </Card>
+          </div>
+        </div>,
+        document.body,
+      )}
     </>
   );
 };

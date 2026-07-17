@@ -1,8 +1,9 @@
 import * as fs from 'fs';
-import { net } from 'electron';
+import { net, safeStorage } from 'electron';
 import { AIConfig, AIModelConfig } from '../types';
 import { aiConfigFile, aiLogFile, logsDir } from '../shared/paths';
 import { emitAIActivity, recordAIUsage, TokenUsage } from './aiUsageService';
+import { readVersionedJsonFile, writeVersionedJsonFile } from '../shared/versionedJson';
 
 // ─── AI 日志 ────────────────────────────────────────────
 
@@ -48,19 +49,59 @@ function ensureDataDir() {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+const ENCRYPTED_API_KEY_PREFIX = 'safe-storage:v1:';
+
+const decryptApiKey = (value?: string) => {
+  const apiKey = String(value || '');
+  if (!apiKey.startsWith(ENCRYPTED_API_KEY_PREFIX)) return apiKey;
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return '';
+    return safeStorage.decryptString(Buffer.from(apiKey.slice(ENCRYPTED_API_KEY_PREFIX.length), 'base64'));
+  } catch {
+    appendAiLog('Failed to decrypt stored API key');
+    return '';
+  }
+};
+
+const encryptApiKey = (value?: string) => {
+  const apiKey = String(value || '');
+  if (!apiKey || apiKey.startsWith(ENCRYPTED_API_KEY_PREFIX) || !safeStorage.isEncryptionAvailable()) return apiKey;
+  try {
+    return ENCRYPTED_API_KEY_PREFIX + safeStorage.encryptString(apiKey).toString('base64');
+  } catch {
+    appendAiLog('Failed to encrypt API key; preserving compatible storage');
+    return apiKey;
+  }
+};
+
+const decryptAIConfig = (config: AIConfig | null): AIConfig | null => config ? {
+  ...config,
+  apiKey: decryptApiKey(config.apiKey),
+  models: config.models?.map(model => ({ ...model, apiKey: decryptApiKey(model.apiKey) })),
+} : null;
+
+const encryptAIConfig = (config: AIConfig | null): AIConfig | null => config ? {
+  ...config,
+  apiKey: config.apiKey ? encryptApiKey(config.apiKey) : config.apiKey,
+  models: config.models?.map(model => ({ ...model, apiKey: encryptApiKey(model.apiKey) })),
+} : null;
+
 export function loadAIConfigFromDisk(): AIConfig | null {
   ensureDataDir();
-  if (!fs.existsSync(aiConfigFile)) return null;
-  try {
-    return normalizeAIConfig(JSON.parse(fs.readFileSync(aiConfigFile, 'utf-8')));
-  } catch {
-    return null;
-  }
+  const stored = readVersionedJsonFile<AIConfig | null>(aiConfigFile, null).data;
+  const decrypted = normalizeAIConfig(decryptAIConfig(stored));
+  const containsPlaintextKey = Boolean(
+    safeStorage.isEncryptionAvailable()
+    && (stored?.apiKey && !stored.apiKey.startsWith(ENCRYPTED_API_KEY_PREFIX)
+      || stored?.models?.some(model => model.apiKey && !model.apiKey.startsWith(ENCRYPTED_API_KEY_PREFIX)))
+  );
+  if (decrypted && containsPlaintextKey) writeVersionedJsonFile(aiConfigFile, encryptAIConfig(decrypted));
+  return decrypted;
 }
 
 export function saveAIConfigToDisk(config: AIConfig) {
   ensureDataDir();
-  fs.writeFileSync(aiConfigFile, JSON.stringify(normalizeAIConfig(config), null, 2), 'utf-8');
+  writeVersionedJsonFile(aiConfigFile, encryptAIConfig(normalizeAIConfig(config)));
 }
 
 export function normalizeAIConfig(config: AIConfig | null): AIConfig | null {

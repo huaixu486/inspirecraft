@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Card, Form, Input, Select, Button, Typography, message, Space, InputNumber,
   Avatar, Divider, Alert, Progress, Switch, Modal, Checkbox, Tag,
 } from 'antd';
-import { FolderOpenOutlined, UserOutlined } from '@ant-design/icons';
+import { CameraOutlined, DeleteOutlined, FolderOpenOutlined, UserOutlined } from '@ant-design/icons';
 import { HolidayDataSource } from '../../../shared/types';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useProjectStore } from '../../stores/projectStore';
@@ -28,6 +28,8 @@ const BasicSettings: React.FC = () => {
   const [selectedMigrationIds, setSelectedMigrationIds] = useState<string[]>([]);
   const [preparingMigration, setPreparingMigration] = useState(false);
   const [migratingWorkspace, setMigratingWorkspace] = useState(false);
+  const [profileAvatar, setProfileAvatar] = useState('');
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const {
     workspacePath, updateWorkspacePath,
     workspaceCapacity, updateWorkspaceCapacity,
@@ -62,8 +64,47 @@ const BasicSettings: React.FC = () => {
   useEffect(() => {
     if (userProfile) {
       profileForm.setFieldsValue(userProfile);
+      setProfileAvatar(userProfile.avatar || '');
     }
   }, [userProfile]);
+
+  const handleAvatarFile = (file?: File) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      message.warning('请选择图片文件');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      message.warning('头像原图不能超过 5 MB');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => message.error('读取头像失败');
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = () => message.error('无法解析该图片');
+      image.onload = () => {
+        const size = 160;
+        const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
+        const sourceX = Math.max(0, (image.naturalWidth - sourceSize) / 2);
+        const sourceY = Math.max(0, (image.naturalHeight - sourceSize) / 2);
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const context = canvas.getContext('2d');
+        if (!context) {
+          message.error('当前环境无法处理头像');
+          return;
+        }
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, size, size);
+        context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, size, size);
+        setProfileAvatar(canvas.toDataURL('image/jpeg', 0.84));
+      };
+      image.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+  };
 
   const handleHolidaySourceChange = async (source: HolidayDataSource) => {
     await updateHolidaySettings({ source });
@@ -287,33 +328,55 @@ const BasicSettings: React.FC = () => {
       </Card>
 
       {/* 个人信息 */}
-      <Card style={{ marginTop: 16 }}>
-        <Title level={5}>个人信息</Title>
+      <Card
+        style={{ marginTop: 16 }}
+        title="个人信息"
+        extra={<Button type="primary" onClick={() => profileForm.submit()}>保存资料</Button>}
+        className="profile-settings-card"
+      >
         <Form
           form={profileForm}
           layout="vertical"
           onFinish={async (values) => {
-            await updateUserProfile(values);
-            message.success('个人信息已保存');
+            try {
+              await updateUserProfile({ ...values, avatar: profileAvatar || undefined });
+              message.success('个人信息已保存，局域网好友将在数秒内看到新头像');
+            } catch (error) {
+              message.error(error instanceof Error ? error.message : '个人信息保存失败');
+            }
           }}
         >
-          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-            <Avatar size={64} icon={<UserOutlined />} src={userProfile?.avatar} />
-            <div style={{ flex: 1 }}>
+          <div className="profile-settings-layout">
+            <div className="profile-avatar-editor">
+              <button type="button" className="profile-avatar-button" onClick={() => avatarInputRef.current?.click()} title="选择头像">
+                <Avatar size={82} icon={<UserOutlined />} src={profileAvatar || undefined} />
+                <span><CameraOutlined /> 更换头像</span>
+              </button>
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                hidden
+                onChange={event => {
+                  handleAvatarFile(event.target.files?.[0]);
+                  event.target.value = '';
+                }}
+              />
+              {profileAvatar && <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => setProfileAvatar('')}>移除头像</Button>}
+              <Text type="secondary" className="profile-avatar-hint">自动裁剪为方形，并同步给局域网好友</Text>
+            </div>
+            <div className="profile-settings-fields">
               <Form.Item name="nickname" label="昵称">
                 <Input placeholder="请输入昵称" />
               </Form.Item>
               <Form.Item name="email" label="邮箱" rules={[{ type: 'email', message: '请输入有效邮箱地址' }]}>
-                <Input placeholder="好友、局域网聊天和邮箱搜索需要有效邮箱" />
+                <Input placeholder="好友聊天和邮箱搜索需要有效邮箱" />
               </Form.Item>
               <Text type="secondary" style={{ display: 'block', marginTop: -14, marginBottom: 10, fontSize: 12 }}>
-                填写后可启用局域网好友、按邮箱搜索和好友聊天；邮箱只在局域网设备发现中使用。
+                填写后可启用按邮箱搜索、添加好友和好友聊天。
               </Text>
             </div>
           </div>
-          <Form.Item>
-            <Button type="primary" htmlType="submit">保存</Button>
-          </Form.Item>
         </Form>
       </Card>
     </>

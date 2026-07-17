@@ -1,38 +1,11 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
-  Card,
   Button,
-  Select,
-  Space,
   Typography,
   message,
-  Tag,
-  Progress,
   Empty,
-  Checkbox,
-  Divider,
-  Row,
-  Col,
-  Statistic,
-  Alert,
-  Input,
-  Spin,
-  Tooltip,
 } from 'antd';
 import {
-  CheckCircleOutlined,
-  ExclamationCircleOutlined,
-  CloseCircleOutlined,
-  InfoCircleOutlined,
-  PlayCircleOutlined,
-  SwapOutlined,
-  RobotOutlined,
-  PlusOutlined,
-  SyncOutlined,
-  EditOutlined,
-  DeleteOutlined,
-  SaveOutlined,
-  CloseOutlined,
   LeftOutlined,
 } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
@@ -40,14 +13,22 @@ import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useTaskStore } from '../../stores/taskStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { DocumentVersion, ProjectDocument, ReviewConfig, ReviewIssue, ReviewResult, TaskItem } from '../../../shared/types';
+import { useNavigationStore } from '../../stores/navigationStore';
+import { AIConfig, DocumentVersion, ProjectDocument, ReviewConfig, ReviewIssue, ReviewResult, TaskItem } from '../../../shared/types';
 import { detectTimelineStage, getAllStages } from '../../utils/timelineStages';
+import { requireIpcObject } from '../../utils/ipcResult';
 import DiffMatchPatch from 'diff-match-patch';
-import { composePrompt } from '../../utils/promptComposer';
+import { composePromptAsync } from '../../utils/promptComposer';
 import { buildLifecyclePatch, reviewLifecycleStatus } from '../../utils/documentLifecycle';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
+import { pickProjectFiles } from '../../stores/projectPickerStore';
+import ReviewSetupPanel from './ReviewSetupPanel';
+import LatestReviewResultPanel from './LatestReviewResultPanel';
+import AiReviewAssistPanel from './AiReviewAssistPanel';
+import VersionComparisonPanel from './VersionComparisonPanel';
+import ReviewFindingsList, { type ReviewSectionFinding } from './ReviewFindingsList';
 
-const { Title, Text, Paragraph } = Typography;
+const { Title, Text } = Typography;
 
 
 type ReviewerDocKind =
@@ -179,14 +160,6 @@ type AiRewritePreview = {
   variants?: AiRewriteVariant[];
 };
 
-type ReviewSectionFinding = {
-  key: string;
-  title: string;
-  issues: ReviewIssue[];
-  aiProblems: string[];
-  aiSuggestions: string[];
-};
-
 const splitLongSuggestionLine = (line: string) => {
   if (line.length <= 120) return [line];
   return line
@@ -315,20 +288,47 @@ const splitAiSuggestionText = (value = ''): AiSuggestionBlock[] => {
     .filter(block => block.problem || block.suggestion);
 };
 
+const normalizeReviewDisplayItems = (lines: string[], maxItems = 6) => {
+  const seen = new Set<string>();
+  const items = lines
+    .flatMap(line => String(line || '')
+      .replace(/\r/g, '')
+      .replace(/^>\s*/gm, '')
+      .replace(/[“”]/g, '"')
+      .replace(/^["']|["']$/g, '')
+      .replace(/\n+/g, '\n')
+      .split(/\n|(?<=。)\s*(?=同样|例如|在原有|采用|建议|当前|程序|需人工|具体|补充)/)
+    )
+    .map(line => cleanAiSuggestionLine(line)
+      .replace(/^[-•·]\s*/, '')
+      .replace(/^[:：]+/, '')
+      .replace(/^["']|["']$/g, '')
+      .trim()
+    )
+    .filter(line => line && !/^(具体|表达|补充材料\/表达|以下是具体的改稿|的回应)$/.test(line))
+    .filter(line => {
+      const key = normalizeReviewSectionKey(line);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  return items.slice(0, maxItems);
+};
+
 
 const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../../shared/types').WorkbenchFocus; hideHeader?: boolean }> = ({ onBack, focus, hideHeader = false }) => {
   const {
     currentProject,
     currentStageName,
     versions,
-    pendingWorkflowFocus,
     loadVersions,
     addVersion,
     setCurrentStageName,
-    setPendingWorkflowFocus,
   } = useProjectStore();
+  const acknowledgeWorkflowFocus = useNavigationStore(state => state.acknowledgeActiveFocus);
+  const pendingWorkflowFocus = focus;
   const { templates, reviews, loadTemplates, loadReviews, executeReview } = useTemplateStore();
-  const { projectDocs, loadProjectDocs, updateProjectDoc } = useProjectDocStore();
+  const { projectDocs, loadProjectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const { tasks, loadTasks, addTask } = useTaskStore();
   const { customStages } = useSettingsStore();
   const [selectedTemplate, setSelectedTemplate] = useState<string>('');
@@ -482,8 +482,9 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
       setCurrentStageName(pendingWorkflowFocus.stageName);
     }
 
-    if (pendingWorkflowFocus.relatedDocId) {
-      const targetDoc = projectDocs.find(doc => doc.id === pendingWorkflowFocus.relatedDocId);
+    if (pendingWorkflowFocus.docId) {
+      const targetDoc = projectDocs.find(doc => doc.id === pendingWorkflowFocus.docId);
+      if (!targetDoc) return;
       if (targetDoc) {
         const targetTemplateId = targetDoc.templateId || selectedTemplate;
         if (targetTemplateId) setSelectedTemplate(targetTemplateId);
@@ -495,7 +496,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
     setAiAssistPrompt('');
     setAiAssistPromptSuggestion(pendingWorkflowFocus.prompt || '');
     setAiRewritePreviews([]);
-    setPendingWorkflowFocus(null);
+    acknowledgeWorkflowFocus();
   }, [
     currentProject?.id,
     currentStageName,
@@ -503,7 +504,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
     projectDocs,
     selectedTemplate,
     setCurrentStageName,
-    setPendingWorkflowFocus,
+    acknowledgeWorkflowFocus,
   ]);
 
   useEffect(() => {
@@ -519,6 +520,44 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
 
   // 选中文档后，获取其关联的版本
   const selectedDoc = matchedDocs.find(d => d.id === selectedDocId);
+
+  const handlePickReviewDocument = async () => {
+    if (!currentProject || !currentStageName) return;
+    const selected = await pickProjectFiles({
+      projectId: currentProject.id,
+      title: `${currentStageName} · 选择待审文件`,
+      stageName: currentStageName,
+      selectedPaths: selectedDoc?.sourceFilePath ? [selectedDoc.sourceFilePath] : [],
+    });
+    const selectedFile = selected[0];
+    const selectedPath = selectedFile?.path;
+    if (!selectedPath) return;
+    let doc = projectDocs.find(item => item.projectId === currentProject.id && (
+      item.sourceFilePath === selectedPath ||
+      (item.versionId ? projectVersions.find(version => version.id === item.versionId)?.filePath === selectedPath : false)
+    ));
+    if (!doc) {
+      const now = new Date().toISOString();
+      doc = {
+        id: `review-file-${Date.now()}`,
+        projectId: currentProject.id,
+        templateId: selectedTemplate || '',
+        name: selectedFile?.name || getFileBaseName(selectedPath),
+        sourceFilePath: selectedPath,
+        sourceFileCreatedAt: now,
+        sourceFileModifiedAt: now,
+        sections: [],
+        overallProgress: 0,
+        createdAt: now,
+        autoStage: true,
+        ...buildLifecyclePatch('identified'),
+      };
+      await addProjectDoc(doc);
+    }
+    const stage = getProjectDocStageName(doc);
+    if (stage && stage !== currentStageName) setCurrentStageName(stage);
+    setSelectedDocId(doc.id);
+  };
 
   const getDocumentVersion = (doc?: ProjectDocument) => {
     if (!doc) return undefined;
@@ -640,7 +679,11 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
       relatedReviewId: review.id,
       relatedIssueId: issue.id,
       sectionTitle: issue.sectionTitle,
+      sourceLineNumber: issue.lineNumber,
       stageName: template?.category,
+      workflowId: `review-${review.id}`,
+      workflowName: '审查修改任务',
+      workflowOrder: index + 1,
       createdAt: new Date().toISOString(),
     };
   };
@@ -661,6 +704,9 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
       relatedReviewId: review.id,
       sectionTitle,
       stageName: template?.category,
+      workflowId: `review-${review.id}`,
+      workflowName: '审查修改任务',
+      workflowOrder: 1000,
       createdAt: new Date().toISOString(),
     };
   };
@@ -1316,7 +1362,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
         message.error(parsed.error || '未能读取文档内容');
         return;
       }
-      const prompt = composePrompt('rewrite', {
+      const prompt = await composePromptAsync('rewrite', {
         sectionTitle: '（全文改稿）',
         requirement: `修改要求：${instruction}`,
         example: 'None',
@@ -1324,7 +1370,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
         reference: 'None',
         currentContent: parsed.content.slice(0, 16000),
       });
-      const aiConfig = await window.electronAPI.loadAIConfig();
+      const aiConfig = requireIpcObject<AIConfig>(await window.electronAPI.loadAIConfig(), '加载 AI 配置失败');
       const useParallel = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1 && window.electronAPI.callAIParallelDetails;
       let previews: AiRewritePreview[] = [];
       if (useParallel) {
@@ -1335,9 +1381,9 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
             projectId: currentProject?.id,
             resultPreview: () => '已生成审核修订预览',
           },
-          async ({ setProgress, throwIfCancelled }) => {
+          async ({ jobId, setProgress, throwIfCancelled }) => {
             setProgress(35);
-            const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
+            const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId, usageRequestId: jobId, usageTitle: 'AI 审查修订建议', usageScene: 'rewrite' });
             throwIfCancelled();
             setProgress(85);
             return value;
@@ -1360,9 +1406,9 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
             projectId: currentProject?.id,
             resultPreview: (value) => value,
           },
-          async ({ setProgress, throwIfCancelled }) => {
+          async ({ jobId, setProgress, throwIfCancelled }) => {
             setProgress(35);
-            const value = await window.electronAPI.callAI({ prompt });
+            const value = await window.electronAPI.callAI({ prompt, usageRequestId: jobId, usageTitle: 'AI 审查修订建议', usageScene: 'rewrite' });
             throwIfCancelled();
             setProgress(85);
             return String(value || '');
@@ -1424,14 +1470,14 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
     try {
       const versionA = versions.find(v => v.id === selectedVersionA);
       const versionB = versions.find(v => v.id === selectedVersionB);
-      const prompt = composePrompt('diff', {
+      const prompt = await composePromptAsync('diff', {
         versionAName: versionA?.fileName || '未知',
         contentA: contentA.substring(0, 12000),
         versionBName: versionB?.fileName || '未知',
         contentB: contentB.substring(0, 12000),
       });
 
-      const aiConfig = await window.electronAPI.loadAIConfig();
+      const aiConfig = requireIpcObject<AIConfig>(await window.electronAPI.loadAIConfig(), '加载 AI 配置失败');
       const useParallel = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1 && window.electronAPI.callAIParallelDetails;
       if (useParallel) {
         const details = await useAIJobStore.getState().runAIJob<{ synthesis: string; variants: Array<{ modelName: string; ok: boolean }> }>(
@@ -1441,9 +1487,9 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
             projectId: currentProject?.id,
             resultPreview: (value) => value.synthesis,
           },
-          async ({ setProgress, throwIfCancelled }) => {
+          async ({ jobId, setProgress, throwIfCancelled }) => {
             setProgress(35);
-            const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
+            const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId, usageRequestId: jobId, usageTitle: 'AI 分析版本差异', usageScene: 'diff' });
             throwIfCancelled();
             setProgress(85);
             return value;
@@ -1464,9 +1510,9 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
             projectId: currentProject?.id,
             resultPreview: (value) => value,
           },
-          async ({ setProgress, throwIfCancelled }) => {
+          async ({ jobId, setProgress, throwIfCancelled }) => {
             setProgress(35);
-            const value = await window.electronAPI.callAI({ prompt });
+            const value = await window.electronAPI.callAI({ prompt, usageRequestId: jobId, usageTitle: 'AI 分析版本差异', usageScene: 'diff' });
             throwIfCancelled();
             setProgress(85);
             return String(value || '');
@@ -1481,287 +1527,10 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
     }
   };
 
-  const getIssueIcon = (severity: string) => {
-    switch (severity) {
-      case 'error':
-        return <CloseCircleOutlined style={{ color: '#ff4d4f' }} />;
-      case 'warning':
-        return <ExclamationCircleOutlined style={{ color: '#faad14' }} />;
-      case 'info':
-        return <InfoCircleOutlined style={{ color: '#1677ff' }} />;
-      default:
-        return <InfoCircleOutlined />;
-    }
-  };
-
-  const getIssueTag = (type: string) => {
-    switch (type) {
-      case 'missing_section':
-        return <Tag color="red">缺失章节</Tag>;
-      case 'wrong_format':
-        return <Tag color="orange">格式错误</Tag>;
-      case 'content_deviation':
-        return <Tag color="yellow">内容偏差</Tag>;
-      default:
-        return <Tag>其他</Tag>;
-    }
-  };
-
   const getScoreColor = (score: number) => {
     if (score >= 80) return '#52c41a';
     if (score >= 60) return '#faad14';
     return '#ff4d4f';
-  };
-
-  const normalizeReviewDisplayItems = (lines: string[], maxItems = 6) => {
-    const seen = new Set<string>();
-    const items = lines
-      .flatMap(line => String(line || '')
-        .replace(/\r/g, '')
-        .replace(/^>\s*/gm, '')
-        .replace(/[“”]/g, '"')
-        .replace(/^["']|["']$/g, '')
-        .replace(/\n+/g, '\n')
-        .split(/\n|(?<=。)\s*(?=同样|例如|在原有|采用|建议|当前|程序|需人工|具体|补充)/)
-      )
-      .map(line => cleanAiSuggestionLine(line)
-        .replace(/^[-•·]\s*/, '')
-        .replace(/^[:：]+/, '')
-        .replace(/^["']|["']$/g, '')
-        .trim()
-      )
-      .filter(line => line && !/^(具体|表达|补充材料\/表达|以下是具体的改稿|的回应)$/.test(line))
-      .filter(line => {
-        const key = normalizeReviewSectionKey(line);
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    return items.slice(0, maxItems);
-  };
-
-  const renderReviewItems = (items: string[], tone: 'problem' | 'suggestion') => {
-    if (items.length === 0) {
-      return <Text type="secondary">{tone === 'problem' ? '暂无具体问题描述。' : '暂无建议。'}</Text>;
-    }
-    const color = tone === 'problem' ? '#ff4d4f' : '#1677ff';
-    return (
-      <Space direction="vertical" size={8} style={{ width: '100%' }}>
-        {items.map((item, index) => (
-          <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-            <span style={{
-              width: 20,
-              height: 20,
-              lineHeight: '20px',
-              textAlign: 'center',
-              borderRadius: 10,
-              background: tone === 'problem' ? '#fff1f0' : '#e6f4ff',
-              color,
-              fontSize: 12,
-              flex: '0 0 auto',
-              marginTop: 2,
-            }}>
-              {index + 1}
-            </span>
-            <Paragraph
-              style={{ marginBottom: 0, color: '#1f2937', lineHeight: 1.85, fontSize: 14 }}
-              ellipsis={item.length > 260 ? { rows: 3, expandable: true, symbol: tone === 'problem' ? '展开问题' : '展开建议' } : false}
-            >
-              {item}
-            </Paragraph>
-          </div>
-        ))}
-      </Space>
-    );
-  };
-
-  const renderIssueItems = (review: ReviewResult, issues: ReviewIssue[]) => {
-    if (issues.length === 0) return <Text type="secondary">暂无具体问题描述。</Text>;
-
-    return (
-      <Space direction="vertical" size={8} style={{ width: '100%' }}>
-        {issues.map((issue, index) => {
-          const key = getIssueTaskKey(review.id, issue.id);
-          const disabled = hasTaskForIssue(review.id, issue.id);
-          return (
-            <div key={issue.id} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-              <Checkbox
-                checked={Boolean(selectedReviewTaskKeys[key])}
-                disabled={disabled}
-                onChange={(event) => toggleReviewTaskSelection(key, event.target.checked)}
-                style={{ marginTop: 3 }}
-              />
-              <span style={{
-                width: 20,
-                height: 20,
-                lineHeight: '20px',
-                textAlign: 'center',
-                borderRadius: 10,
-                background: '#fff1f0',
-                color: '#ff4d4f',
-                fontSize: 12,
-                flex: '0 0 auto',
-                marginTop: 2,
-              }}>
-                {index + 1}
-              </span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <Space size={6} wrap style={{ marginBottom: 4 }}>
-                  {getIssueTag(issue.type)}
-                  {disabled && <Tag color="green">已生成任务</Tag>}
-                  {issue.id.startsWith('custom-') && <Tag color="purple">用户补充</Tag>}
-                </Space>
-                <Paragraph style={{ marginBottom: issue.suggestion ? 4 : 0, color: '#1f2937', lineHeight: 1.85, fontSize: 14 }}>
-                  {issue.message}
-                </Paragraph>
-                {issue.suggestion && (
-                  <Text type="secondary" style={{ display: 'block', lineHeight: 1.7 }}>建议：{issue.suggestion}</Text>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </Space>
-    );
-  };
-
-  const renderEditableAiSuggestionItems = (review: ReviewResult, sectionTitle: string, items: string[], startIndex = 0) => {
-    const sectionKey = normalizeReviewSectionKey(sectionTitle);
-    const visibleItems = items
-      .map((item, index) => ({ item, originalIndex: index }))
-      .filter(({ originalIndex }) => !deletedSuggestionKeys[review.id + ':' + sectionKey + ':ai:' + originalIndex]);
-
-    if (visibleItems.length === 0) return null;
-
-    return (
-      <Space direction="vertical" size={8} style={{ width: '100%' }}>
-        {visibleItems.map(({ item, originalIndex }, visibleIndex) => {
-          const suggestionKey = review.id + ':' + sectionKey + ':ai:' + originalIndex;
-          const value = suggestionDrafts[suggestionKey] ?? item;
-          const isEditing = editingSuggestionKey === suggestionKey;
-          const isExpanded = expandedSuggestionKey === suggestionKey || isEditing;
-          const isCreated = createdSuggestionTaskKeys[suggestionKey];
-          const disabledByTask = isCreated;
-
-          return (
-            <div
-              key={suggestionKey}
-              style={{
-                border: isExpanded ? '1px solid #91caff' : '1px solid #e5eefc',
-                background: isExpanded ? '#ffffff' : '#f8fbff',
-                borderRadius: 8,
-                padding: isExpanded ? '10px 12px' : '8px 12px',
-                cursor: isEditing ? 'default' : 'pointer',
-                boxShadow: isExpanded ? '0 4px 14px rgba(22, 119, 255, 0.08)' : 'none',
-                transition: 'all 0.16s ease',
-              }}
-              onClick={() => {
-                if (!isEditing) setExpandedSuggestionKey(isExpanded ? '' : suggestionKey);
-              }}
-            >
-              <div style={{ display: 'flex', gap: 10, alignItems: 'center', minHeight: 28 }}>
-                <Checkbox
-                  checked={Boolean(selectedReviewTaskKeys[suggestionKey])}
-                  disabled={disabledByTask}
-                  onClick={(event) => event.stopPropagation()}
-                  onChange={(event) => toggleReviewTaskSelection(suggestionKey, event.target.checked)}
-                />
-                <span style={{
-                  width: 22,
-                  height: 22,
-                  lineHeight: '22px',
-                  textAlign: 'center',
-                  borderRadius: 11,
-                  background: isExpanded ? '#1677ff' : '#e6f4ff',
-                  color: isExpanded ? '#fff' : '#1677ff',
-                  fontSize: 12,
-                  flex: '0 0 auto',
-                }}>
-                  {startIndex + visibleIndex + 1}
-                </span>
-                <Text
-                  style={{ flex: 1, minWidth: 0, color: '#1f2937' }}
-                  ellipsis={!isExpanded ? { tooltip: value } : false}
-                >
-                  {value}
-                </Text>
-                {isCreated && <Tag color="green" style={{ marginInlineEnd: 0 }}>{'\u5df2\u751f\u6210'}</Tag>}
-              </div>
-
-              {isExpanded && (
-                <div
-                  style={{ marginTop: 10, paddingLeft: 32 }}
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  {isEditing ? (
-                    <Input.TextArea
-                      value={value}
-                      autoSize={{ minRows: 2, maxRows: 6 }}
-                      onChange={(event) => setSuggestionDrafts(prev => ({ ...prev, [suggestionKey]: event.target.value }))}
-                    />
-                  ) : (
-                    <Paragraph style={{ marginBottom: 0, color: '#334155', lineHeight: 1.8, fontSize: 14 }}>
-                      {value}
-                    </Paragraph>
-                  )}
-
-                  <Space size={8} wrap style={{ marginTop: 8 }}>
-                    {isEditing ? (
-                      <>
-                        <Button
-                          size="small"
-                          icon={<SaveOutlined />}
-                          onClick={() => {
-                            setEditingSuggestionKey('');
-                            message.success('\u5df2\u66f4\u65b0\u5efa\u8bae\u5185\u5bb9');
-                          }}
-                        >
-                          {'\u4fdd\u5b58'}
-                        </Button>
-                        <Button
-                          size="small"
-                          icon={<CloseOutlined />}
-                          onClick={() => {
-                            setSuggestionDrafts(prev => ({ ...prev, [suggestionKey]: item }));
-                            setEditingSuggestionKey('');
-                          }}
-                        >
-                          {'\u53d6\u6d88'}
-                        </Button>
-                      </>
-                    ) : (
-                      <Button
-                        size="small"
-                        icon={<EditOutlined />}
-                        onClick={() => {
-                          setSuggestionDrafts(prev => ({ ...prev, [suggestionKey]: value }));
-                          setExpandedSuggestionKey(suggestionKey);
-                          setEditingSuggestionKey(suggestionKey);
-                        }}
-                      >
-                        {'\u7f16\u8f91'}
-                      </Button>
-                    )}
-                    <Button
-                      size="small"
-                      danger
-                      icon={<DeleteOutlined />}
-                      onClick={() => {
-                        setDeletedSuggestionKeys(prev => ({ ...prev, [suggestionKey]: true }));
-                        if (expandedSuggestionKey === suggestionKey) setExpandedSuggestionKey('');
-                      }}
-                    >
-                      {'\u5220\u9664'}
-                    </Button>
-
-                  </Space>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </Space>
-    );
   };
 
   const buildReviewSectionFindings = (review: ReviewResult): ReviewSectionFinding[] => {
@@ -1799,65 +1568,6 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
     );
   };
 
-  const renderReviewSectionFindings = (review: ReviewResult) => {
-    const findings = buildReviewSectionFindings(review);
-    if (findings.length === 0) {
-      return <Empty description="暂未发现需要处理的问题" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
-    }
-
-    return (
-      <Space direction="vertical" size={12} style={{ width: '100%' }}>
-        {findings.map(section => {
-          const issueSuggestions = section.issues.map(issue => issue.suggestion).filter(Boolean) as string[];
-          const problemLines = [
-            ...section.issues.map(issue => issue.message),
-            ...section.aiProblems,
-          ].filter(Boolean);
-          const suggestionLines = issueSuggestions.filter(Boolean);
-          const aiSuggestionItems = normalizeReviewDisplayItems(section.aiSuggestions, 5);
-
-          const problemItems = normalizeReviewDisplayItems(problemLines, 5);
-          const suggestionItems = normalizeReviewDisplayItems(suggestionLines, 5);
-
-          return (
-            <div key={section.key} style={{ width: '100%', border: '1px solid #e5e7eb', borderRadius: 8, padding: 16, background: '#fff' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap', paddingBottom: 10, borderBottom: '1px solid #f0f0f0' }}>
-                <Text strong style={{ fontSize: 16, marginRight: 4 }}>{section.title}</Text>
-                {section.issues.map(issue => (
-                  <span key={issue.id}>{getIssueTag(issue.type)}</span>
-                ))}
-                {section.aiProblems.length > 0 || section.aiSuggestions.length > 0 ? <Tag color="blue">AI补充</Tag> : null}
-              </div>
-
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                <div style={{ borderLeft: '3px solid #ff7875', background: '#fffafa', padding: '12px 14px', borderRadius: 6 }}>
-                  <Text strong style={{ display: 'block', marginBottom: 8, color: '#a8071a' }}>问题</Text>
-                  {renderIssueItems(review, section.issues)}
-                  {section.aiProblems.length > 0 && (
-                    <div style={{ marginTop: section.issues.length > 0 ? 10 : 0 }}>
-                      {renderReviewItems(normalizeReviewDisplayItems(section.aiProblems, 5), 'problem')}
-                    </div>
-                  )}
-                </div>
-                <div style={{ borderLeft: '3px solid #69b1ff', background: '#f8fbff', padding: '12px 14px', borderRadius: 6 }}>
-                  <Text strong style={{ display: 'block', marginBottom: 8, color: '#0958d9' }}>建议</Text>
-                  {suggestionItems.length > 0 && renderReviewItems(suggestionItems, 'suggestion')}
-                  {aiSuggestionItems.length > 0 && (
-                    <div style={{ marginTop: suggestionItems.length > 0 ? 10 : 0, paddingTop: suggestionItems.length > 0 ? 10 : 0, borderTop: suggestionItems.length > 0 ? '1px solid #dbeafe' : 'none' }}>
-                      <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>{'\u70b9\u51fb\u5efa\u8bae\u6761\u76ee\u540e\u53ef\u7f16\u8f91\u3001\u5220\u9664\u6216\u751f\u6210\u4efb\u52a1'}</Text>
-                      {renderEditableAiSuggestionItems(review, section.title, aiSuggestionItems, suggestionItems.length)}
-                    </div>
-                  )}
-                </div>
-              </Space>
-
-            </div>
-          );
-        })}
-      </Space>
-    );
-  };
-
 
   if (!currentProject) {
     return (
@@ -1869,7 +1579,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
   }
 
   return (
-    <div>
+    <div className="document-reviewer-page">
       {!hideHeader && <div style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
           <Button type="text" size="small" icon={<LeftOutlined />} onClick={onBack} title="返回" />
@@ -1878,619 +1588,134 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
         <Text type="secondary" style={{ fontSize: 13, lineHeight: 1.5 }}>对比模板要求审查文档，查看AI建议和版本差异</Text>
       </div>}
 
-      {aiAssistPromptSuggestion && (
-        <Card
-          title="\u5ba1\u67e5 - AI\u534f\u4f5c"
-          style={{ marginBottom: 16, borderColor: '#91caff' }}
-          extra={focusedWorkflowTaskId ? <Tag color="blue">{'\u6765\u81ea\u5de5\u4f5c\u6d41'}</Tag> : null}
-        >
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-            <Text type="secondary">{'\u70b9\u51fb\u8f93\u5165\u6846\u540e\u6309 Tab\uff0c\u81ea\u52a8\u586b\u5145\u5f53\u524d\u5de5\u4f5c\u6d41\u95ee\u9898\u7684\u63d0\u793a\u8bcd\u3002'}</Text>
-            <Input.TextArea
-              value={aiAssistPrompt}
-              autoSize={{ minRows: 4, maxRows: 10 }}
-              placeholder="\u6309 Tab \u81ea\u52a8\u586b\u5145\u63d0\u793a\u8bcd"
-              onChange={(event) => setAiAssistPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Tab' && !aiAssistPrompt.trim()) {
-                  event.preventDefault();
-                  setAiAssistPrompt(aiAssistPromptSuggestion);
-                }
-              }}
-            />
-            <Space wrap>
-              <Button size="small" onClick={() => setAiAssistPrompt(aiAssistPromptSuggestion)}>{'\u586b\u5145\u63d0\u793a\u8bcd'}</Button>
-              <Button size="small" onClick={() => setAiAssistPrompt('')}>{'\u6e05\u7a7a'}</Button>
-              <Button size="small" type="primary" icon={<RobotOutlined />} loading={isGeneratingRewritePlan} onClick={handleGenerateRewritePlan}>
-                {'\u751f\u6210\u4fee\u6539\u9884\u89c8'}
-              </Button>
-            </Space>
-            {aiRewritePreviews.length > 0 && (
-              <Space direction="vertical" size={12} style={{ width: '100%', marginTop: 8 }}>
-                {aiRewritePreviews.map(preview => (
-                  <div key={preview.id} style={{ border: '1px solid #dbeafe', borderRadius: 8, padding: 12, background: '#f8fbff' }}>
-                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                      <Space wrap>
-                        <Text strong>{preview.title}</Text>
-                        {preview.status === 'accepted' ? <Tag color="green">{'\u5df2\u91c7\u7528'}</Tag> : null}
-                      </Space>
-                      <div style={{ border: '1px solid #e5e7eb', borderRadius: 6, padding: 10, background: '#fff' }}>
-                        <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>{'\u5f85\u66ff\u6362\u539f\u6587'}</Text>
-                        <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }} ellipsis={{ rows: 3, expandable: true }}>{preview.original}</Paragraph>
-                      </div>
-                      <Row gutter={[10, 10]}>
-                        {(preview.variants?.length ? preview.variants : [{ id: 'default', modelName: 'AI\u7248\u672c', ok: true, replacement: preview.replacement, reason: preview.reason }]).map(variant => (
-                          <Col key={variant.id} xs={24} md={preview.variants && preview.variants.length > 1 ? 12 : 24}>
-                            <div style={{ height: '100%', border: '1px solid #e5e7eb', borderRadius: 8, padding: 10, background: '#fff' }}>
-                              <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                                <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-                                  <Tag color={variant.ok ? 'blue' : 'red'}>{variant.modelName}</Tag>
-                                  <Button
-                                    size="small"
-                                    type="primary"
-                                    disabled={!variant.ok || !variant.replacement.trim() || preview.status === 'accepted'}
-                                    loading={applyingRewriteId === `${preview.id}:${variant.id}`}
-                                    onClick={() => handleAcceptRewrite(preview, variant)}
-                                  >
-                                    {'\u91c7\u7528\u6b64\u7248\u672c'}
-                                  </Button>
-                                </Space>
-                                {variant.error ? <Text type="danger">{variant.error}</Text> : null}
-                                <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }} ellipsis={{ rows: 5, expandable: true }}>{variant.replacement}</Paragraph>
-                                {variant.reason ? <Text type="secondary">{variant.reason}</Text> : null}
-                              </Space>
-                            </div>
-                          </Col>
-                        ))}
-                      </Row>
-                    </Space>
-                  </div>
-                ))}
-              </Space>
-            )}
-          </Space>
-        </Card>
-      )}
+      <AiReviewAssistPanel
+        visible={Boolean(aiAssistPromptSuggestion)}
+        fromWorkflow={Boolean(focusedWorkflowTaskId)}
+        prompt={aiAssistPrompt}
+        suggestedPrompt={aiAssistPromptSuggestion}
+        previews={aiRewritePreviews}
+        isGenerating={isGeneratingRewritePlan}
+        applyingRewriteId={applyingRewriteId}
+        onPromptChange={setAiAssistPrompt}
+        onGenerate={() => void handleGenerateRewritePlan()}
+        onAccept={(preview, variant) => void handleAcceptRewrite(preview, variant)}
+      />
 
+      <ReviewSetupPanel
+        currentStage={currentStageName}
+        stageOptions={reviewerStageOptions.map(option => ({ value: option.value, label: option.label }))}
+        selectedTemplateId={selectedTemplate}
+        templateOptions={visibleTemplates.map(template => ({
+          value: template.id,
+          label: `${template.name}（${template.templateType === 'example' ? '范文模板' : '直接模板'} · ${formatVersionDate(template.updatedAt || template.createdAt)}）`,
+        }))}
+        documents={matchedDocs.map(doc => {
+          const version = getDocumentVersion(doc);
+          const docKind = inferReviewerProjectDocKind(doc, version);
+          const kindMismatch = Boolean(selectedTemplateKind && docKind && !reviewerKindsCompatible(selectedTemplateKind, docKind));
+          const canSyncVersion = !version && Boolean(doc.sourceFilePath);
+          return {
+            id: doc.id,
+            name: doc.name,
+            kindLabel: docKind ? reviewerKindLabels[docKind] : undefined,
+            kindMismatch,
+            versionDescription: `${version ? `版本: ${version.fileName}` : canSyncVersion ? '未同步版本，审查时会自动同步' : '暂无版本'}${doc.analyzedAt ? ` · 分析于 ${new Date(doc.analyzedAt).toLocaleDateString('zh-CN')}` : ''}${kindMismatch ? ' · 类型与当前模板不一致' : ''}`,
+            progress: doc.overallProgress,
+            canSyncVersion,
+            syncing: syncingDocId === doc.id,
+          };
+        })}
+        selectedDocumentId={selectedDocId}
+        mismatchMessage={templateDocMismatchMessage}
+        config={reviewConfig}
+        isReviewing={isReviewing}
+        blockReview={shouldBlockMissingSectionReview}
+        onStageChange={(stage) => {
+          setCurrentStageName(stage);
+          setSelectedTemplate('');
+          setSelectedDocId('');
+        }}
+        onTemplateChange={(templateId) => {
+          setSelectedTemplate(templateId);
+          setSelectedDocId('');
+        }}
+        onDocumentChange={setSelectedDocId}
+        onPickDocument={() => void handlePickReviewDocument()}
+        onSyncVersion={(documentId) => {
+          const document = matchedDocs.find(item => item.id === documentId);
+          if (document) void handleSyncDocumentVersion(document);
+        }}
+        onConfigChange={setReviewConfig}
+        onStartReview={() => void handleStartReview()}
+      />
 
-      {/* 文档审查 */}
-      <Card style={{ marginBottom: 16 }}>
-        <Space direction="vertical" style={{ width: '100%' }} size="middle">
-          <Row gutter={[12, 12]}>
-            <Col xs={24} md={8}>
-              <Text strong style={{ display: 'block', marginBottom: 8 }}>{'\u9009\u62e9\u5ba1\u67e5\u9636\u6bb5'}</Text>
-              <Select
-                placeholder={'先选择要审查的阶段'}
-                style={{ width: '100%' }}
-                value={currentStageName || undefined}
-                onChange={(val) => {
-                  setCurrentStageName(val);
-                  setSelectedTemplate('');
-                  setSelectedDocId('');
-                }}
-                options={reviewerStageOptions.map(option => ({
-                  value: option.value,
-                  label: option.label,
-                }))}
-              />
-            </Col>
-            <Col xs={24} md={16}>
-              <Text strong style={{ display: 'block', marginBottom: 8 }}>{'\u9009\u62e9\u5ba1\u67e5\u6a21\u677f\u6216\u7248\u672c'}</Text>
-              <Select
-                placeholder={currentStageName ? '\u9009\u62e9\u5f53\u524d\u9636\u6bb5\u5185\u7684\u6a21\u677f' : '\u8bf7\u5148\u9009\u62e9\u9636\u6bb5'}
-                style={{ width: '100%' }}
-                value={selectedTemplate || undefined}
-                disabled={!currentStageName}
-                notFoundContent={currentStageName ? '\u5f53\u524d\u9636\u6bb5\u6682\u65e0\u6a21\u677f' : '\u8bf7\u5148\u9009\u62e9\u9636\u6bb5'}
-                onChange={(val) => { setSelectedTemplate(val); setSelectedDocId(''); }}
-                options={visibleTemplates.map(t => {
-                  const typeLabel = t.templateType === 'example' ? '\u8303\u6587\u6a21\u677f' : '\u76f4\u63a5\u6a21\u677f';
-                  return {
-                    value: t.id,
-                    label: `${t.name}\uff08${typeLabel} \u00b7 ${formatVersionDate(t.updatedAt || t.createdAt)}\uff09`,
-                  };
-                })}
-              />
-            </Col>
-          </Row>
+      <LatestReviewResultPanel
+        review={latestReview}
+        scoreColor={latestReview ? getScoreColor(latestReview.score) : '#1677ff'}
+        showFindings={Boolean(latestReview && (latestReview.issues.length > 0 || latestReview.aiSuggestions || customIssueEditorOpen || (customReviewIssuesByReview[latestReview.id] || []).length > 0))}
+        findings={latestReview ? (
+          <ReviewFindingsList
+            review={latestReview}
+            findings={buildReviewSectionFindings(latestReview)}
+            selectedKeys={selectedReviewTaskKeys}
+            deletedSuggestionKeys={deletedSuggestionKeys}
+            createdSuggestionTaskKeys={createdSuggestionTaskKeys}
+            suggestionDrafts={suggestionDrafts}
+            editingSuggestionKey={editingSuggestionKey}
+            expandedSuggestionKey={expandedSuggestionKey}
+            getIssueTaskKey={getIssueTaskKey}
+            getSuggestionTaskKey={(reviewId, sectionTitle, index) => `${reviewId}:${normalizeReviewSectionKey(sectionTitle)}:ai:${index}`}
+            hasTaskForIssue={hasTaskForIssue}
+            onToggleSelection={toggleReviewTaskSelection}
+            onSuggestionDraftChange={(key, value) => setSuggestionDrafts(prev => ({ ...prev, [key]: value }))}
+            onEditingSuggestionChange={setEditingSuggestionKey}
+            onExpandedSuggestionChange={setExpandedSuggestionKey}
+            onDeleteSuggestion={(key) => {
+              setDeletedSuggestionKeys(prev => ({ ...prev, [key]: true }));
+              if (expandedSuggestionKey === key) setExpandedSuggestionKey('');
+            }}
+          />
+        ) : null}
+        editorOpen={customIssueEditorOpen}
+        draft={customIssueDraft}
+        onDraftChange={setCustomIssueDraft}
+        onOpenEditor={() => setCustomIssueEditorOpen(true)}
+        onCloseEditor={() => setCustomIssueEditorOpen(false)}
+        onAddIssue={() => {
+          if (latestReview) void handleAddCustomReviewIssue(latestReview);
+        }}
+        onCreateTasks={() => {
+          if (latestReview) void handleCreateReviewTasks(latestReview);
+        }}
+      />
 
-          {currentStageName && visibleTemplates.length === 0 && (
-            <Alert
-              showIcon
-              type="info"
-              message={'当前阶段还没有可用的审查模板'}
-              description={'可以先在该阶段导入或创建模板，已导入的阶段文件仍会显示在下方便于核对。'}
-            />
-          )}
-
-          {currentStageName && (
-            <div>
-              <Text strong style={{ display: 'block', marginBottom: 8 }}>
-                {'\u9009\u62e9\u5f85\u5ba1\u6587\u4ef6'}
-                <Text type="secondary" style={{ fontWeight: 'normal', marginLeft: 8 }}>
-                  {`\u5f53\u524d\u9636\u6bb5 ${currentStageName}\uff0c\u5171 ${matchedDocs.length} \u4e2a\u9636\u6bb5\u6587\u4ef6`}
-                </Text>
-              </Text>
-              {matchedDocs.length === 0 ? (
-                <Empty
-                  description={'当前阶段暂无可审查文件'}
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                />
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {matchedDocs.map(doc => {
-                    const version = getDocumentVersion(doc);
-                    const docKind = inferReviewerProjectDocKind(doc, version);
-                    const isKindMismatch = Boolean(selectedTemplateKind && docKind && !reviewerKindsCompatible(selectedTemplateKind, docKind));
-                    const isSelected = selectedDocId === doc.id;
-                    const canSyncVersion = !version && Boolean(doc.sourceFilePath);
-                    return (
-                      <div
-                        key={doc.id}
-                        onClick={() => setSelectedDocId(doc.id)}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 12,
-                          padding: '10px 14px',
-                          borderRadius: 8,
-                          border: isSelected ? '2px solid #1890ff' : '1px solid #f0f0f0',
-                          background: isSelected ? '#e6f7ff' : '#fafafa',
-                          cursor: 'pointer',
-                          transition: 'all 0.15s',
-                        }}
-                      >
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <Space size={6} style={{ maxWidth: '100%' }}>
-                            <Text style={{ display: 'block', fontSize: 13, maxWidth: 520 }} ellipsis={{ tooltip: doc.name }}>{doc.name}</Text>
-                            {docKind && <Tag color={isKindMismatch ? 'orange' : 'blue'}>{reviewerKindLabels[docKind]}</Tag>}
-                          </Space>
-                          <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
-                            {version ? `\u7248\u672c: ${version.fileName}` : canSyncVersion ? '\u672a\u540c\u6b65\u7248\u672c\uff0c\u5ba1\u67e5\u65f6\u4f1a\u81ea\u52a8\u540c\u6b65' : '\u6682\u65e0\u7248\u672c'}
-                            {doc.analyzedAt ? ` \u00b7 \u5206\u6790\u4e8e ${new Date(doc.analyzedAt).toLocaleDateString('zh-CN')}` : ''}
-                            {isKindMismatch ? ' \u00b7 \u7c7b\u578b\u4e0e\u5f53\u524d\u6a21\u677f\u4e0d\u4e00\u81f4' : ''}
-                          </Text>
-                        </div>
-                        <Space size={8} wrap>
-                          {canSyncVersion && (
-                            <Button
-                              size="small"
-                              icon={<SyncOutlined />}
-                              loading={syncingDocId === doc.id}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                handleSyncDocumentVersion(doc);
-                              }}
-                            >
-                              {'\u540c\u6b65\u7248\u672c'}
-                            </Button>
-                          )}
-                          <Progress percent={doc.overallProgress} size="small" style={{ width: 100, marginBottom: 0 }} />
-                        </Space>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {templateDocMismatchMessage && (
-            <Alert
-              showIcon
-              type="warning"
-              message="模板与文件类型不匹配"
-              description={`${templateDocMismatchMessage} 建议切换正确模板后再审查；如果只是想做格式/内容提示，可以先取消“检查缺失章节”。`}
-            />
-          )}
-
-          {/* 审查配置 */}
-          {selectedDocId && (
-            <>
-              <Divider style={{ margin: '4px 0' }} />
-              <Space wrap>
-                <Checkbox
-                  checked={reviewConfig.checkMissingSections}
-                  onChange={(e) => setReviewConfig({ ...reviewConfig, checkMissingSections: e.target.checked })}
-                >
-                  检查缺失章节
-                </Checkbox>
-                <Checkbox
-                  checked={reviewConfig.checkFormatting}
-                  onChange={(e) => setReviewConfig({ ...reviewConfig, checkFormatting: e.target.checked })}
-                >
-                  检查格式
-                </Checkbox>
-                <Checkbox
-                  checked={reviewConfig.checkContentDeviation}
-                  onChange={(e) => setReviewConfig({ ...reviewConfig, checkContentDeviation: e.target.checked })}
-                >
-                  检查内容偏差
-                </Checkbox>
-                <Checkbox
-                  checked={reviewConfig.enableAI}
-                  onChange={(e) => setReviewConfig({ ...reviewConfig, enableAI: e.target.checked })}
-                >
-                  启用AI建议
-                </Checkbox>
-              </Space>
-
-              <Button
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                onClick={handleStartReview}
-                loading={isReviewing}
-                disabled={shouldBlockMissingSectionReview}
-              >
-                开始审查
-              </Button>
-            </>
-          )}
-        </Space>
-      </Card>
-
-      {!latestReview ? (
-        <Empty description="暂无审查记录" />
-      ) : (
-        <Card
-          key={latestReview.id}
-          title="最新审查结果"
-          style={{ marginBottom: 16 }}
-          extra={(
-            <Space wrap>
-              <Button size="small" icon={<PlusOutlined />} onClick={() => setCustomIssueEditorOpen(true)}>
-                新增审查问题
-              </Button>
-              <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => handleCreateReviewTasks(latestReview)}>
-                生成选中任务
-              </Button>
-            </Space>
-          )}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, gap: 16 }}>
-            <div>
-              <Text strong>审查时间：{new Date(latestReview.createdAt).toLocaleString('zh-CN')}</Text>
-              <br />
-              <Text type="secondary">{latestReview.summary}</Text>
-            </div>
-            <div style={{ textAlign: 'center', flex: '0 0 auto' }}>
-              <Progress
-                type="circle"
-                percent={latestReview.score}
-                size={80}
-                strokeColor={getScoreColor(latestReview.score)}
-                format={(percent) => `${percent}分`}
-              />
-            </div>
-          </div>
-
-          {(latestReview.issues.length > 0 || latestReview.aiSuggestions || customIssueEditorOpen || (customReviewIssuesByReview[latestReview.id] || []).length > 0) && (
-            <>
-              <Divider>问题与建议</Divider>
-              {customIssueEditorOpen && latestReview && (
-                <Card size="small" style={{ marginBottom: 12, background: '#fbfdff' }}>
-                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                    <Text strong>新增审查问题</Text>
-                    <Input
-                      placeholder="相关章节，可选"
-                      value={customIssueDraft.sectionTitle}
-                      onChange={(event) => setCustomIssueDraft(prev => ({ ...prev, sectionTitle: event.target.value }))}
-                    />
-                    <Input.TextArea
-                      placeholder="问题描述"
-                      value={customIssueDraft.message}
-                      autoSize={{ minRows: 2, maxRows: 5 }}
-                      onChange={(event) => setCustomIssueDraft(prev => ({ ...prev, message: event.target.value }))}
-                    />
-                    <Input.TextArea
-                      placeholder="修改建议，可选"
-                      value={customIssueDraft.suggestion}
-                      autoSize={{ minRows: 2, maxRows: 5 }}
-                      onChange={(event) => setCustomIssueDraft(prev => ({ ...prev, suggestion: event.target.value }))}
-                    />
-                    <Space>
-                      <Button size="small" type="primary" onClick={() => handleAddCustomReviewIssue(latestReview)}>加入列表</Button>
-                      <Button size="small" onClick={() => setCustomIssueEditorOpen(false)}>取消</Button>
-                    </Space>
-                  </Space>
-                </Card>
-              )}
-              {renderReviewSectionFindings(latestReview)}
-            </>
-          )}
-        </Card>
-      )}
-
-      {/* 版本对比 */}
-      <Card
-        title={currentStageName ? `版本对比 · ${currentStageName}` : '版本对比'}
-        style={{ marginTop: 16, overflow: 'hidden' }}
-        styles={{ body: { overflow: 'hidden' } }}
-        extra={
-          <Space size={8} wrap>
-            {selectedVersionA && selectedVersionB && (
-              <Button
-                icon={<SwapOutlined />}
-                size="small"
-                onClick={() => { const tmp = selectedVersionA; setSelectedVersionA(selectedVersionB); setSelectedVersionB(tmp); }}
-                title="交换 A/B 版本"
-              />
-            )}
-            <Button
-              type="primary"
-              icon={<RobotOutlined />}
-              loading={isAnalyzingDiff}
-              disabled={!selectedVersionA || !selectedVersionB || Boolean(parsingCompareIds[selectedVersionA] || parsingCompareIds[selectedVersionB])}
-              onClick={handleAiDiffAnalysis}
-            >
-              AI 分析对比
-            </Button>
-          </Space>
-        }
-      >
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          {/* 版本选择器 */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12, alignItems: 'stretch', width: '100%', minWidth: 0 }}>
-            <div style={{ minWidth: 0, border: '1px solid #e5e7eb', borderRadius: 8, padding: '10px 14px', background: '#fafbfc', overflow: 'hidden' }}>
-              <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>基准 (A)</Text>
-              <Select
-                showSearch
-                size="small"
-                style={{ width: '100%', marginTop: 6, minWidth: 0 }}
-                placeholder="选择基准版本"
-                value={selectedVersionA || undefined}
-                optionFilterProp="label"
-                onChange={setSelectedVersionA}
-                options={comparableVersions.map(version => ({
-                  value: version.id,
-                  label: `${version.fileName} · ${formatVersionDate(version.createdAt)}`,
-                }))}
-              />
-              {selectedVersionMetaA && (
-                <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 11 }} ellipsis={{ tooltip: selectedVersionMetaA.fileName }}>
-                  {selectedVersionMetaA.content.length.toLocaleString()} 字 · {getCompareSourceLabel(selectedVersionMetaA.source)} · {selectedVersionMetaA.fileName}
-                </Text>
-              )}
-            </div>
-            <div style={{ minWidth: 0, border: '1px solid #e5e7eb', borderRadius: 8, padding: '10px 14px', background: '#fafbfc', overflow: 'hidden' }}>
-              <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>对比 (B)</Text>
-              <Select
-                showSearch
-                size="small"
-                style={{ width: '100%', marginTop: 6, minWidth: 0 }}
-                placeholder="选择对比版本"
-                value={selectedVersionB || undefined}
-                optionFilterProp="label"
-                onChange={setSelectedVersionB}
-                options={comparableVersions.map(version => ({
-                  value: version.id,
-                  label: `${version.fileName} · ${formatVersionDate(version.createdAt)}`,
-                }))}
-              />
-              {selectedVersionMetaB && (
-                <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 11 }} ellipsis={{ tooltip: selectedVersionMetaB.fileName }}>
-                  {selectedVersionMetaB.content.length.toLocaleString()} 字 · {getCompareSourceLabel(selectedVersionMetaB.source)} · {selectedVersionMetaB.fileName}
-                </Text>
-              )}
-            </div>
-          </div>
-
-          {selectedVersionA && selectedVersionB ? (
-            <>
-              {/* 统计栏 */}
-              <div style={{ display: 'flex', gap: 16, rowGap: 6, flexWrap: 'wrap', padding: '8px 16px', background: '#f6f8fa', borderRadius: 8, fontSize: 13 }}>
-                <span style={{ color: '#8c8c8c' }}>共 <strong>{diffStats.total}</strong> 行</span>
-                <span style={{ color: '#52c41a' }}>+{diffStats.insert} 新增</span>
-                <span style={{ color: '#ff4d4f' }}>-{diffStats.delete} 删除</span>
-                <span style={{ color: '#8c8c8c' }}>{diffStats.equal} 未变</span>
-                {diffStats.total > 0 && (
-                  <span style={{ marginLeft: 'auto', color: '#8c8c8c', fontSize: 12, whiteSpace: 'nowrap' }}>
-                    变更率 {((diffStats.insert + diffStats.delete) / diffStats.total * 100).toFixed(1)}%
-                  </span>
-                )}
-              </div>
-
-              {/* 格式工具条：格式差异嵌入下方内容行内显示 */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, rowGap: 6, flexWrap: 'wrap', padding: '8px 12px', background: '#fff7e6', border: '1px solid #ffe7ba', borderRadius: 8 }}>
-                {!selectedVersionMetaA || !selectedVersionMetaB ? (
-                  <Text type="secondary">请选择两个文档后查看格式差异</Text>
-                ) : !canReadFormat(selectedVersionMetaA) || !canReadFormat(selectedVersionMetaB) ? (
-                  <Text type="secondary">格式对比暂只支持 Word 文档，当前仅显示内容差异</Text>
-                ) : formatCompareById[selectedVersionMetaA.id]?.loading || formatCompareById[selectedVersionMetaB.id]?.loading ? (
-                  <><Spin size="small" /><Text type="secondary">正在提取段落格式...</Text></>
-                ) : formatCompareById[selectedVersionMetaA.id]?.error || formatCompareById[selectedVersionMetaB.id]?.error ? (
-                  <Text type="secondary">格式提取失败：{formatCompareById[selectedVersionMetaA.id]?.error || formatCompareById[selectedVersionMetaB.id]?.error}</Text>
-                ) : (
-                  <>
-                    <Tag color={formatDiffs.length > 0 ? 'orange' : 'green'} style={{ margin: 0 }}>
-                      格式差异 {formatDiffs.length} 处
-                    </Tag>
-                    <Text type="secondary" style={{ fontSize: 12 }}>格式差异已用行首感叹号标注，悬停查看说明，点击即可选择</Text>
-                    {formatDiffs.length > 0 && (
-                      <Button size="small" onClick={() => setSelectedFormatDiffKeys(Object.fromEntries(formatDiffs.map(item => [item.key, true])))}>
-                        全选格式差异
-                      </Button>
-                    )}
-                    <Button
-                      size="small"
-                      disabled={selectedFormatDiffs.length === 0 || !canReadFormat(selectedVersionMetaA) || !selectedVersionMetaB?.filePath}
-                      loading={applyingFormat === 'A'}
-                      onClick={() => handleApplySelectedFormat('A')}
-                    >
-                      套用 A 格式到 B
-                    </Button>
-                    <Button
-                      size="small"
-                      disabled={selectedFormatDiffs.length === 0 || !canReadFormat(selectedVersionMetaB) || !selectedVersionMetaA?.filePath}
-                      loading={applyingFormat === 'B'}
-                      onClick={() => handleApplySelectedFormat('B')}
-                    >
-                      套用 B 格式到 A
-                    </Button>
-                  </>
-                )}
-              </div>
-
-              {formatDiffs.length > 0 && (
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, rowGap: 6, flexWrap: 'wrap', padding: '8px 12px', background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: 8 }}>
-                  <Text strong style={{ fontSize: 12, flex: '0 0 auto' }}>已选择格式：</Text>
-                  {selectedFormatDiffs.length === 0 ? (
-                    <Text type="secondary" style={{ fontSize: 12 }}>点击内容行前的感叹号，选择要套用格式的段落</Text>
-                  ) : (
-                    <Space size={6} wrap style={{ flex: 1, minWidth: 0 }}>
-                      {selectedFormatDiffs.map(item => (
-                        <Tag
-                          key={item.key}
-                          color="orange"
-                          closable
-                          onClose={() => toggleFormatDiff(item.key, false)}
-                          style={{ maxWidth: 520, whiteSpace: 'normal', lineHeight: 1.5, margin: 0 }}
-                        >
-                          {item.title}：{item.summary}
-                        </Tag>
-                      ))}
-                    </Space>
-                  )}
-                </div>
-              )}
-              {/* Diff 视图 */}
-              <div style={{
-                maxHeight: 520,
-                overflowY: 'auto',
-                overflowX: 'hidden',
-                background: '#f8fafc',
-                border: '1px solid #d1d5db',
-                borderRadius: 8,
-              }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 34px minmax(0, 1fr)', width: '100%', minWidth: 0 }}>
-                  <div style={{ position: 'sticky', top: 0, zIndex: 3, padding: '8px 12px', background: '#f8fafc', borderBottom: '1px solid #d1d5db', borderRight: '1px solid #d1d5db', color: '#374151', fontWeight: 600 }}>
-                    A 文档
-                  </div>
-                  <div style={{ position: 'sticky', top: 0, zIndex: 3, background: '#f8fafc', borderBottom: '1px solid #d1d5db' }} />
-                  <div style={{ position: 'sticky', top: 0, zIndex: 3, padding: '8px 12px', background: '#f8fafc', borderBottom: '1px solid #d1d5db', borderLeft: '1px solid #d1d5db', color: '#374151', fontWeight: 600 }}>
-                    B 文档
-                  </div>
-
-                  {diffRows.map((row, index) => {
-                    const left = row.left;
-                    const right = row.right;
-                    const formatDiff = row.formatDiff;
-                    const isLast = index === diffRows.length - 1;
-                    const getTextColor = (line?: DiffLine, side?: 'left' | 'right') => {
-                      if (!line) return '#64748b';
-                      if (line.type === 'equal') return '#cbd5e1';
-                      if (line.type === 'delete' || side === 'left') return '#fca5a5';
-                      return '#86efac';
-                    };
-                    const getCellBackground = (line?: DiffLine, side?: 'left' | 'right') => {
-                      if (!line) return '#0f172a';
-                      if (line.type === 'equal') return '#111827';
-                      if (line.type === 'delete' || side === 'left') return '#3a1a1a';
-                      return '#16351f';
-                    };
-                    const renderCell = (line?: DiffLine, side?: 'left' | 'right') => (
-                      <div
-                        style={{
-                          minHeight: 32,
-                          display: 'flex',
-                          alignItems: 'stretch',
-                          minWidth: 0,
-                          fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace",
-                          fontSize: 12.5,
-                          lineHeight: 1.65,
-                          background: getCellBackground(line, side),
-                          borderBottom: isLast ? 'none' : '1px solid rgba(148, 163, 184, 0.16)',
-                          borderRight: side === 'left' ? '1px solid #d1d5db' : undefined,
-                          borderLeft: side === 'right' ? '1px solid #d1d5db' : undefined,
-                        }}
-                      >
-                        <span style={{ width: 42, flexShrink: 0, padding: '5px 6px 5px 0', textAlign: 'right', color: line ? '#64748b' : '#334155', background: 'rgba(255,255,255,0.04)', borderRight: '1px solid rgba(255,255,255,0.08)', userSelect: 'none' }}>
-                          {side === 'left' ? line?.lineA || '' : line?.lineB || ''}
-                        </span>
-                        <span style={{ width: 20, flexShrink: 0, padding: '5px 0', textAlign: 'center', color: getTextColor(line, side), fontWeight: 700, userSelect: 'none' }}>
-                          {!line ? '' : line.type === 'insert' ? '+' : line.type === 'delete' ? '-' : ' '}
-                        </span>
-                        <span style={{ flex: 1, minWidth: 0, padding: '5px 10px 5px 4px', color: getTextColor(line, side), whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
-                          {line?.text || ' '}
-                        </span>
-                      </div>
-                    );
-
-                    return (
-                      <React.Fragment key={index}>
-                        {renderCell(left, 'left')}
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 32, background: '#f8fafc', borderBottom: isLast ? 'none' : '1px solid #e5e7eb' }}>
-                          {formatDiff && (
-                            <Tooltip
-                              placement="top"
-                              title={(
-                                <div style={{ maxWidth: 360 }}>
-                                  <div style={{ fontWeight: 600, marginBottom: 4 }}>{formatDiff.title}</div>
-                                  {formatDiff.fieldChanges.slice(0, 6).map(change => (
-                                    <div key={change.fieldKey} style={{ lineHeight: 1.7 }}>{change.text}</div>
-                                  ))}
-                                  {formatDiff.fieldChanges.length > 6 && <div>还有 {formatDiff.fieldChanges.length - 6} 项格式差异</div>}
-                                  <div style={{ marginTop: 6, opacity: 0.8 }}>点击图标可选择或取消该段格式</div>
-                                </div>
-                              )}
-                            >
-                              <button
-                                type="button"
-                                aria-label={`${formatDiff.title}，点击选择或取消`}
-                                aria-pressed={Boolean(selectedFormatDiffKeys[formatDiff.key])}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  toggleFormatDiff(formatDiff.key, !selectedFormatDiffKeys[formatDiff.key]);
-                                }}
-                                style={{
-                                  width: 19,
-                                  height: 19,
-                                  borderRadius: '50%',
-                                  border: selectedFormatDiffKeySet.has(formatDiff.key) ? '1px solid #d97706' : '1px solid #f59e0b',
-                                  background: selectedFormatDiffKeySet.has(formatDiff.key) ? '#f59e0b' : '#fff7ed',
-                                  color: selectedFormatDiffKeySet.has(formatDiff.key) ? '#111827' : '#d97706',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                  padding: 0,
-                                  cursor: 'pointer',
-                                  boxShadow: selectedFormatDiffKeySet.has(formatDiff.key) ? '0 0 0 2px rgba(245, 158, 11, 0.22)' : 'none',
-                                }}
-                              >
-                                <ExclamationCircleOutlined style={{ fontSize: 13 }} />
-                              </button>
-                            </Tooltip>
-                          )}
-                        </div>
-                        {renderCell(right, 'right')}
-                      </React.Fragment>
-                    );
-                  })}
-                </div>
-                {diffRows.length === 0 && (
-                  <div style={{ padding: 24, textAlign: 'center', color: '#666' }}>两个版本内容完全相同</div>
-                )}
-              </div>
-            </>
-          ) : (
-            <Empty
-              description={comparableVersions.length >= 2 ? '请选择两个版本进行对比' : '当前阶段暂无两个可对比文档；可先在该项目阶段文件夹中导入或新建文档'}
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-            />
-          )}
-
-          {/* AI 分析报告 */}
-          {diffAnalysis && (
-            <div style={{ border: '1px solid #dbeafe', borderRadius: 8, background: '#f0f7ff', padding: '12px 16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-                <RobotOutlined style={{ color: '#1677ff' }} />
-                <Text strong style={{ color: '#1677ff' }}>AI 分析报告</Text>
-              </div>
-              <Paragraph style={{ whiteSpace: 'pre-wrap', margin: 0, fontSize: 13, lineHeight: 1.8 }}>{diffAnalysis}</Paragraph>
-            </div>
-          )}
-        </Space>
-      </Card>
+      <VersionComparisonPanel
+        stageName={currentStageName}
+        versions={comparableVersions}
+        selectedA={selectedVersionA}
+        selectedB={selectedVersionB}
+        metaA={selectedVersionMetaA}
+        metaB={selectedVersionMetaB}
+        parsingById={parsingCompareIds}
+        isAnalyzing={isAnalyzingDiff}
+        diffStats={diffStats}
+        formatStatusById={formatCompareById}
+        formatDiffs={formatDiffs}
+        selectedFormatDiffs={selectedFormatDiffs}
+        selectedFormatDiffKeys={selectedFormatDiffKeys}
+        diffRows={diffRows}
+        applyingFormat={applyingFormat}
+        diffAnalysis={diffAnalysis}
+        formatVersionDate={formatVersionDate}
+        getSourceLabel={(source) => getCompareSourceLabel(source)}
+        canReadFormat={(version) => canReadFormat(version)}
+        onSelectA={setSelectedVersionA}
+        onSelectB={setSelectedVersionB}
+        onAnalyze={() => void handleAiDiffAnalysis()}
+        onSelectAllFormats={() => setSelectedFormatDiffKeys(Object.fromEntries(formatDiffs.map(item => [item.key, true])))}
+        onToggleFormat={toggleFormatDiff}
+        onApplyFormat={(source) => void handleApplySelectedFormat(source)}
+      />
 
     </div>
   );

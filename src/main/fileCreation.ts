@@ -63,6 +63,264 @@ export function flattenTemplateNodes(nodes: TemplateNode[], output: TemplateNode
   return output;
 }
 
+function unescapeXml(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function extractWordXmlText(xml: string): string {
+  return [...xml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)]
+    .map(match => unescapeXml(match[1]))
+    .join('');
+}
+
+function normalizeWordHeading(value: string): string {
+  return value.replace(/[\s*_`#：:]/g, '').toLocaleLowerCase();
+}
+
+function normalizeGuidanceText(value: string): string {
+  return value.replace(/[\s\r\n，,。；;：:（）()]/g, '').toLocaleLowerCase();
+}
+
+function isNodeGuidanceText(value: string, node?: TemplateNode): boolean {
+  const text = normalizeGuidanceText(value);
+  if (!text || !node) return false;
+  return [node.requirementText, node.description]
+    .filter(Boolean)
+    .some(source => {
+      const normalized = normalizeGuidanceText(String(source));
+      return normalized && (normalized.includes(text) || text.includes(normalized));
+    });
+}
+
+function findBodyFormatPrototype(containerXml: string, node?: TemplateNode, heading?: string): string | undefined {
+  const paragraphs = [...containerXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)].map(match => match[0]);
+  const headingIndex = heading
+    ? paragraphs.findIndex(paragraph => normalizeWordHeading(extractWordXmlText(paragraph)).includes(heading))
+    : -1;
+  const candidates = paragraphs.slice(headingIndex + 1).filter(paragraph => /<w:pPr\b/.test(paragraph));
+  const bodyPrototype = candidates.find(paragraph => {
+    const text = extractWordXmlText(paragraph).trim();
+    return text && !isNodeGuidanceText(text, node) && !/<w:color\b[^>]*w:val="(?:FF0000|F00)"/i.test(paragraph);
+  });
+  if (bodyPrototype) return bodyPrototype;
+  return candidates.find(paragraph => !extractWordXmlText(paragraph).trim());
+}
+
+function extractPrototypeProperties(prototypeXml?: string): { pPr?: string; rPr?: string } {
+  if (!prototypeXml) return {};
+  const pPr = prototypeXml.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0];
+  const paragraphRunProperties = pPr?.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0];
+  const runProperties = prototypeXml.match(/<w:r\b[\s\S]*?<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0]
+    ?.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0];
+  return { pPr, rPr: paragraphRunProperties || runProperties };
+}
+
+function removeParagraphRunProperties(pPrXml: string): string {
+  return pPrXml.replace(/<w:rPr\b[\s\S]*?<\/w:rPr>/gi, '');
+}
+
+function buildBodyParagraphsXml(content: string, template: WritingTemplate, node?: TemplateNode, prototypeXml?: string): string {
+  const rule = styleRuleFromTemplate(template, 'body');
+  const font = { ...(rule.fontRequirement || {}), ...(node?.fontRequirement || {}) };
+  const paragraph = { ...(rule.paragraphRequirement || {}), ...(node?.paragraphRequirement || {}) };
+  const fontFamily = escapeXml(font.fontFamily || template.bodyFontRequirement?.fontFamily || '宋体');
+  const size = fontSizeToHalfPoints(font.fontSize || template.bodyFontRequirement?.fontSize, 12);
+  const color = (font.color || '#000000').replace('#', '');
+  const bold = font.fontWeight === 'bold';
+  const italic = font.fontStyle === 'italic';
+  const runSpacing = `<w:spacing w:val="${pointsToTwips(font.letterSpacing)}"/>`;
+  const alignment = paragraph.alignment ? `<w:jc w:val="${paragraph.alignment}"/>` : '';
+  const firstLine = paragraph.indentFirstLine ? `<w:ind w:firstLineChars="${Math.round(paragraph.indentFirstLine * 100)}"/>` : '';
+  const paragraphSpacing = `<w:spacing w:before="${pointsToTwips(paragraph.spaceBefore)}" w:after="${pointsToTwips(paragraph.spaceAfter)}" w:line="${lineHeightToWordLine(font.lineHeight || template.bodyFontRequirement?.lineHeight)}" w:lineRule="auto"/>`;
+  const generatedPPr = `<w:pPr><w:pStyle w:val="Normal"/>${alignment}${firstLine}${paragraphSpacing}</w:pPr>`;
+  const generatedRPr = `<w:rPr><w:rFonts w:ascii="${fontFamily}" w:hAnsi="${fontFamily}" w:eastAsia="${fontFamily}"/>${bold ? '<w:b/><w:bCs/>' : '<w:b w:val="0"/><w:bCs w:val="0"/>'}${italic ? '<w:i/><w:iCs/>' : '<w:i w:val="0"/><w:iCs w:val="0"/>'}${runSpacing}<w:color w:val="${color}"/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr>`;
+  const prototype = extractPrototypeProperties(prototypeXml);
+  // Preserve the paragraph geometry from the template, but never inherit its
+  // placeholder run formatting. Empty template paragraphs frequently carry
+  // red, bold, or fallback-font properties that must not leak into body text.
+  const pPr = prototype.pPr ? removeParagraphRunProperties(prototype.pPr) : generatedPPr;
+  const rPr = generatedRPr;
+  return content.replace(/\r\n?/g, '\n').split('\n').map(line => {
+    const value = line.trim();
+    if (!value) return `<w:p>${pPr}</w:p>`;
+    return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${escapeXml(value)}</w:t></w:r></w:p>`;
+  }).join('');
+}
+
+function replaceCellParagraphs(cellXml: string, paragraphsXml: string): string {
+  const withoutParagraphs = cellXml.replace(/<w:p\b[\s\S]*?<\/w:p>/g, '');
+  return withoutParagraphs.replace('</w:tc>', `${paragraphsXml}</w:tc>`);
+}
+
+function appendCellParagraphs(cellXml: string, paragraphsXml: string): string {
+  return cellXml.replace('</w:tc>', `${paragraphsXml}</w:tc>`);
+}
+
+function replaceTemplateGuidanceWithBody(cellXml: string, heading: string, content: string, template: WritingTemplate, node: TemplateNode): string {
+  const paragraphs = [...cellXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)];
+  const headingParagraph = paragraphs.find(match => normalizeWordHeading(extractWordXmlText(match[0])).includes(heading));
+  const paragraphsXml = buildBodyParagraphsXml(content, template, node, findBodyFormatPrototype(cellXml, node, heading));
+  if (!headingParagraph) return appendCellParagraphs(cellXml, paragraphsXml);
+  const withoutParagraphs = cellXml.replace(/<w:p\b[\s\S]*?<\/w:p>/g, '');
+  return withoutParagraphs.replace('</w:tc>', `${headingParagraph[0]}${paragraphsXml}</w:tc>`);
+}
+
+function resolveNodeContent(nodes: TemplateNode[], node: TemplateNode, sectionContents: Record<string, string>): string {
+  const direct = String(sectionContents[node.id] || '').trim();
+  if (direct) return direct;
+  const hasMappedContent = nodes.some(item => String(sectionContents[item.id] || '').trim());
+  return !hasMappedContent && node.id === nodes[0]?.id ? String(sectionContents.main || '').trim() : '';
+}
+
+function replaceStandaloneSectionWithBody(
+  documentXml: string,
+  template: WritingTemplate,
+  nodes: TemplateNode[],
+  node: TemplateNode,
+  content: string,
+): { xml: string; replaced: boolean } {
+  const paragraphs = [...documentXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)];
+  const title = normalizeWordHeading(node.title);
+  const headingIndex = paragraphs.findIndex(match => normalizeWordHeading(extractWordXmlText(match[0])) === title);
+  if (headingIndex < 0) return { xml: documentXml, replaced: false };
+
+  const nextHeadingIndex = paragraphs.findIndex((match, index) => index > headingIndex && nodes.some(candidate => (
+    candidate.id !== node.id
+    && normalizeWordHeading(extractWordXmlText(match[0])) === normalizeWordHeading(candidate.title)
+  )));
+  const headingParagraph = paragraphs[headingIndex];
+  const segmentStart = (headingParagraph.index || 0) + headingParagraph[0].length;
+  const segmentEnd = nextHeadingIndex >= 0
+    ? (paragraphs[nextHeadingIndex].index || documentXml.length)
+    : documentXml.indexOf('<w:sectPr', segmentStart) >= 0
+      ? documentXml.indexOf('<w:sectPr', segmentStart)
+      : documentXml.lastIndexOf('</w:body>');
+  if (segmentEnd < segmentStart) return { xml: documentXml, replaced: false };
+
+  const segment = documentXml.slice(segmentStart, segmentEnd);
+  const prototype = findBodyFormatPrototype(segment, node);
+  const paragraphsXml = buildBodyParagraphsXml(content, template, node, prototype);
+  const containsTableStructure = /<w:(?:tbl|tr|tc)\b/.test(segment);
+  const remainder = containsTableStructure
+    ? segment.replace(/<w:p\b[\s\S]*?<\/w:p>/g, paragraphXml => {
+      const text = extractWordXmlText(paragraphXml).trim();
+      return !text || isNodeGuidanceText(text, node) ? '' : paragraphXml;
+    })
+    : segment.replace(/<w:p\b[\s\S]*?<\/w:p>/g, '');
+  return {
+    xml: `${documentXml.slice(0, segmentStart)}${paragraphsXml}${remainder}${documentXml.slice(segmentEnd)}`,
+    replaced: true,
+  };
+}
+
+interface TemplateContinuationSlot {
+  marker: string;
+  primaryContent: string;
+  continuationContent: string;
+}
+
+function findTemplateContinuationSlot(
+  documentXml: string,
+  nodes: TemplateNode[],
+  node: TemplateNode,
+  content: string,
+): TemplateContinuationSlot | undefined {
+  const rows = [...documentXml.matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)].map(match => match[0]);
+  const title = normalizeWordHeading(node.title);
+  const headingIndex = rows.findIndex(rowXml => (
+    [...rowXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)]
+      .some(match => normalizeWordHeading(extractWordXmlText(match[0])) === title)
+  ));
+  if (headingIndex < 0) return undefined;
+
+  const nextHeadingIndex = rows.findIndex((rowXml, index) => index > headingIndex && (
+    nodes.some(candidate => candidate.id !== node.id && (
+      [...rowXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)]
+        .some(match => normalizeWordHeading(extractWordXmlText(match[0])) === normalizeWordHeading(candidate.title))
+    ))
+  ));
+  const sectionRows = rows.slice(headingIndex + 1, nextHeadingIndex >= 0 ? nextHeadingIndex : rows.length);
+  for (const rowXml of sectionRows) {
+    const marker = [...rowXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)]
+      .map(match => extractWordXmlText(match[0]).trim())
+      .find(text => text && text.length <= 30 && isNodeGuidanceText(text, node));
+    if (!marker) continue;
+    const markerIndex = content.indexOf(marker);
+    return {
+      marker,
+      primaryContent: markerIndex >= 0 ? content.slice(0, markerIndex).trim() : content.trim(),
+      continuationContent: markerIndex >= 0 ? content.slice(markerIndex).trim() : '',
+    };
+  }
+  return undefined;
+}
+
+function replaceContinuationRow(
+  rowXml: string,
+  slot: TemplateContinuationSlot,
+  template: WritingTemplate,
+  node: TemplateNode,
+): string {
+  const cells = [...rowXml.matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)];
+  const target = cells.find(match => extractWordXmlText(match[0]).includes(slot.marker));
+  if (!target) return rowXml;
+  const paragraphsXml = slot.continuationContent
+    ? buildBodyParagraphsXml(slot.continuationContent, template, node, findBodyFormatPrototype(target[0], node))
+    : '<w:p/>';
+  const replacement = replaceCellParagraphs(target[0], paragraphsXml);
+  return `${rowXml.slice(0, target.index)}${replacement}${rowXml.slice((target.index || 0) + target[0].length)}`;
+}
+
+/** Fill an imported direct-use DOCX template while preserving its tables, headers, styles and other package parts. */
+export function fillTemplateDocumentXmlWithContent(
+  documentXml: string,
+  template: WritingTemplate,
+  sectionContents: Record<string, string>,
+): string {
+  const nodes = flattenTemplateNodes(template.nodes || []);
+  let output = documentXml;
+
+  for (const node of nodes) {
+      const content = resolveNodeContent(nodes, node, sectionContents);
+      if (!content) continue;
+      const title = normalizeWordHeading(node.title);
+      const continuationSlot = findTemplateContinuationSlot(output, nodes, node, content);
+      const primaryContent = continuationSlot?.primaryContent || content;
+      let inserted = false;
+
+      output = output.replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, rowXml => {
+        if (inserted) {
+          return continuationSlot ? replaceContinuationRow(rowXml, continuationSlot, template, node) : rowXml;
+        }
+        const cells = [...rowXml.matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)];
+        const headingCellIndex = cells.findIndex(match => normalizeWordHeading(extractWordXmlText(match[0])).includes(title));
+        if (headingCellIndex < 0) return rowXml;
+
+        const targetCellIndex = cells.length > 1 && headingCellIndex < cells.length - 1
+          ? headingCellIndex + 1
+          : headingCellIndex;
+        const target = cells[targetCellIndex];
+        const replacement = targetCellIndex === headingCellIndex
+          ? replaceTemplateGuidanceWithBody(target[0], title, primaryContent, template, node)
+          : replaceCellParagraphs(target[0], buildBodyParagraphsXml(primaryContent, template, node, findBodyFormatPrototype(target[0], node)));
+        inserted = true;
+        return `${rowXml.slice(0, target.index)}${replacement}${rowXml.slice((target.index || 0) + target[0].length)}`;
+      });
+
+    if (!inserted) {
+      const standalone = replaceStandaloneSectionWithBody(output, template, nodes, node, content);
+      output = standalone.xml;
+    }
+  }
+
+  return output;
+}
+
 export function buildWordStyle(styleId: string, name: string, rule: ReturnType<typeof styleRuleFromTemplate>, defaults: { font: string; size: number; bold?: boolean }) {
   const font = rule.fontRequirement || {};
   const paragraph = rule.paragraphRequirement || {};
@@ -119,7 +377,7 @@ export function buildWordDocumentXmlWithContent(template: WritingTemplate, secti
     ? nodes.map(node => {
       const level = Math.min(Math.max(node.level || 1, 1), 4);
       const headingXml = `<w:p><w:pPr><w:pStyle w:val="Heading${level}"/></w:pPr><w:r><w:t>${escapeXml(node.title)}</w:t></w:r></w:p>`;
-      const userContent = sectionContents[node.id] || '';
+      const userContent = resolveNodeContent(nodes, node, sectionContents);
       if (!userContent) return headingXml;
       const bodyParagraphs = userContent.split('\n').filter(line => line.trim()).map(line =>
         `<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>${escapeXml(line.trim())}</w:t></w:r></w:p>`
@@ -140,6 +398,17 @@ export function buildWordDocumentXmlWithContent(template: WritingTemplate, secti
 
 // 带用户内容的 docx 写入
 export async function writeDocxFileWithContent(filePath: string, template: WritingTemplate, sectionContents: Record<string, string>) {
+  if (template.templateType !== 'example' && template.filePath && path.extname(template.filePath).toLowerCase() === '.docx' && fs.existsSync(template.filePath)) {
+    const sourceZip = await JSZip.loadAsync(fs.readFileSync(template.filePath));
+    const documentEntry = sourceZip.file('word/document.xml');
+    if (!documentEntry) throw new Error('模板文件缺少 word/document.xml，无法填充正文');
+    const documentXml = await documentEntry.async('string');
+    sourceZip.file('word/document.xml', fillTemplateDocumentXmlWithContent(documentXml, template, sectionContents));
+    const buffer = await sourceZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    fs.writeFileSync(filePath, buffer);
+    return;
+  }
+
   const zip = new JSZip();
   zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`);
   const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

@@ -18,6 +18,7 @@ import { CompositionWeightConfig, PromptScene } from '../../../shared/types';
 import { PROMPT_SCENE_LABELS } from '../../../shared/promptScenes';
 import {
   WEIGHT_CONSTANTS,
+  SCENE_WEIGHT_KEYS,
   getCompositionRules,
   getCompositionSources,
 } from '../../utils/promptComposer';
@@ -51,8 +52,9 @@ const CompositionSettings: React.FC = () => {
   const [selectedScene, setSelectedScene] = useState<PromptScene>('report');
   const {
     compositionWeights,
+    compositionWeightsByScene,
     loadSettings,
-    updateCompositionWeights,
+    updateCompositionWeightsForScene,
   } = useSettingsStore();
   const [draftWeights, setDraftWeights] = useState<CompositionWeightConfig>(() => cloneWeights(WEIGHT_CONSTANTS));
   const [saving, setSaving] = useState(false);
@@ -62,11 +64,12 @@ const CompositionSettings: React.FC = () => {
   }, [loadSettings]);
 
   useEffect(() => {
-    setDraftWeights(cloneWeights(compositionWeights || WEIGHT_CONSTANTS));
-  }, [compositionWeights]);
+    setDraftWeights(cloneWeights(compositionWeightsByScene[selectedScene] || compositionWeights || WEIGHT_CONSTANTS));
+  }, [compositionWeights, compositionWeightsByScene, selectedScene]);
 
-  const isCustom = Boolean(compositionWeights);
-  const rules = useMemo(() => getCompositionRules(draftWeights), [draftWeights]);
+  const isCustom = Boolean(compositionWeightsByScene[selectedScene] || compositionWeights);
+  const sceneWeightItems = useMemo(() => WEIGHT_ITEMS.filter(item => SCENE_WEIGHT_KEYS[selectedScene].includes(item.key)), [selectedScene]);
+  const rules = useMemo(() => getCompositionRules(selectedScene, draftWeights), [selectedScene, draftWeights]);
   const sources = useMemo(() => getCompositionSources(selectedScene, draftWeights), [selectedScene, draftWeights]);
 
   const updateWeight = (key: WeightKey, value: number | null) => {
@@ -76,8 +79,8 @@ const CompositionSettings: React.FC = () => {
   const saveCustom = async () => {
     setSaving(true);
     try {
-      await updateCompositionWeights(draftWeights);
-      message.success('\u5df2\u4fdd\u5b58\u4e3a\u81ea\u5b9a\u4e49\u6743\u91cd\u914d\u7f6e');
+      await updateCompositionWeightsForScene(selectedScene, draftWeights);
+      message.success(`已保存 ${PROMPT_SCENE_LABELS[selectedScene]} 的独立权重配置`);
     } finally {
       setSaving(false);
     }
@@ -85,8 +88,8 @@ const CompositionSettings: React.FC = () => {
 
   const resetDefault = async () => {
     setDraftWeights(cloneWeights(WEIGHT_CONSTANTS));
-    await updateCompositionWeights(null);
-    message.success('\u5df2\u6062\u590d\u9ed8\u8ba4\u6743\u91cd\u914d\u7f6e');
+    await updateCompositionWeightsForScene(selectedScene, null);
+    message.success(`已恢复 ${PROMPT_SCENE_LABELS[selectedScene]} 的默认权重配置`);
   };
 
   return (
@@ -123,7 +126,7 @@ const CompositionSettings: React.FC = () => {
               )}
             >
               <Space direction="vertical" size={14} style={{ width: '100%' }}>
-                {WEIGHT_ITEMS.map(item => (
+                {sceneWeightItems.map(item => (
                   <div key={item.key}>
                     <Row gutter={12} align="middle">
                       <Col xs={24} md={8}>

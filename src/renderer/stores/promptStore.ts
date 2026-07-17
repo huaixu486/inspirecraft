@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { PromptScene, PromptTemplate } from '../../shared/types';
+import { assertIpcMutationSucceeded, requireIpcArray } from '../utils/ipcResult';
 
 interface PromptState {
   templates: PromptTemplate[];
@@ -19,7 +20,7 @@ export const usePromptStore = create<PromptState>((set, get) => ({
   loadTemplates: async () => {
     set({ isLoading: true });
     try {
-      const templates = await window.electronAPI.loadPromptTemplates();
+      const templates = requireIpcArray<PromptTemplate>(await window.electronAPI.loadPromptTemplates(), '加载提示词模板失败');
       set({ templates, isLoading: false });
     } catch (err) {
       console.error('[promptStore] loadTemplates failed:', err);
@@ -34,7 +35,8 @@ export const usePromptStore = create<PromptState>((set, get) => ({
     if (idx >= 0) next[idx] = template; else next.push(template);
     set({ templates: next });
     try {
-      await window.electronAPI.savePromptTemplate(template);
+      const result = await window.electronAPI.savePromptTemplate(template);
+      assertIpcMutationSucceeded(result, '保存提示词模板失败');
     } catch (err) {
       console.error('[promptStore] saveTemplate failed:', err);
       set({ templates });
@@ -44,8 +46,9 @@ export const usePromptStore = create<PromptState>((set, get) => ({
   resetTemplate: async (id: string) => {
     const prev = get().templates;
     try {
-      await window.electronAPI.resetPromptTemplate(id);
-      const templates = await window.electronAPI.loadPromptTemplates();
+      const result = await window.electronAPI.resetPromptTemplate(id);
+      assertIpcMutationSucceeded(result, '重置提示词模板失败');
+      const templates = requireIpcArray<PromptTemplate>(await window.electronAPI.loadPromptTemplates(), '重新加载提示词模板失败');
       set({ templates });
     } catch (err) {
       console.error('[promptStore] resetTemplate failed:', err);

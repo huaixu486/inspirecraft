@@ -1,14 +1,13 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
-  Typography, Button, Space, Tag, Empty, Spin, Select, message, Modal, Input, Popconfirm, Badge, DatePicker, Dropdown, Popover,
+  Typography, Button, Space, Tag, Empty, Spin, message, Badge, Dropdown,
 } from 'antd';
 import dayjs from 'dayjs';
 import {
-  FolderOutlined, FileTextOutlined, FilePdfOutlined, FileOutlined,
-  FileExcelOutlined, FilePptOutlined, ArrowLeftOutlined, PlusOutlined,
-  ReloadOutlined, FileWordOutlined, DeleteOutlined, FolderOpenOutlined, UndoOutlined,
-  ImportOutlined, FolderAddOutlined, SearchOutlined, EditOutlined, CheckCircleOutlined,
-  ExperimentOutlined, SendOutlined, CopyOutlined, ExportOutlined, FileZipOutlined,
+  FileOutlined,
+  ArrowLeftOutlined, PlusOutlined,
+  ReloadOutlined, FolderOpenOutlined, UndoOutlined,
+  ImportOutlined, FolderAddOutlined, FileZipOutlined, SettingOutlined,
 } from '@ant-design/icons';
 import { Project, ProjectDocument, WorkbenchFocus } from '../../../shared/types';
 import { useTemplateStore } from '../../stores/templateStore';
@@ -18,40 +17,26 @@ import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 import { getAllStages } from '../../utils/timelineStages';
 import { useNavigationStore } from '../../stores/navigationStore';
 import WorkbenchContextBar from '../Workbench/WorkbenchContextBar';
+import useProjectFileData, {
+  type FileItem,
+  type TreeFileItem,
+} from './useProjectFileData';
+import ProjectFileListRow from './ProjectFileListRow';
+import ProjectFileSearchControl from './ProjectFileSearchControl';
+import ProjectFileStats from './ProjectFileStats';
+import createProjectFileContextMenu from './projectFileContextMenu';
+import ProjectFileShareModal, { type ShareFriendOption } from './ProjectFileShareModal';
+import {
+  ProjectFileCreateModal,
+  ProjectFileImportModal,
+  ProjectFolderCreateModal,
+  type ImportFileOption,
+} from './ProjectFileExplorerModals';
+import { FolderImportModeDrawer, promptFolderImportMode } from './FolderImportModeSelector';
+import { useFolderImportPreferenceStore } from '../../stores/folderImportPreferenceStore';
 
 const { Text } = Typography;
 const UNDO_HISTORY_TTL_MS = 5 * 60 * 1000;
-
-interface FileItem {
-  name: string;
-  isDirectory: boolean;
-  ext: string;
-  size: number;
-  modifiedAt: string;
-  path: string;
-}
-
-interface TreeFileItem {
-  name: string;
-  path: string;
-  relativePath: string;
-  ext: string;
-  size: number;
-  modifiedAt: string;
-}
-
-interface TreeFolderItem {
-  name: string;
-  path: string;
-  relativePath: string;
-}
-
-interface TreeStats {
-  fileCount: number;
-  folderCount: number;
-  totalSize: number;
-  typeCount: Record<string, number>;
-}
 
 // 撤销操作条目
 interface UndoEntry {
@@ -65,39 +50,6 @@ interface Props {
   focus?: WorkbenchFocus;
 }
 
-const formatSize = (bytes: number): string => {
-  if (bytes === 0) return '-';
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-};
-
-const formatDate = (dateStr: string): string => {
-  if (!dateStr) return '-';
-  const d = new Date(dateStr);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-};
-
-const fileIcon = (ext: string, isDir: boolean) => {
-  if (isDir) return <FolderOutlined style={{ color: '#faad14', fontSize: 18 }} />;
-  switch (ext) {
-    case '.docx': case '.doc': return <FileWordOutlined style={{ color: '#1890ff', fontSize: 18 }} />;
-    case '.pdf': return <FilePdfOutlined style={{ color: '#ff4d4f', fontSize: 18 }} />;
-    case '.xlsx': case '.xls': return <FileExcelOutlined style={{ color: '#52c41a', fontSize: 18 }} />;
-    case '.pptx': case '.ppt': return <FilePptOutlined style={{ color: '#ff7a45', fontSize: 18 }} />;
-    case '.txt': return <FileTextOutlined style={{ color: '#666', fontSize: 18 }} />;
-    default: return <FileOutlined style={{ color: '#999', fontSize: 18 }} />;
-  }
-};
-
-const extColorMap: Record<string, string> = {
-  '.docx': 'blue', '.doc': 'blue',
-  '.pdf': 'red',
-  '.xlsx': 'green', '.xls': 'green',
-  '.pptx': 'orange', '.ppt': 'orange',
-  '.txt': 'default',
-};
-
 const getTemplateOutputType = (template: any): string =>
   template.outputFileType || template.filePath?.split('.').pop()?.toLowerCase() || 'docx';
 
@@ -105,7 +57,6 @@ const getFileNameFromPath = (filePath: string): string =>
   filePath.split(/[/\\]/).pop() || filePath;
 
 const RENAME_TRIGGER_DELAY_MS = 650;
-const FILE_LIST_ROW_HEIGHT = 44;
 const FILTER_RENDER_PAGE_SIZE = 200;
 
 const getParentPath = (filePath: string): string => {
@@ -135,11 +86,10 @@ const isRenameTriggerClick = (event: React.MouseEvent) =>
   Boolean((event.target as HTMLElement).closest('[data-file-rename-trigger="true"]'));
 
 const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
-  const [items, setItems] = useState<FileItem[]>([]);
-  const [loading, setLoading] = useState(false);
   const [currentPath, setCurrentPath] = useState(project.folderPath);
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [folderModalOpen, setFolderModalOpen] = useState(false);
+  const [folderImportModeDrawerOpen, setFolderImportModeDrawerOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFileType, setNewFileType] = useState('docx');
@@ -159,7 +109,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
   const [dragOverDirPath, setDragOverDirPath] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [shareItem, setShareItem] = useState<FileItem | null>(null);
-  const [shareFriends, setShareFriends] = useState<Array<{ id: string; name: string; online?: boolean }>>([]);
+  const [shareFriends, setShareFriends] = useState<ShareFriendOption[]>([]);
   const [shareFriendId, setShareFriendId] = useState('');
   const [shareSending, setShareSending] = useState(false);
   const lastClickRef = React.useRef<{ path: string; time: number } | null>(null);
@@ -180,27 +130,42 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
   const [internalDragOverPath, setInternalDragOverPath] = useState<string | null>(null);
   const explorerRootRef = useRef<HTMLDivElement | null>(null);
 
-  // 子树统计状态
-  const [treeFiles, setTreeFiles] = useState<TreeFileItem[]>([]);
-  const [treeFolders, setTreeFolders] = useState<TreeFolderItem[]>([]);
-  const [treeStats, setTreeStats] = useState<TreeStats | null>(null);
-  const [treeLoading, setTreeLoading] = useState(false);
-
   // 导入文件选择
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importSource, setImportSource] = useState<'folder' | 'zip'>('folder');
-  const [importFiles, setImportFiles] = useState<{ name: string; path: string; size: number }[]>([]);
+  const [importFiles, setImportFiles] = useState<ImportFileOption[]>([]);
   const [selectedImportFiles, setSelectedImportFiles] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
   const importZipPathRef = useRef<string>('');
   const { templates } = useTemplateStore();
   const { projectDocs, addProjectDoc, updateProjectDoc } = useProjectDocStore();
   const navigate = useNavigationStore(state => state.navigate);
+  const acknowledgeWorkflowFocus = useNavigationStore(state => state.acknowledgeActiveFocus);
   const { customStages, workspacePath } = useSettingsStore();
+  const defaultFolderImportMode = useFolderImportPreferenceStore(state => state.defaultMode);
   const allStages = getAllStages(customStages);
   const highlightTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const undoStackRef = useRef<UndoEntry[]>([]);
   const undoExpiryTimerRef = useRef<number | null>(null);
+  const {
+    items,
+    loading,
+    treeFiles,
+    treeFolders,
+    treeStats,
+    treeLoading,
+    loadContents,
+    loadTreeStats,
+  } = useProjectFileData({
+    currentPath,
+    onContentsLoaded: () => syncProjectStageFiles(project, {
+      projectDocs: useProjectDocStore.getState().projectDocs,
+      templates,
+      addProjectDoc,
+      updateProjectDoc,
+      allStages,
+    }),
+  });
 
   const clearUndoHistory = useCallback(() => {
     if (undoExpiryTimerRef.current !== null) {
@@ -238,49 +203,14 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undoStack]);
 
-  useEffect(() => {
-    loadContents();
-    loadTreeStats();
-    return () => {
-      highlightTimers.current.forEach(timer => clearTimeout(timer));
-    };
+  useEffect(() => () => {
+    highlightTimers.current.forEach(timer => clearTimeout(timer));
   }, [currentPath]);
 
   useEffect(() => {
     setSearchQuery('');
     setFilterType(null);
   }, [project.id, project.folderPath]);
-
-  const loadContents = async () => {
-    setLoading(true);
-    try {
-      const result = await window.electronAPI.getFolderContents(currentPath);
-      if (result.success) {
-        setItems(result.items);
-      }
-      await syncProjectStageFiles(project, { projectDocs: useProjectDocStore.getState().projectDocs, templates, addProjectDoc, updateProjectDoc, allStages });
-    } catch (error) {
-      console.error('Failed to load folder contents:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadTreeStats = async () => {
-    setTreeLoading(true);
-    try {
-      const result = await window.electronAPI.getTreeStats(currentPath);
-      if (result.success && result.stats && result.files && result.folders) {
-        setTreeStats(result.stats);
-        setTreeFiles(result.files);
-        setTreeFolders(result.folders);
-      }
-    } catch (error) {
-      console.error('Failed to load tree stats:', error);
-    } finally {
-      setTreeLoading(false);
-    }
-  };
 
   const handleDoubleClick = (item: FileItem) => {
     // 标记为双击，取消慢双击重命名
@@ -387,29 +317,6 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
   useEffect(() => {
     setFilterRenderLimit(FILTER_RENDER_PAGE_SIZE);
   }, [filterType, searchQuery, currentPath]);
-
-  const treeTypeCount = treeStats?.typeCount || {};
-  const treeFileCount = treeStats?.fileCount ?? 0;
-  const treeFolderCount = treeStats?.folderCount ?? 0;
-  const treeTotalSize = treeStats?.totalSize ?? 0;
-  // 保留所有分类入口（包括当前数量为 0 的类型），避免统计栏把可用筛选隐藏掉。
-  const typeStats = Object.entries(treeTypeCount)
-    .sort(([leftExt, leftCount], [rightExt, rightCount]) => {
-      const leftIsEmpty = Number(leftCount) === 0;
-      const rightIsEmpty = Number(rightCount) === 0;
-      if (leftIsEmpty !== rightIsEmpty) return leftIsEmpty ? 1 : -1;
-      const countDelta = Number(rightCount) - Number(leftCount);
-      return countDelta || leftExt.localeCompare(rightExt);
-    });
-
-  const typeAccent = (ext: string) => {
-    if (ext === '.doc' || ext === '.docx') return '#2f80ed';
-    if (ext === '.pdf') return '#ef5350';
-    if (ext === '.xls' || ext === '.xlsx') return '#2fb344';
-    if (ext === '.ppt' || ext === '.pptx') return '#f59e0b';
-    if (ext === '其他') return '#7b8794';
-    return '#6c7a89';
-  };
 
   const matchesTreeFilter = (file: TreeFileItem) => {
     if (!filterType || filterType === '__dir__') return true;
@@ -624,8 +531,9 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
     }
     // 等待目录切换后的内容加载开始，再保留一段高亮状态。
     const timer = window.setTimeout(() => highlightFile(filePath), 0);
+    acknowledgeWorkflowFocus();
     return () => window.clearTimeout(timer);
-  }, [focus?.target, focus?.filePath, focus?.docId, project.folderPath, projectDocs, currentPath]);
+  }, [acknowledgeWorkflowFocus, focus?.target, focus?.filePath, focus?.docId, project.folderPath, projectDocs, currentPath]);
 
   // 压入撤销栈
   const pushUndo = (entry: UndoEntry) => {
@@ -770,18 +678,17 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
   };
 
   const getFileContextMenu = (item: FileItem) => ({
-    items: [
-      { key: 'open', icon: <ExportOutlined />, label: item.isDirectory ? '打开文件夹' : '打开文件', onClick: () => void handleOpenFile(item) },
-      { key: 'reveal', icon: <FolderOpenOutlined />, label: '在文件资源管理器中显示', onClick: () => void handleShowItemInExplorer(item) },
-      { key: 'copy-path', icon: <CopyOutlined />, label: '复制完整路径', onClick: () => void handleCopyItemPath(item) },
-      { key: 'compress', icon: <FileZipOutlined />, label: '压缩为 ZIP', onClick: () => void handleCompressItem(item) },
-      !item.isDirectory && item.ext.toLowerCase() === '.zip' && { key: 'extract', icon: <FileZipOutlined />, label: '解压到同名文件夹', onClick: () => void handleExtractZipItem(item) },
-      { type: 'divider' as const },
-      !item.isDirectory && { key: 'writing', icon: <EditOutlined />, label: '发送到团队写作', onClick: () => void handleSendToWorkbench(item, 'team') },
-      !item.isDirectory && { key: 'review', icon: <CheckCircleOutlined />, label: '发送到审阅', onClick: () => void handleSendToWorkbench(item, 'review') },
-      !item.isDirectory && { key: 'report', icon: <ExperimentOutlined />, label: '发送到报告工作台', onClick: () => void handleSendToWorkbench(item, 'report') },
-      { key: 'share', icon: <SendOutlined />, label: item.isDirectory ? '发送文件夹给好友…' : '发送给好友…', onClick: () => void handleOpenShareModal(item) },
-    ].filter(Boolean) as any[],
+    items: createProjectFileContextMenu(item, {
+      onOpen: target => { void handleOpenFile(target); },
+      onReveal: target => { void handleShowItemInExplorer(target); },
+      onCopyPath: target => { void handleCopyItemPath(target); },
+      onCompress: target => { void handleCompressItem(target); },
+      onExtract: target => { void handleExtractZipItem(target); },
+      onSendToWriting: target => { void handleSendToWorkbench(target, 'team'); },
+      onSendToReview: target => { void handleSendToWorkbench(target, 'review'); },
+      onSendToReport: target => { void handleSendToWorkbench(target, 'report'); },
+      onShare: target => { void handleOpenShareModal(target); },
+    }),
   });
 
   // 判断是否为外部文件拖拽。Electron/Chromium 在不同拖拽来源下 types 形态不完全一致，这里统一转数组。
@@ -834,48 +741,77 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
     });
   }, [normalizeDragPath]);
 
-  // 统一导入：选文件→直接导入，选ZIP/文件夹→弹窗勾选
-  const handleImport = async () => {
-    // 先弹文件选择（支持多选）
+  const handleImportFiles = async () => {
     const filePaths = await window.electronAPI.openFiles([{ name: '所有文件', extensions: ['*'] }]);
-    if (filePaths && filePaths.length > 0) {
-      // 有 ZIP → 弹窗勾选
-      const zips = filePaths.filter(f => f.toLowerCase().endsWith('.zip'));
-      if (zips.length > 0) {
-        const result = await window.electronAPI.listZipFiles(zips[0]);
-        if (result.success && result.files && result.files.length > 0) {
-          importZipPathRef.current = zips[0];
-          setImportSource('zip');
-          setImportFiles(result.files.map(f => ({ name: f.name, path: f.path, size: f.size })));
-          setSelectedImportFiles(result.files.map(f => f.path));
-          setImportModalOpen(true);
-        } else {
-          message.warning('ZIP 文件为空');
-        }
-        return;
-      }
-      // 全是普通文件 → 直接导入
-      const result = await window.electronAPI.importFiles({ folderPath: currentPath, filePaths });
-      if (result.success) {
-        loadContents();
-        message.success(`已导入 ${result.files?.length || filePaths.length} 个文件`);
-      } else {
-        message.error(result.error || '导入失败');
-      }
+    if (!filePaths?.length) return;
+    const result = await window.electronAPI.importFiles({ folderPath: currentPath, filePaths });
+    if (result.success) {
+      await loadContents();
+      loadTreeStats();
+      const importedCount = result.files?.length || 0;
+      if (importedCount > 0) message.success(`已导入 ${importedCount} 个文件`);
+      else message.info('所选文件已在当前目录，无需重复导入');
+    } else {
+      message.error(result.error || '导入失败');
+    }
+  };
+
+  const handleImportFolder = async () => {
+    const srcFolder = await window.electronAPI.openFolder({
+      title: '选择要导入的文件夹',
+      buttonLabel: '选择此文件夹',
+    });
+    if (!srcFolder) return;
+    const isCurrentFolder = isPathEqualOrInside(srcFolder, currentPath)
+      && isPathEqualOrInside(currentPath, srcFolder);
+    if (isCurrentFolder) {
+      await loadContents();
+      loadTreeStats();
+      await syncProjectStageFiles(project, {
+        projectDocs: useProjectDocStore.getState().projectDocs,
+        templates,
+        addProjectDoc,
+        updateProjectDoc,
+        allStages,
+      });
+      message.info('所选文件夹就是当前项目目录，已刷新内容，无需重复导入');
       return;
     }
-    // 用户取消了文件选择 → 弹文件夹选择
-    const srcFolder = await window.electronAPI.openFolder();
-    if (!srcFolder) return;
-    const dirResult = await window.electronAPI.scanStageFiles(srcFolder);
-    if (dirResult.success && dirResult.files && dirResult.files.length > 0) {
-      setImportSource('folder');
-      setImportFiles(dirResult.files.map(f => ({ name: f.name, path: f.path, size: f.size })));
-      setSelectedImportFiles(dirResult.files.map(f => f.path));
-      setImportModalOpen(true);
-    } else {
-      message.warning('文件夹为空');
+
+    const mode = defaultFolderImportMode || await promptFolderImportMode('导入文件夹');
+    if (!mode) return;
+    const result = await window.electronAPI.importFolder({ sourcePath: srcFolder, targetFolder: currentPath, mode });
+    if (!result.success) {
+      message.error(result.error || '导入文件夹失败');
+      return;
     }
+    await loadContents();
+    loadTreeStats();
+    await syncProjectStageFiles(project, {
+      projectDocs: useProjectDocStore.getState().projectDocs,
+      templates,
+      addProjectDoc,
+      updateProjectDoc,
+      allStages,
+    });
+    message.success(mode === 'shortcut'
+      ? `已创建文件夹快捷方式：${result.item?.name || ''}`
+      : `文件夹已移动到当前项目：${result.item?.name || ''}`);
+  };
+
+  const handleImportZip = async () => {
+    const zipPath = await window.electronAPI.openZipFile();
+    if (!zipPath) return;
+    const result = await window.electronAPI.listZipFiles(zipPath);
+    if (!result.success || !result.files?.length) {
+      message.warning(result.error || 'ZIP 文件为空');
+      return;
+    }
+    importZipPathRef.current = zipPath;
+    setImportSource('zip');
+    setImportFiles(result.files.map(file => ({ name: file.name, path: file.path, size: file.size })));
+    setSelectedImportFiles(result.files.map(file => file.path));
+    setImportModalOpen(true);
   };
 
   // 执行导入
@@ -892,9 +828,11 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
           filePaths: selectedImportFiles,
         });
         if (result.success) {
-          loadContents();
+          await loadContents();
           loadTreeStats();
-          message.success(`已导入 ${result.files?.length || selectedImportFiles.length} 个文件`);
+          const importedCount = result.files?.length || 0;
+          if (importedCount > 0) message.success(`已导入 ${importedCount} 个文件`);
+          else message.info('所选文件已在当前目录，无需重复导入');
         } else {
           message.error(result.error || '导入失败');
         }
@@ -1361,6 +1299,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
   return (
     <div
       ref={explorerRootRef}
+      className="project-file-explorer"
       style={{
         height: '100%',
         overflow: 'auto',
@@ -1461,43 +1400,11 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexWrap: 'nowrap', minWidth: 0 }}>
-            <Popover
-              trigger="click"
-              placement="bottomRight"
+            <ProjectFileSearchControl
               open={searchOpen}
+              query={searchQuery}
               onOpenChange={setSearchOpen}
-              content={(
-                <Input
-                  autoFocus
-                  allowClear
-                  size="middle"
-                  prefix={<SearchOutlined style={{ color: '#9ca3af' }} />}
-                  placeholder="搜索文件名 / 后缀"
-                  value={searchQuery}
-                  onChange={event => setSearchQuery(event.target.value)}
-                  onPressEnter={() => setSearchOpen(false)}
-                  style={{ width: 260, borderRadius: 8 }}
-                />
-              )}
-            >
-              <Button
-                type={searchQuery ? 'primary' : 'default'}
-                icon={<SearchOutlined />}
-                size="middle"
-                style={{ borderRadius: 8 }}
-              >
-                搜索
-              </Button>
-            </Popover>
-            <Input
-              hidden
-              allowClear
-              size="middle"
-              prefix={<SearchOutlined style={{ color: '#9ca3af' }} />}
-              placeholder="搜索文件名 / 后缀"
-              value={searchQuery}
-              onChange={event => setSearchQuery(event.target.value)}
-              style={{ display: 'none' }}
+              onQueryChange={setSearchQuery}
             />
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: 4, background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: 10 }}>
               <Badge count={undoStack.length} size="small" offset={[-4, 0]}>
@@ -1512,7 +1419,32 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
               </Badge>
               <Button icon={<ReloadOutlined />} onClick={() => { loadContents(); loadTreeStats(); }} size="middle" title="刷新" style={{ borderRadius: 8 }} />
             </div>
-            <Button icon={<ImportOutlined />} size="middle" onClick={handleImport} style={{ borderRadius: 8 }}>导入</Button>
+            <Space.Compact>
+              <Dropdown
+                menu={{
+                  items: [
+                    { key: 'files', icon: <FileOutlined />, label: '导入文件' },
+                    { key: 'folder', icon: <FolderOpenOutlined />, label: '导入文件夹' },
+                    { key: 'zip', icon: <FileZipOutlined />, label: '导入 ZIP' },
+                  ],
+                  onClick: ({ key }) => {
+                    if (key === 'folder') void handleImportFolder();
+                    else if (key === 'zip') void handleImportZip();
+                    else void handleImportFiles();
+                  },
+                }}
+                trigger={['click']}
+              >
+                <Button icon={<ImportOutlined />} size="middle">导入</Button>
+              </Dropdown>
+              <Button
+                icon={<SettingOutlined />}
+                size="middle"
+                title="设置默认文件夹导入方式"
+                aria-label="设置默认文件夹导入方式"
+                onClick={() => setFolderImportModeDrawerOpen(true)}
+              />
+            </Space.Compact>
             <Dropdown
               menu={{
                 items: [
@@ -1544,54 +1476,12 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
         </div>
       )}
 
-      {/* 概览：重点数据优先呈现，只有实际存在的文件类型才显示。 */}
       {treeStats && (
-        <section className="file-explorer-stats" aria-label="文件统计">
-          <div className="file-explorer-stats-primary">
-            <button
-              type="button"
-              className={`file-explorer-stat-primary${filterType === null ? ' is-active' : ''}`}
-              onClick={() => setFilterType(null)}
-            >
-              <FileOutlined className="file-explorer-stat-icon" />
-              <span className="file-explorer-stat-copy">
-                <strong>{treeFileCount.toLocaleString()}</strong>
-                <span>文件</span>
-              </span>
-            </button>
-            <div className="file-explorer-stat-size">
-              <span>数据占用</span>
-              <strong>{formatSize(treeTotalSize)}</strong>
-            </div>
-            <button
-              type="button"
-              className={`file-explorer-stat-folder${filterType === '__dir__' ? ' is-active' : ''}`}
-              onClick={() => setFilterType(filterType === '__dir__' ? null : '__dir__')}
-            >
-              <FolderOutlined />
-              <span><strong>{treeFolderCount.toLocaleString()}</strong> 文件夹</span>
-            </button>
-          </div>
-
-          {typeStats.length > 0 && (
-            <div className="file-explorer-stats-types" aria-label="文件类型筛选">
-              <span className="file-explorer-stats-types-label">按类型</span>
-              {typeStats.map(([ext, count]) => (
-                <button
-                  key={ext}
-                  type="button"
-                  className={`file-explorer-type-stat${filterType === ext ? ' is-active' : ''}${Number(count) === 0 ? ' is-empty' : ''}`}
-                  style={{ '--type-accent': typeAccent(ext) } as React.CSSProperties}
-                  onClick={() => setFilterType(filterType === ext ? null : ext)}
-                >
-                  <i aria-hidden="true" />
-                  <span>{ext.replace('.', '').toUpperCase() || '其他'}</span>
-                  <strong>{Number(count).toLocaleString()}</strong>
-                </button>
-              ))}
-            </div>
-          )}
-        </section>
+        <ProjectFileStats
+          stats={treeStats}
+          activeFilter={filterType}
+          onFilterChange={setFilterType}
+        />
       )}
 
 
@@ -1657,22 +1547,28 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
             const isDirDragOver = item.isDirectory && (internalDragOverPath === item.path || dragOverDirPath === item.path);
             const isInDrag = internalDragPaths.has(item.path);
             return (
-              <Dropdown key={item.path} menu={getFileContextMenu(item)} trigger={['contextMenu']} placement="bottomLeft">
-              <div
-                draggable={false}
-                data-folder-path={item.isDirectory ? item.path : undefined}
-                onPointerDown={(e) => handleItemPointerDown(item, e)}
-                onDragStart={(e) => {
+              <ProjectFileListRow
+                key={item.path}
+                item={item}
+                menu={getFileContextMenu(item)}
+                highlighted={isHighlighted}
+                selected={isSelected}
+                directoryDragOver={isDirDragOver}
+                dragging={isInDrag}
+                renaming={renamingPath === item.path}
+                renameValue={renameValue}
+                onPointerDown={event => handleItemPointerDown(item, event)}
+                onRowDragStart={event => {
                   const paths = selectedPaths.has(item.path) ? new Set(selectedPaths) : new Set([item.path]);
                   if (!selectedPaths.has(item.path)) setSelectedPaths(paths);
                   internalDragPathsRef.current = paths;
-                  internalCopyModeRef.current = e.ctrlKey;
+                  internalCopyModeRef.current = event.ctrlKey;
                   setInternalDragPaths(paths);
-                  e.dataTransfer.effectAllowed = e.ctrlKey ? 'copy' : 'move';
-                  e.dataTransfer.setData('application/x-project-internal-drag', '1');
-                  e.dataTransfer.setData('text/plain', Array.from(paths).join('\n'));
+                  event.dataTransfer.effectAllowed = event.ctrlKey ? 'copy' : 'move';
+                  event.dataTransfer.setData('application/x-project-internal-drag', '1');
+                  event.dataTransfer.setData('text/plain', Array.from(paths).join('\n'));
                 }}
-                onDragEnd={() => {
+                onRowDragEnd={() => {
                   setIsDraggingFileOut(false);
                   internalDragPathsRef.current = new Set();
                   internalCopyModeRef.current = false;
@@ -1680,51 +1576,43 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
                   setInternalDragOverPath(null);
                   setIsDragOver(false);
                 }}
-                onDragOver={(e) => {
+                onRowDragOver={event => {
                   const dragPathSet = internalDragPathsRef.current;
                   if (item.isDirectory && dragPathSet.size > 0) {
-                    e.preventDefault();
-                    e.stopPropagation();
+                    event.preventDefault();
+                    event.stopPropagation();
                     if (isInvalidFolderDropTarget(item.path, dragPathSet)) {
-                      e.dataTransfer.dropEffect = 'none';
+                      event.dataTransfer.dropEffect = 'none';
                       setInternalDragOverPath(null);
                       return;
                     }
-                    if (e.ctrlKey) internalCopyModeRef.current = true;
-                    e.dataTransfer.dropEffect = (e.ctrlKey || internalCopyModeRef.current) ? 'copy' : 'move';
+                    if (event.ctrlKey) internalCopyModeRef.current = true;
+                    event.dataTransfer.dropEffect = (event.ctrlKey || internalCopyModeRef.current) ? 'copy' : 'move';
                     setInternalDragOverPath(item.path);
                   } else if (item.isDirectory) {
-                    handleDragOverDir(e, item.path);
+                    handleDragOverDir(event, item.path);
                   }
                 }}
-                onDragLeave={(e) => {
+                onRowDragLeave={event => {
                   if (internalDragOverPath === item.path) setInternalDragOverPath(null);
-                  handleDragLeaveDir(e, item.path);
+                  handleDragLeaveDir(event, item.path);
                 }}
-                onDrop={(e) => {
+                onRowDrop={event => {
                   if (item.isDirectory && internalDragPathsRef.current.size > 0) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    handleInternalDrop(item.path, e.ctrlKey || internalCopyModeRef.current);
+                    event.preventDefault();
+                    event.stopPropagation();
+                    handleInternalDrop(item.path, event.ctrlKey || internalCopyModeRef.current);
                   } else if (item.isDirectory) {
-                    handleDropToDir(e, item.path);
+                    handleDropToDir(event, item.path);
                   }
                 }}
-                style={{
-                  display: 'flex', alignItems: 'center', height: FILE_LIST_ROW_HEIGHT, minHeight: FILE_LIST_ROW_HEIGHT, padding: '0 12px',
-                  boxSizing: 'border-box', borderRadius: 6, cursor: 'grab', marginBottom: 2, userSelect: 'none',
-                  background: isDirDragOver ? '#e6f7ff' : isSelected ? '#e6f7ff' : isHighlighted ? '#f0f5ff' : 'transparent',
-                  border: isDirDragOver ? '1px dashed #1890ff' : isSelected ? '1px solid #91d5ff' : '1px solid transparent',
-                  transition: 'background 0.15s, border-color 0.15s',
-                  opacity: isInDrag ? 0.5 : 1,
-                }}
-                onClick={(e) => {
+                onClick={event => {
                   if (suppressClickRef.current) {
-                    e.preventDefault();
-                    e.stopPropagation();
+                    event.preventDefault();
+                    event.stopPropagation();
                     return;
                   }
-                  handleFileClick(item, e);
+                  handleFileClick(item, event);
                 }}
                 onContextMenu={() => {
                   if (!selectedPaths.has(item.path) || selectedPaths.size !== 1) {
@@ -1732,264 +1620,73 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
                     lastSelectedPathRef.current = item.path;
                   }
                 }}
-                onDoubleClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
+                onDoubleClick={event => {
+                  event.preventDefault();
+                  event.stopPropagation();
                   handleDoubleClick(item);
                 }}
-                onMouseEnter={e => { if (!isSelected && !isDirDragOver) e.currentTarget.style.background = '#f5f5f5'; }}
-                onMouseLeave={e => { if (!isSelected && !isDirDragOver) e.currentTarget.style.background = 'transparent'; }}
-              >
-                <div
-                  data-native-file-drag="true"
-                  draggable={renamingPath !== item.path}
-                  onDragStart={(e) => handleFileDragStart(item, e)}
-                  onDragEnd={() => {
-                    setIsDraggingFileOut(false);
-                    setTimeout(() => { suppressClickRef.current = false; }, 0);
-                  }}
-                  style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 0, height: '100%', userSelect: 'none', cursor: 'grab' }}
-                  title={item.isDirectory ? '拖动可发送文件夹；拖动行空白处可移动，按住 Ctrl 可复制' : '拖动名称可发送文件；拖动行空白处可移动，按住 Ctrl 可复制'}
-                >
-                  {fileIcon(item.ext, item.isDirectory)}
-                  <div data-file-rename-trigger="true" style={{ flex: 1, marginLeft: 10, minWidth: 0, display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
-                    {renamingPath === item.path ? (
-                      <Input
-                        size="small"
-                        value={renameValue}
-                        autoFocus
-                        onChange={e => setRenameValue(e.target.value)}
-                        onClick={e => e.stopPropagation()}
-                        onDoubleClick={e => e.stopPropagation()}
-                        onBlur={() => commitRename(item)}
-                        onPressEnter={() => commitRename(item)}
-                        onKeyDown={e => {
-                          if (e.key === 'Escape') {
-                            e.stopPropagation();
-                            cancelRename();
-                          }
-                        }}
-                      />
-                    ) : (
-                      <Text
-                        data-file-rename-trigger="true"
-                        style={{ display: 'block', maxWidth: '100%', fontSize: 13, lineHeight: '20px', fontWeight: isSelected ? 600 : 400, whiteSpace: 'nowrap' }}
-                        ellipsis
-                      >
-                        {item.name}
-                      </Text>
-                    )}
-                    {isHighlighted && (
-                      <Tag color="blue" style={{ flexShrink: 0, fontSize: 9, lineHeight: '16px', marginLeft: 6, padding: '0 4px' }}>新</Tag>
-                    )}
-                  </div>
-                </div>
-                {!item.isDirectory && item.ext && (
-                  <Tag color={extColorMap[item.ext] || 'default'} style={{ flexShrink: 0, fontSize: 10, lineHeight: '18px', margin: '0 8px' }}>
-                    {item.ext.replace('.', '').toUpperCase()}
-                  </Tag>
-                )}
-                <Text type="secondary" style={{ width: 80, flexShrink: 0, fontSize: 11, lineHeight: '20px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                  {item.isDirectory ? '-' : formatSize(item.size)}
-                </Text>
-                <Text type="secondary" style={{ width: 140, flexShrink: 0, fontSize: 11, lineHeight: '20px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                  {formatDate(item.modifiedAt)}
-                </Text>
-                <div data-no-file-drag="true" style={{ width: 34, flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                  <Popconfirm
-                    title={`确定删除 ${item.name}？`}
-                    onConfirm={(e) => { e?.stopPropagation(); handleDeleteFile(item); }}
-                    onCancel={(e) => e?.stopPropagation()}
-                  >
-                    <Button
-                      type="text" size="small" danger icon={<DeleteOutlined />}
-                      onClick={e => e.stopPropagation()}
-                      title="删除"
-                    />
-                  </Popconfirm>
-                </div>
-              </div>
-              </Dropdown>
+                onNativeDragStart={event => handleFileDragStart(item, event)}
+                onNativeDragEnd={() => {
+                  setIsDraggingFileOut(false);
+                  setTimeout(() => { suppressClickRef.current = false; }, 0);
+                }}
+                onRenameChange={setRenameValue}
+                onCommitRename={() => commitRename(item)}
+                onCancelRename={cancelRename}
+                onDelete={() => handleDeleteFile(item)}
+              />
             );
           })}
         </div>
       )}
 
-      <Modal
-        title={shareItem ? `发送给好友：${shareItem.name}` : '发送给好友'}
-        open={Boolean(shareItem)}
-        onCancel={() => !shareSending && setShareItem(null)}
-        onOk={() => void handleSendFileToFriend()}
-        okText="发送"
-        cancelText="取消"
-        confirmLoading={shareSending}
-        okButtonProps={{ disabled: !shareFriendId }}
-        destroyOnClose
-      >
-        <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
-          {shareItem?.isDirectory ? '文件夹将保留原始目录结构直接发送给好友' : '选择要接收当前文件的好友'}
-        </Text>
-        <Select
-          value={shareFriendId || undefined}
-          onChange={setShareFriendId}
-          style={{ width: '100%' }}
-          placeholder="选择好友"
-          options={shareFriends.map(friend => ({
-            value: friend.id,
-            label: `${friend.name}${friend.online ? '（在线）' : '（离线）'}`,
-            disabled: friend.online === false,
-          }))}
-        />
-      </Modal>
+      <ProjectFileShareModal
+        item={shareItem}
+        friends={shareFriends}
+        friendId={shareFriendId}
+        sending={shareSending}
+        onFriendChange={setShareFriendId}
+        onCancel={() => setShareItem(null)}
+        onSend={() => { void handleSendFileToFriend(); }}
+      />
 
-      {/* 新建文件夹弹窗 */}
-      <Modal
-        title="新建文件夹"
+      <ProjectFolderCreateModal
         open={folderModalOpen}
-        onOk={handleCreateFolder}
+        name={newFolderName}
+        creating={creatingFolder}
+        onNameChange={setNewFolderName}
+        onCreate={() => { void handleCreateFolder(); }}
         onCancel={() => {
-          if (creatingFolder) return;
           setFolderModalOpen(false);
           setNewFolderName('');
         }}
-        okText="创建"
-        cancelText="取消"
-        confirmLoading={creatingFolder}
-        width={400}
-        destroyOnClose
-      >
-        <Text strong style={{ display: 'block', marginBottom: 6 }}>文件夹名称</Text>
-        <Input
-          autoFocus
-          placeholder="输入文件夹名称"
-          value={newFolderName}
-          onChange={event => setNewFolderName(event.target.value)}
-          onPressEnter={handleCreateFolder}
-          maxLength={120}
-        />
-        <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 11 }}>
-          文件夹将创建在当前目录中
-        </Text>
-      </Modal>
-      {/* 新建文件弹窗 */}
-      <Modal
-        title="新建文件"
+      />
+      <ProjectFileCreateModal
         open={addModalOpen}
-        onOk={handleCreateFile}
+        templates={templates}
+        selectedTemplateId={selectedTemplateId}
+        fileType={newFileType}
+        fileName={newFileName}
+        deadline={deadline}
+        fileTypeOptions={fileTypeOptions}
+        onTemplateChange={handleTemplateChange}
+        onFileTypeChange={setNewFileType}
+        onFileNameChange={setNewFileName}
+        onDeadlineChange={setDeadline}
+        onCreate={() => { void handleCreateFile(); }}
         onCancel={handleModalClose}
-        okText="创建"
-        cancelText="取消"
-        width={400}
-      >
-        {templates.length > 0 && (
-          <div style={{ marginBottom: 14 }}>
-            <Text strong style={{ display: 'block', marginBottom: 6 }}>从模板创建（可选）</Text>
-            <Select
-              allowClear
-              placeholder="选择模板，自动填充文件名和类型"
-              style={{ width: '100%' }}
-              value={selectedTemplateId || undefined}
-              onChange={(v) => handleTemplateChange(v || '')}
-              options={templates.map(t => ({
-                value: t.id,
-                label: `${t.name} (${t.category} · ${(t.outputFileType || 'docx').toUpperCase()})`,
-              }))}
-            />
-          </div>
-        )}
-        <div style={{ marginBottom: 14 }}>
-          <Text strong style={{ display: 'block', marginBottom: 6 }}>文件类型</Text>
-          <Select
-            style={{ width: '100%' }}
-            value={newFileType}
-            onChange={setNewFileType}
-            options={fileTypeOptions}
-            disabled={!!selectedTemplateId}
-          />
-          {selectedTemplateId && (
-            <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>
-              选择模板后文件类型使用该模板的创建类型
-            </Text>
-          )}
-          {!selectedTemplateId && (
-            <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>
-              未选择模板时会创建真正的空白文件，不会写入默认标题或示例内容。
-            </Text>
-          )}
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <Text strong style={{ display: 'block', marginBottom: 6 }}>文件名</Text>
-          <Input
-            placeholder="输入文件名（不含扩展名）"
-            value={newFileName}
-            onChange={e => setNewFileName(e.target.value)}
-            onPressEnter={handleCreateFile}
-            addonAfter={`.${newFileType}`}
-          />
-        </div>
-        <div>
-          <Text strong style={{ display: 'block', marginBottom: 6 }}>截止日期（可选）</Text>
-          <DatePicker
-            style={{ width: '100%' }}
-            placeholder="设置截止日期，用于跟踪进度"
-            value={deadline}
-            onChange={setDeadline}
-            allowClear
-          />
-          <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>
-            设定后将在时间线中显示，逾期会自动提醒
-          </Text>
-        </div>
-      </Modal>
-
-      {/* 导入文件选择弹窗 */}
-      <Modal
-        title={importSource === 'folder' ? '从文件夹导入' : '从 ZIP 导入'}
+      />
+      <ProjectFileImportModal
         open={importModalOpen}
-        onOk={handleConfirmImport}
+        source={importSource}
+        files={importFiles}
+        selectedPaths={selectedImportFiles}
+        importing={importing}
+        onSelectionChange={setSelectedImportFiles}
+        onImport={() => { void handleConfirmImport(); }}
         onCancel={() => setImportModalOpen(false)}
-        okText={`导入已选 (${selectedImportFiles.length})`}
-        cancelText="取消"
-        confirmLoading={importing}
-        width={520}
-      >
-        <div style={{ marginBottom: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text type="secondary">共 {importFiles.length} 个文件，点击勾选需要导入的文件</Text>
-          <Space size={8}>
-            <Button size="small" onClick={() => setSelectedImportFiles(importFiles.map(f => f.path))}>全选</Button>
-            <Button size="small" onClick={() => setSelectedImportFiles([])}>全不选</Button>
-          </Space>
-        </div>
-        <div style={{ maxHeight: 360, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 6 }}>
-          {importFiles.map((file) => (
-            <label
-              key={file.path}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                padding: '7px 10px', cursor: 'pointer',
-                borderBottom: '1px solid #f5f5f5',
-                background: selectedImportFiles.includes(file.path) ? '#f0f7ff' : '#fff',
-                transition: 'background 0.15s',
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={selectedImportFiles.includes(file.path)}
-                onChange={(e) => {
-                  if (e.target.checked) {
-                    setSelectedImportFiles(prev => [...prev, file.path]);
-                  } else {
-                    setSelectedImportFiles(prev => prev.filter(p => p !== file.path));
-                  }
-                }}
-              />
-              <FileTextOutlined style={{ color: '#1890ff', flexShrink: 0 }} />
-              <Text style={{ flex: 1, fontSize: 12 }} ellipsis={{ tooltip: file.name }}>{file.name}</Text>
-              <Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>{(file.size / 1024).toFixed(1)}KB</Text>
-            </label>
-          ))}
-        </div>
-      </Modal>
+      />
+      <FolderImportModeDrawer open={folderImportModeDrawerOpen} onClose={() => setFolderImportModeDrawerOpen(false)} />
     </div>
   );
 };

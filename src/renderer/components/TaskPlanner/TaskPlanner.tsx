@@ -1,33 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Button,
-  Card,
-  Col,
-  DatePicker,
   Empty,
-  Form,
-  Input,
-  List,
   Modal,
-  Popconfirm,
-  Progress,
-  Row,
-  Select,
   Space,
-  Statistic,
-  Tag,
   Typography,
   message,
 } from 'antd';
 import {
-  CheckCircleOutlined,
-  DeleteOutlined,
   FileTextOutlined,
   LeftOutlined,
-  PlusOutlined,
-  RobotOutlined,
-  SyncOutlined,
-  UserOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useProjectStore } from '../../stores/projectStore';
@@ -36,35 +18,49 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useKnowledgeStore } from '../../stores/knowledgeStore';
-import { ProjectDocument, ReferenceMaterial, SectionAnalysis, StageMemoryEntry, TaskItem, WritingTemplate } from '../../../shared/types';
-import { buildProjectStageSegments, detectTimelineStage, getAllStages, getProjectProgress } from '../../utils/timelineStages';
+import { AIConfig, ProjectDocument, ReferenceMaterial, SectionAnalysis, StageMemoryEntry, TaskItem, WritingTemplate } from '../../../shared/types';
+import { buildProjectStageSegments, detectTimelineStage, getAllStages } from '../../utils/timelineStages';
+import { requireIpcObject } from '../../utils/ipcResult';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
+import { pickProjectFiles } from '../../stores/projectPickerStore';
+import StageDocumentPanel from './StageDocumentPanel';
+import StageDocumentOverview from './StageDocumentOverview';
+import AiStageReportPanel from './AiStageReportPanel';
+import type { AiReportVariant, AiSectionAdvice, AiStageReport, AiWorkflowPlanItem, SectionAdviceDraftItem, WorkflowDraftItem } from './taskPlannerTypes';
 
-const { Text, Paragraph, Title } = Typography;
+const { Text, Title } = Typography;
 
-const priorityColors: Record<TaskItem['priority'], string> = {
-  high: 'red',
-  medium: 'orange',
-  low: 'green',
+const REPORT_WORKFLOW_DRAFTS_KEY = 'projecthub.report-workflow-drafts.v1';
+
+interface StoredReportWorkflowDraft {
+  adviceItems: SectionAdviceDraftItem[];
+  workflowItems: WorkflowDraftItem[];
+  updatedAt: string;
+}
+
+const loadStoredReportWorkflowDraft = (key: string): StoredReportWorkflowDraft | null => {
+  if (!key) return null;
+  try {
+    const records = JSON.parse(localStorage.getItem(REPORT_WORKFLOW_DRAFTS_KEY) || '{}') as Record<string, StoredReportWorkflowDraft>;
+    const record = records[key];
+    return record && Array.isArray(record.adviceItems) && Array.isArray(record.workflowItems) ? record : null;
+  } catch {
+    return null;
+  }
 };
 
-const priorityLabels: Record<TaskItem['priority'], string> = {
-  high: '高',
-  medium: '中',
-  low: '低',
-};
-
-const statusLabels: Record<TaskItem['status'], string> = {
-  pending: '待处理',
-  in_progress: '进行中',
-  completed: '已完成',
-};
-
-const sourceLabels: Record<NonNullable<TaskItem['source']>, string> = {
-  manual: '手动',
-  review: '审查',
-  stage: '阶段',
-  report: '报告',
+const saveStoredReportWorkflowDraft = (key: string, draft: StoredReportWorkflowDraft) => {
+  if (!key) return;
+  try {
+    const records = JSON.parse(localStorage.getItem(REPORT_WORKFLOW_DRAFTS_KEY) || '{}') as Record<string, StoredReportWorkflowDraft>;
+    records[key] = draft;
+    const retained = Object.entries(records)
+      .sort((a, b) => new Date(b[1]?.updatedAt || 0).getTime() - new Date(a[1]?.updatedAt || 0).getTime())
+      .slice(0, 40);
+    localStorage.setItem(REPORT_WORKFLOW_DRAFTS_KEY, JSON.stringify(Object.fromEntries(retained)));
+  } catch {
+    // Draft persistence is best-effort and must not interrupt report editing.
+  }
 };
 
 const normalizeKnowledgeStageNameForPrompt = (value?: string) => String(value || '').trim().replace(/\s+/g, ' ') || 'unknown';
@@ -81,45 +77,6 @@ const formatPromptKnowledgeItems = (items: Array<StageMemoryEntry | ReferenceMat
     })
     .filter(Boolean)
     .join('\n\n');
-const taskTimeMs = (value?: string) => {
-  if (!value) return 0;
-  const ms = new Date(value).getTime();
-  return Number.isFinite(ms) ? ms : 0;
-};
-
-const normalizeTaskDedupeText = (value?: string) => String(value || '')
-  .replace(/^\u6765\u81ea AI \u5199\u4f5c\u6846\u67b6\u5de5\u4f5c\u6d41\uff1a.*$/gm, '')
-  .replace(/\s+/g, ' ')
-  .trim()
-  .toLowerCase();
-
-const getTaskDedupeKey = (task: TaskItem) => [
-  task.projectId,
-  task.relatedDocId || '',
-  task.source || 'manual',
-  task.type,
-  normalizeTaskDedupeText(task.title),
-  normalizeTaskDedupeText(task.description),
-].join('|');
-
-const dedupeSemanticTasks = (items: TaskItem[]) => {
-  const byKey = new Map<string, TaskItem>();
-  items.forEach((task) => {
-    const key = getTaskDedupeKey(task);
-    const existing = byKey.get(key);
-    if (!existing || taskTimeMs(task.createdAt) >= taskTimeMs(existing.createdAt)) {
-      byKey.set(key, task);
-    }
-  });
-  return Array.from(byKey.values()).sort((a, b) => {
-    if (a.workflowId || b.workflowId) {
-      const orderDiff = (a.workflowOrder ?? Number.MAX_SAFE_INTEGER) - (b.workflowOrder ?? Number.MAX_SAFE_INTEGER);
-      if (orderDiff !== 0) return orderDiff;
-    }
-    return taskTimeMs(b.createdAt) - taskTimeMs(a.createdAt);
-  });
-};
-
 const getDocCreatedAt = (doc: ProjectDocument) => doc.sourceFileCreatedAt || doc.createdAt;
 
 const cleanReportHeadingTitle = (value: string) => {
@@ -403,70 +360,6 @@ const isLikelyFalseMissingSectionAnalysis = (
 };
 
 
-interface AiWorkflowPlanItem {
-  type: 'manual' | 'ai';
-  title: string;
-  description?: string;
-  priority?: TaskItem['priority'];
-  reason?: string;
-}
-
-interface AiSectionAdvice {
-  title: string;
-  problems?: string[];
-  suggestions?: string[];
-}
-
-interface AiReportVariant {
-  id: string;
-  modelId?: string;
-  modelName: string;
-  ok: boolean;
-  rawText: string;
-  error?: string;
-  report?: AiStageReport;
-}
-
-interface AiStageReport {
-  reportTitle?: string;
-  reportSummary?: string;
-  qualityAssessment?: string[];
-  templateFit?: string[];
-  writingStyleNotes?: string[];
-  writingFramework?: string[];
-  writingDirection?: string[];
-  materialPlan?: string[];
-  draftPlan?: string[];
-  contentGaps?: string[];
-  optimizationFocus?: string[];
-  risks?: string[];
-  humanTasks?: string[];
-  aiTasks?: string[];
-  workflowPlan?: AiWorkflowPlanItem[];
-  sectionAdvice?: AiSectionAdvice[];
-  rawText?: string;
-  parallelVersions?: AiReportVariant[];
-  synthesisModelName?: string;
-}
-
-interface WorkflowDraftItem {
-  id: string;
-  type: 'manual' | 'ai';
-  title: string;
-  description: string;
-  priority: TaskItem['priority'];
-  order: number;
-  reason?: string;
-}
-
-interface NextActionDraftItem {
-  id: string;
-  type: 'manual' | 'ai';
-  title: string;
-  description: string;
-  priority: TaskItem['priority'];
-}
-
 const flattenTemplateNodesForPrompt = (nodes: any[] = [], depth = 0, isExampleTemplate = false): string[] => nodes.flatMap((node) => {
   const prefix = `${'  '.repeat(depth)}- ${node.title || '未命名章节'}`;
   const details = [
@@ -722,34 +615,31 @@ const normalizeWorkflowPlan = (value: unknown): AiWorkflowPlanItem[] => {
     .filter(Boolean) as AiWorkflowPlanItem[];
 };
 
-const createNextActionDraftItems = (actions: string[], hasMissingSections = false): NextActionDraftItem[] => actions.map((action, index) => ({
-  id: `next-${Date.now()}-${index}`,
-  type: /AI|智能|框架|方向|提纲|初稿|补写|扩写|润色|优化|修复/.test(action) ? 'ai' : 'manual',
-  title: action.replace(/[。.]$/, ''),
-  description: /AI|智能|框架|方向|提纲|初稿|补写|扩写|润色|优化|修复/.test(action)
-    ? '围绕当前文章内容执行：依据模板要求、范文结构和现有正文进行框架规划、提纲、初稿、扩写或润色。'
-    : '围绕当前文章内容执行：补充资料、确认口径、人工改稿、领导审核或处理返稿意见。',
-  priority: index === 0 || hasMissingSections ? 'high' : 'medium',
-}));
+const createSectionAdviceDraftItems = (sections: AiSectionAdvice[]): SectionAdviceDraftItem[] =>
+  sections.flatMap((section, sectionIndex) => {
+    const problems = section.problems || [];
+    const suggestions = section.suggestions || [];
+    return suggestions.map((suggestion, itemIndex) => ({
+      id: `advice-${sectionIndex}-${itemIndex}`,
+      sectionTitle: section.title,
+      problem: problems[itemIndex] || (suggestions.length === 1 ? problems.join('；') : problems[0]) || '',
+      suggestion,
+      selected: true,
+    }));
+  });
 
-const createWorkflowDraftItemsFromReport = (report: AiStageReport): WorkflowDraftItem[] => {
-  const plan: AiWorkflowPlanItem[] = report.workflowPlan?.length
-    ? report.workflowPlan
-    : [
-      ...(report.aiTasks || []).map((title, index) => ({ type: 'ai' as const, title, priority: index === 0 ? 'high' as const : 'medium' as const })),
-      ...(report.humanTasks || []).map((title, index) => ({ type: 'manual' as const, title, priority: index === 0 && !(report.aiTasks || []).length ? 'high' as const : 'medium' as const })),
-    ];
+const adviceExecutionType = (suggestion: string): 'manual' | 'ai' =>
+  /人工|补充资料|提供资料|核实|确认|审核|协调|签字|口径/.test(suggestion) ? 'manual' : 'ai';
 
-  return plan.map((item, index) => ({
-    id: `draft-${Date.now()}-${index}`,
-    type: item.type,
-    title: item.title.replace(/[。.]$/, ''),
-    description: item.description || '',
-    priority: item.priority || (index === 0 ? 'high' : 'medium'),
-    order: index + 1,
-    reason: item.reason,
-  }));
-};
+const createWorkflowItemFromAdvice = (item: SectionAdviceDraftItem, order: number): WorkflowDraftItem => ({
+  id: `draft-${item.id}`,
+  sourceAdviceId: item.id,
+  type: adviceExecutionType(item.suggestion),
+  title: `${item.sectionTitle}：${item.suggestion}`.replace(/[。.]$/, ''),
+  description: item.problem ? `针对问题：${item.problem}` : '',
+  priority: order === 1 ? 'high' : 'medium',
+  order,
+});
 
 const parseAiStageReport = (value: string): AiStageReport => {
   const parsed = extractJsonObject(value);
@@ -843,25 +733,21 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
   } = useProjectStore();
   const { projectDocs, loadProjectDocs, updateProjectDoc } = useProjectDocStore();
   const { customStages } = useSettingsStore();
-  const { tasks, loadTasks, addTask, deleteTask, executeAITask, updateTask } = useTaskStore();
+  const { tasks, loadTasks, addTask, deleteTask } = useTaskStore();
   const { templates, reviews, loadTemplates, loadReviews } = useTemplateStore();
   const { stageMemories, referenceMaterials, loadKnowledge } = useKnowledgeStore();
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [executingTaskId, setExecutingTaskId] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<'all' | TaskItem['status']>('all');
-  const [sourceFilter, setSourceFilter] = useState<'all' | NonNullable<TaskItem['source']>>('all');
   const [selectedStageName, setSelectedStageName] = useState<string>('');
   const [selectedReportDocId, setSelectedReportDocId] = useState<string>('');
   const [focusedReportDocId, setFocusedReportDocId] = useState<string>('');
-  const [versionsExpanded, setVersionsExpanded] = useState(false);
   const [isGeneratingAiReport, setIsGeneratingAiReport] = useState(false);
   const [refreshingAnalysisKey, setRefreshingAnalysisKey] = useState('');
   const [aiStageReport, setAiStageReport] = useState<AiStageReport | null>(null);
+  const [aiStageReportSourceDocId, setAiStageReportSourceDocId] = useState('');
   const [selectedAiReportVersionId, setSelectedAiReportVersionId] = useState<string>('synthesis');
   const [isRefreshingDocStatus, setIsRefreshingDocStatus] = useState(false);
   const [workflowDraftItems, setWorkflowDraftItems] = useState<WorkflowDraftItem[]>([]);
-  const [nextActionDraftItems, setNextActionDraftItems] = useState<NextActionDraftItem[]>([]);
-  const [form] = Form.useForm();
+  const [sectionAdviceDraftItems, setSectionAdviceDraftItems] = useState<SectionAdviceDraftItem[]>([]);
+  const [hydratedWorkflowDraftKey, setHydratedWorkflowDraftKey] = useState('');
 
   useEffect(() => {
     loadTasks();
@@ -890,20 +776,36 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
     () => currentProject ? buildProjectStageSegments(currentProject, projectDocsList, templates, projectVersions, allStages) : [],
     [currentProject, projectDocsList, templates, projectVersions, allStages]
   );
-  const projectProgress = useMemo(
-    () => currentProject ? getProjectProgress(currentProject, projectDocsList, templates, projectVersions, allStages) : 0,
-    [currentProject, projectDocsList, templates, projectVersions, allStages]
-  );
-
-  const stageOptions = useMemo(() => {
+  const stageDocumentsByName = useMemo(() => {
     const names = new Set<string>();
     stageSegments.forEach(segment => names.add(segment.stage));
     projectDocsList.forEach(doc => {
       const template = findReplacementTemplateForDoc(doc, templates, allStages);
       names.add(template?.category || detectTimelineStage(allStages, doc.name, doc.sourceFilePath));
     });
-    return [...names].map(name => ({ value: name, label: name }));
+    return new Map([...names].map(stageName => {
+      const sourceIds = new Set(
+        stageSegments
+          .filter(segment => segment.stage === stageName)
+          .flatMap(segment => segment.sourceDocIds),
+      );
+      const documents = projectDocsList
+        .filter(doc => {
+          if (sourceIds.has(doc.id)) return true;
+          const template = findReplacementTemplateForDoc(doc, templates, allStages);
+          const detectedStage = template?.category || detectTimelineStage(allStages, doc.name, doc.sourceFilePath);
+          return detectedStage === stageName;
+        })
+        .sort((a, b) => new Date(getDocCreatedAt(a)).getTime() - new Date(getDocCreatedAt(b)).getTime());
+      return [stageName, documents] as const;
+    }));
   }, [allStages, projectDocsList, stageSegments, templates]);
+
+  const stageOptions = useMemo(() => [...stageDocumentsByName.entries()].map(([name, documents]) => ({
+    value: name,
+    label: `${name} · ${documents.length} 个文件`,
+    count: documents.length,
+  })), [stageDocumentsByName]);
 
   const pendingFocusedDoc = useMemo(() => {
     const targetId = pendingReportDocId || focusedReportDocId || selectedReportDocId || '';
@@ -937,29 +839,19 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
     () => currentProject ? referenceMaterials.filter(item => item.projectId === currentProject.id) : [],
     [currentProject?.id, referenceMaterials],
   );
-  const stageDocs = useMemo(() => {
-    if (!selectedStage) return [];
-    const sourceIds = new Set(
-      stageSegments
-        .filter(segment => segment.stage === selectedStage)
-        .flatMap(segment => segment.sourceDocIds)
-    );
-    return projectDocsList
-      .filter(doc => {
-        if (sourceIds.has(doc.id)) return true;
-        const template = findReplacementTemplateForDoc(doc, templates, allStages, selectedStage);
-        const detectedStage = template?.category || detectTimelineStage(allStages, doc.name, doc.sourceFilePath);
-        return detectedStage === selectedStage;
-      })
-      .sort((a, b) => new Date(getDocCreatedAt(a)).getTime() - new Date(getDocCreatedAt(b)).getTime());
-  }, [allStages, projectDocsList, selectedStage, stageSegments, templates]);
+  const stageDocs = selectedStage ? stageDocumentsByName.get(selectedStage) || [] : [];
 
   useEffect(() => {
     if (!currentProject) return;
 
     const stageExists = (stageName: string) => stageOptions.some(option => option.value === stageName);
     const firstStage = stageOptions[0]?.value || '';
-    const preferredStage = pendingFocusedStage || currentStageName;
+    // 手动切换阶段后，不能再被旧文档的自动识别结果覆盖。
+    // 只有仍在处理“指定报告文档跳转”时，才允许该文档锁定当前阶段。
+    const hasFocusedReport = Boolean(pendingReportDocId || focusedReportDocId);
+    const preferredStage = hasFocusedReport
+      ? pendingFocusedStage
+      : (selectedStageName || currentStageName);
     const nextStage = preferredStage && stageExists(preferredStage) ? preferredStage : firstStage;
 
     if (nextStage && selectedStageName !== nextStage) {
@@ -971,7 +863,7 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
     if (!nextStage && selectedStageName) {
       setSelectedStageName('');
     }
-  }, [currentProject?.id, currentStageName, pendingFocusedStage, selectedStageName, stageOptions, setCurrentStageName]);
+  }, [currentProject?.id, currentStageName, focusedReportDocId, pendingFocusedStage, pendingReportDocId, selectedStageName, stageOptions, setCurrentStageName]);
 
   useEffect(() => {
     if (!pendingReportDocId) return;
@@ -982,10 +874,10 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
 
     setFocusedReportDocId(pendingReportDocId);
     setSelectedReportDocId(pendingReportDocId);
-    setVersionsExpanded(false);
     setAiStageReport(null);
+    setAiStageReportSourceDocId('');
     setWorkflowDraftItems([]);
-    setNextActionDraftItems([]);
+    setSectionAdviceDraftItems([]);
 
     const targetStage = targetDoc
       ? (findReplacementTemplateForDoc(targetDoc, templates, allStages)?.category ||
@@ -1040,6 +932,20 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
   const selectedDocVersion = selectedReportDoc?.versionId
     ? projectVersions.find(version => version.id === selectedReportDoc.versionId)
     : undefined;
+
+  const handlePickStageDocument = async () => {
+    if (!currentProject || !stageDocs.length) return;
+    const pathForDoc = (doc: ProjectDocument) => doc.sourceFilePath || projectVersions.find(version => version.id === doc.versionId)?.filePath || '';
+    const selected = await pickProjectFiles({
+      projectId: currentProject.id,
+      title: `${selectedStage || '当前阶段'} · 选择报告文档`,
+      selectedPaths: selectedReportDoc ? [pathForDoc(selectedReportDoc)].filter(Boolean) : [],
+      stageName: selectedStage,
+    });
+    const selectedPath = selected[0]?.path;
+    const selectedDoc = stageDocs.find(doc => pathForDoc(doc) === selectedPath);
+    if (selectedDoc) setSelectedReportDocId(selectedDoc.id);
+  };
   const selectedDocReviews = selectedReportDoc
     ? projectReviews.filter(review =>
       review.versionId === selectedReportDoc.versionId ||
@@ -1213,18 +1119,21 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
           ? { ...saved, ...parseAiStageReport(saved.rawText), rawText: saved.rawText }
           : saved;
         setAiStageReport(restored);
+        setAiStageReportSourceDocId(selectedReportDoc.id);
         setSelectedAiReportVersionId('synthesis');
-        setWorkflowDraftItems(createWorkflowDraftItemsFromReport(restored));
+        setWorkflowDraftItems([]);
       } catch {
         setAiStageReport(null);
+        setAiStageReportSourceDocId('');
         setWorkflowDraftItems([]);
       }
     } else {
       setAiStageReport(null);
+      setAiStageReportSourceDocId('');
       setSelectedAiReportVersionId('synthesis');
       setWorkflowDraftItems([]);
     }
-    setNextActionDraftItems([]);
+    setSectionAdviceDraftItems([]);
   }, [selectedReportDoc?.id, selectedStage, selectedReportDoc?.aiReport]);
 
   const topLevelTemplateTitles = useMemo(() => {
@@ -1380,13 +1289,44 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
       .slice(0, 12);
   }, [displayAiStageReport, selectedSections]);
 
-  const taskStats = useMemo(() => {
-    const open = scopedProjectTasks.filter((t) => t.status !== 'completed').length;
-    const completed = scopedProjectTasks.filter((t) => t.status === 'completed').length;
-    const high = scopedProjectTasks.filter((t) => t.priority === 'high' && t.status !== 'completed').length;
-    const review = scopedProjectTasks.filter((t) => t.source === 'review' && t.status !== 'completed').length;
-    return { open, completed, high, review };
-  }, [scopedProjectTasks]);
+  const workflowDraftStorageKey = useMemo(() => {
+    if (!currentProject || !selectedReportDoc || !aiStageReport || aiStageReportSourceDocId !== selectedReportDoc.id) return '';
+    const reportRevision = selectedReportDoc.analyzedAt || selectedReportDoc.createdAt || 'unsaved';
+    return `${currentProject.id}:${selectedReportDoc.id}:${reportRevision}:${selectedAiReportVersionId}`;
+  }, [aiStageReport, aiStageReportSourceDocId, currentProject?.id, selectedAiReportVersionId, selectedReportDoc?.analyzedAt, selectedReportDoc?.createdAt, selectedReportDoc?.id]);
+
+  useEffect(() => {
+    if (!workflowDraftStorageKey) {
+      setHydratedWorkflowDraftKey('');
+      return;
+    }
+    const stored = loadStoredReportWorkflowDraft(workflowDraftStorageKey);
+    if (stored) {
+      setSectionAdviceDraftItems(stored.adviceItems);
+      setWorkflowDraftItems(stored.workflowItems);
+    } else {
+      const drafts = createSectionAdviceDraftItems(sectionAdviceItems);
+      setSectionAdviceDraftItems(drafts);
+      setWorkflowDraftItems(
+        drafts
+          .filter(item => item.selected && item.suggestion.trim())
+          .map((item, index) => createWorkflowItemFromAdvice(item, index + 1))
+      );
+    }
+    setHydratedWorkflowDraftKey(workflowDraftStorageKey);
+  }, [workflowDraftStorageKey]);
+
+  useEffect(() => {
+    if (!workflowDraftStorageKey || hydratedWorkflowDraftKey !== workflowDraftStorageKey) return undefined;
+    const timer = window.setTimeout(() => {
+      saveStoredReportWorkflowDraft(workflowDraftStorageKey, {
+        adviceItems: sectionAdviceDraftItems,
+        workflowItems: workflowDraftItems,
+        updatedAt: new Date().toISOString(),
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [hydratedWorkflowDraftKey, sectionAdviceDraftItems, workflowDraftItems, workflowDraftStorageKey]);
 
   const nextActions = useMemo(() => {
     const actions: string[] = [];
@@ -1426,8 +1366,9 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
     selectedReportDoc?.overallProgress,
   ]);
 
-  const nextActionReportLines = nextActionDraftItems.length
-    ? nextActionDraftItems
+  const workflowReportLines = workflowDraftItems.length
+    ? [...workflowDraftItems]
+      .sort((a, b) => a.order - b.order)
       .filter(item => item.title.trim())
       .map(item => `${item.type === 'ai' ? 'AI' : '人工'}：${item.title.trim()}`)
     : nextActions;
@@ -1456,8 +1397,8 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
         ? incompleteSections.map(section => `- [${section.status === 'missing' ? '缺失' : '部分完成'}] ${section.title}：字数 ${section.wordCount}${section.aiComment ? `；说明：${section.aiComment}` : section.status === 'missing' ? '；说明：模板要求有该章节，但当前正文未匹配到对应标题或内容' : '；说明：已识别到章节，但内容仍需补充完善'}`)
         : ['- 暂无未完成章节']),
       '',
-      '下一步需要做什么：',
-      ...nextActionReportLines.map(action => `- ${action}`),
+      '工作流草稿：',
+      ...workflowReportLines.map(action => `- ${action}`),
     ].filter(Boolean).join('\n');
   }, [
     completedSections.length,
@@ -1465,7 +1406,7 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
     latestDocReview,
     latestReviewIssues.length,
     missingSections.length,
-    nextActionReportLines,
+    workflowReportLines,
     openSelectedDocTasks.length,
     partialSections.length,
     selectedDocTemplate,
@@ -1475,18 +1416,6 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
     stageDocs.length,
   ]);
 
-  const filteredTasks = dedupeSemanticTasks(scopedProjectTasks.filter((task) => {
-    if (statusFilter !== 'all' && task.status !== statusFilter) return false;
-    if (sourceFilter !== 'all' && (task.source || 'manual') !== sourceFilter) return false;
-    return true;
-  }));
-  const workflowTasks = filteredTasks.filter(task => Boolean(task.workflowId));
-  const aiTasks = filteredTasks.filter(task => task.type === 'ai' && !task.workflowId);
-  const manualTasks = filteredTasks.filter(task => task.type === 'manual' && !task.workflowId);
-  const hasStandaloneTasks = manualTasks.length > 0 || aiTasks.length > 0;
-  const hasWorkflowDraft = workflowDraftItems.length > 0;
-  const showWorkflowTasks = workflowTasks.length > 0 && !hasWorkflowDraft;
-
   if (!currentProject) {
     return (
       <Empty
@@ -1495,33 +1424,6 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
       />
     );
   }
-
-  const handleCreate = async () => {
-    try {
-      const values = await form.validateFields();
-      const newTask: TaskItem = {
-        id: Date.now().toString(),
-        projectId: currentProject.id,
-        title: values.title,
-        description: values.description || '',
-        type: values.type,
-        status: 'pending',
-        priority: values.priority || 'medium',
-        source: values.source || 'manual',
-        relatedDocId: values.relatedDocId,
-        stageName: values.stageName,
-        assigneeName: values.assigneeName,
-        dueAt: values.dueAt ? values.dueAt.toISOString() : undefined,
-        createdAt: new Date().toISOString(),
-      };
-      await addTask(newTask);
-      setIsModalOpen(false);
-      form.resetFields();
-      message.success('任务已创建');
-    } catch (error) {
-      console.error('Task form validation failed:', error);
-    }
-  };
 
   const handleCreateReportTask = async () => {
     if (!selectedReportDoc) {
@@ -1693,13 +1595,12 @@ const TaskPlanner: React.FC<{ onBack?: () => void; focus?: import('../../../shar
 4. 模板格式要求一旦存在就是硬性要求；即使当前是范文模板，也必须把标题/正文/图表格式作为严格约束，不得按“参考方向”放宽。
 5. 下一步任务必须针对“写作产出”：框架、提纲、章节展开、材料清单、初稿/扩写/润色，不输出审查结论、质量评分或风险判定。
 5. 输出必须是 JSON 对象，不要输出 Markdown，不要包裹代码块。
-6. humanTasks 强调补资料、确认数据/口径、提供附件依据、决定领导审核时机。
-7. aiTasks 强调搭框架、列提纲、生成初稿、按范文结构扩写、润色、整理材料引用路径。
-8. workflowPlan 必须按真实写作流转排序；通常优先 AI 框架/初稿，然后人工补资料确认，再 AI 扩写/润色，再人工成稿确认。
-9. 每个任务要具体、可执行，避免空泛建议。
-10. 审查Tab已有结果只能作为背景参考，不能在这里重新做审查或下结论。
-11. 前台主要展示 sectionAdvice。sectionAdvice 的 title 必须优先使用“当前文档章节状态”中的当前文档一级标题；不要使用范文标题替代当前文档标题。${isExampleTemplate ? '当前是范文模板：范文只用于写作方向，不判定范文标题缺失。' : '当前是直接套用模板：可参考模板要求判断问题，但展示标题仍使用当前文档标题。'}
-12. ${isExampleTemplate ? '范文模板只参考“整体概述 -> 技术层面由浅入深展开 -> 试验/应用 -> 总结展望”等路径，不把范文事实或标题当硬约束。' : '直接套用模板的全局结构约束不要重复写入每个章节的 suggestions；只有缺少标题、顺序错误或结构错乱时才指出。'}
+6. sectionAdvice 是生成工作流草稿的唯一建议来源；每条 suggestion 都必须是可独立选择和执行的修改步骤。
+7. 需要人工补资料、确认数据/口径或审核时，在 suggestion 中明确写出“人工”；可由 AI 完成的扩写、润色、结构调整则写清具体产出。
+8. 每条建议要具体、可执行，避免空泛建议，不要再额外输出另一套任务清单或工作流。
+9. 审查Tab已有结果只能作为背景参考，不能在这里重新做审查或下结论。
+10. 前台主要展示 sectionAdvice。sectionAdvice 的 title 必须优先使用“当前文档章节状态”中的当前文档一级标题；不要使用范文标题替代当前文档标题。${isExampleTemplate ? '当前是范文模板：范文只用于写作方向，不判定范文标题缺失。' : '当前是直接套用模板：可参考模板要求判断问题，但展示标题仍使用当前文档标题。'}
+11. ${isExampleTemplate ? '范文模板只参考“整体概述 -> 技术层面由浅入深展开 -> 试验/应用 -> 总结展望”等路径，不把范文事实或标题当硬约束。' : '直接套用模板的全局结构约束不要重复写入每个章节的 suggestions；只有缺少标题、顺序错误或结构错乱时才指出。'}
 
 JSON 字段（必须先完整输出 sectionAdvice，再输出其余数组，避免长响应截断时丢失前台核心内容）：
 {
@@ -1711,10 +1612,7 @@ JSON 字段（必须先完整输出 sectionAdvice，再输出其余数组，避�
   "writingFramework": ["供AI内部参考的章节框架，不作为前台主要展示"],
   "writingDirection": ["供AI内部参考的写作方向，不作为前台主要展示"],
   "materialPlan": ["需要人工准备或确认的材料、数据、附件、口径"],
-  "draftPlan": ["AI可执行的初稿、扩写、润色、整理任务"],
-  "humanTasks": ["人工资料/口径/成稿确认任务"],
-  "aiTasks": ["AI框架/提纲/初稿/扩写/润色任务"],
-  "workflowPlan": [{"type": "ai|manual", "title": "工作流步骤标题", "description": "执行说明，说明产出物和对应章节", "priority": "high|medium|low", "reason": "排序理由"}]
+  "draftPlan": ["AI可执行的初稿、扩写、润色、整理任务"]
 }
 
 项目信息：
@@ -1751,10 +1649,16 @@ ${reportDocument.source}；提取字符数：${reportDocument.content.length}
 审查Tab已有结果（仅作背景，不重新审查）：
 ${reviewIssues}
 
+当前阶段记忆（只作为当前项目事实和既有口径参考，不得覆盖用户本次要求）：
+${stageMemoryContext}
+
+项目参考资料（用于补充事实、数据、附件依据和表达口径；无法确认时必须明确标注需要人工核实）：
+${referenceContext}
+
 当前文档内容摘录：
 ${documentContent.slice(0, 9000)}`;
 
-      const aiConfig = await window.electronAPI.loadAIConfig();
+      const aiConfig = requireIpcObject<AIConfig>(await window.electronAPI.loadAIConfig(), '加载 AI 配置失败');
       const useParallelVersions = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1;
       let response = '';
       let parallelVersions: AiReportVariant[] = [];
@@ -1807,8 +1711,9 @@ ${documentContent.slice(0, 9000)}`;
       }
       const parsed = { ...parseAiStageReport(response), parallelVersions, synthesisModelName };
       setAiStageReport(parsed);
+      setAiStageReportSourceDocId(selectedReportDoc.id);
       setSelectedAiReportVersionId('synthesis');
-      setWorkflowDraftItems(createWorkflowDraftItemsFromReport(parsed));
+      setWorkflowDraftItems([]);
       // 持久化 AI 报告到 ProjectDocument（从 store 取最新对象，避免闭包引用旧值）
       const latestDoc = useProjectDocStore.getState().projectDocs.find(d => d.id === selectedReportDoc?.id);
       if (latestDoc) {
@@ -1824,6 +1729,45 @@ ${documentContent.slice(0, 9000)}`;
 
   const normalizeDraftOrders = (items: WorkflowDraftItem[]) => items
     .map((item, index) => ({ ...item, order: index + 1 }));
+
+  const handleUpdateSectionAdviceDraftItem = (id: string, updates: Partial<SectionAdviceDraftItem>) => {
+    const current = sectionAdviceDraftItems.find(item => item.id === id);
+    if (!current) return;
+    const next = { ...current, ...updates };
+    setSectionAdviceDraftItems(items => items.map(item => item.id === id ? next : item));
+    setWorkflowDraftItems(items => {
+      const existing = items.find(item => item.sourceAdviceId === id);
+      if (!next.selected || !next.suggestion.trim()) {
+        return normalizeDraftOrders(items.filter(item => item.sourceAdviceId !== id));
+      }
+      if (existing) {
+        return items.map(item => item.sourceAdviceId === id ? {
+          ...item,
+          title: `${next.sectionTitle}：${next.suggestion}`.replace(/[。.]$/, ''),
+          description: next.problem ? `针对问题：${next.problem}` : '',
+        } : item);
+      }
+      return normalizeDraftOrders([
+        ...[...items].sort((a, b) => a.order - b.order),
+        createWorkflowItemFromAdvice(next, items.length + 1),
+      ]);
+    });
+  };
+
+  const handleToggleAllSectionAdvice = (selected: boolean) => {
+    const nextAdviceItems = sectionAdviceDraftItems.map(item => ({ ...item, selected }));
+    setSectionAdviceDraftItems(nextAdviceItems);
+    setWorkflowDraftItems(items => {
+      const manuallyAddedItems = items.filter(item => !item.sourceAdviceId);
+      const selectedAdviceItems = selected
+        ? nextAdviceItems.filter(item => item.suggestion.trim())
+        : [];
+      return normalizeDraftOrders([
+        ...selectedAdviceItems.map((item, index) => createWorkflowItemFromAdvice(item, index + 1)),
+        ...manuallyAddedItems.sort((a, b) => a.order - b.order),
+      ]);
+    });
+  };
 
   const handleAddWorkflowDraftItem = (type: 'manual' | 'ai' = 'manual') => {
     setWorkflowDraftItems(items => normalizeDraftOrders([
@@ -1844,6 +1788,10 @@ ${documentContent.slice(0, 9000)}`;
   };
 
   const handleDeleteWorkflowDraftItem = (id: string) => {
+    const sourceAdviceId = workflowDraftItems.find(item => item.id === id)?.sourceAdviceId;
+    if (sourceAdviceId) {
+      setSectionAdviceDraftItems(items => items.map(item => item.id === sourceAdviceId ? { ...item, selected: false } : item));
+    }
     setWorkflowDraftItems(items => normalizeDraftOrders(
       [...items].sort((a, b) => a.order - b.order).filter(item => item.id !== id)
     ));
@@ -1914,219 +1862,11 @@ ${documentContent.slice(0, 9000)}`;
       previousTaskId = taskId;
     }
 
-    setWorkflowDraftItems([]);
     message.success(`已生成 ${draftItems.length} 个有顺序的工作流任务，可在计划页查看进度`);
   };
-  const handleFillNextActionDraftItems = () => {
-    if (!selectedReportDoc) {
-      message.warning('请先选择阶段文档');
-      return;
-    }
-    setNextActionDraftItems(createNextActionDraftItems(nextActions, missingSections.length > 0));
-    message.success('已根据当前文档状态填充建议草稿，可继续删减和调整');
-  };
-
-  const handleAddNextActionDraftItem = (type: 'manual' | 'ai' = 'manual') => {
-    setNextActionDraftItems(items => ([
-      ...items,
-      {
-        id: `next-${Date.now()}`,
-        type,
-        title: type === 'ai' ? 'AI生成当前正文的写作框架和方向' : '人工按写作框架补充资料并确认口径',
-        description: '',
-        priority: 'medium',
-      },
-    ]));
-  };
-
-  const handleUpdateNextActionDraftItem = (id: string, updates: Partial<NextActionDraftItem>) => {
-    setNextActionDraftItems(items => items.map(item => (item.id === id ? { ...item, ...updates } : item)));
-  };
-
-  const handleDeleteNextActionDraftItem = (id: string) => {
-    setNextActionDraftItems(items => items.filter(item => item.id !== id));
-  };
-
-  const handleCreateNextActionTasks = async (taskType: 'manual' | 'ai') => {
-    if (!selectedReportDoc) {
-      message.warning('请先选择阶段文档');
-      return;
-    }
-    const draftItems = nextActionDraftItems
-      .filter(item => item.type === taskType && item.title.trim());
-    if (draftItems.length === 0) {
-      message.warning(taskType === 'ai' ? '暂无可生成的 AI 下一步' : '暂无可生成的人工下一步');
-      return;
-    }
-    for (let i = 0; i < draftItems.length; i++) {
-      const item = draftItems[i];
-      const task: TaskItem = {
-        id: `${Date.now()}-${taskType}-next-${i}`,
-        projectId: currentProject.id,
-        title: item.title.trim().replace(/[。.]$/, ''),
-        description: item.description || `来自阶段报告 V${selectedStageVersionIndex + 1}：${selectedReportDoc.name}`,
-        type: item.type,
-        status: 'pending',
-        priority: item.priority,
-        source: 'report',
-        relatedDocId: selectedReportDoc.id,
-        stageName: selectedStage,
-        createdAt: new Date().toISOString(),
-      };
-      await addTask(task);
-    }
-    message.success(`已生成 ${draftItems.length} 个${taskType === 'ai' ? 'AI' : '人工'}下一步任务`);
-  };
-  const handleExecuteAI = async (task: TaskItem) => {
-    const relatedDoc = task.relatedDocId ? projectDocsList.find((doc) => doc.id === task.relatedDocId) : null;
-    const relatedVersion = relatedDoc?.versionId
-      ? projectVersions.find((version) => version.id === relatedDoc.versionId)
-      : null;
-    const latestVersion = [...projectVersions].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
-    const content = relatedVersion?.content || latestVersion?.content || reportText;
-
-    setExecutingTaskId(task.id);
-    try {
-      const result = await executeAITask(task.id, content, task.description || task.title);
-      if (!result.success) {
-        message.error(`执行失败: ${result.error}`);
-      }
-    } catch (error: any) {
-      message.error(`执行失败: ${error.message}`);
-    } finally {
-      setExecutingTaskId(null);
-    }
-  };
-
-  const handleDeleteTask = async (taskId: string) => {
-    await deleteTask(taskId);
-    message.success('任务已删除');
-  };
-
-  const handleStatusChange = async (taskId: string, status: TaskItem['status']) => {
-    await updateTask(taskId, {
-      status,
-      completedAt: status === 'completed' ? new Date().toISOString() : undefined,
-    });
-    message.success('状态已更新');
-  };
-
-  const handleToggleTaskType = async (task: TaskItem) => {
-    const nextType: TaskItem['type'] = task.type === 'ai' ? 'manual' : 'ai';
-    await updateTask(task.id, { type: nextType });
-    message.success(nextType === 'ai' ? '已归类为 AI 任务' : '已归类为人工任务');
-  };
-
-  const renderTaskItem = (task: TaskItem) => {
-    const relatedDoc = task.relatedDocId ? projectDocsList.find((doc) => doc.id === task.relatedDocId) : null;
-    const source = task.source || 'manual';
-    return (
-      <List.Item
-        actions={[
-          task.type === 'ai' && task.status !== 'completed' && (
-            <Button
-              type="primary"
-              size="small"
-              icon={<RobotOutlined />}
-              loading={executingTaskId === task.id}
-              onClick={() => handleExecuteAI(task)}
-            >
-              执行
-            </Button>
-          ),
-          task.status !== 'completed' && (
-            <Select
-              size="small"
-              value={task.status}
-              onChange={(value) => handleStatusChange(task.id, value)}
-              style={{ width: 104 }}
-              options={[
-                { value: 'pending', label: '待处理' },
-                { value: 'in_progress', label: '进行中' },
-                { value: 'completed', label: '已完成' },
-              ]}
-            />
-          ),
-          <Popconfirm title="确定删除此任务？" onConfirm={() => handleDeleteTask(task.id)}>
-            <Button type="text" danger size="small" icon={<DeleteOutlined />} />
-          </Popconfirm>,
-        ].filter(Boolean)}
-      >
-        <List.Item.Meta
-          avatar={
-            <Button
-              type="text"
-              size="small"
-              title={task.type === 'ai' ? '当前为 AI 任务，点击切换为人工任务' : '当前为人工任务，点击切换为 AI 任务'}
-              icon={task.type === 'ai' ? <RobotOutlined /> : <UserOutlined />}
-              onClick={() => { void handleToggleTaskType(task); }}
-              style={{ color: task.type === 'ai' ? '#1677ff' : '#52c41a', fontSize: 18 }}
-            />
-          }
-          title={
-            <Space wrap size={6}>
-              <Text delete={task.status === 'completed'}>{task.title}</Text>
-              <Tag color={priorityColors[task.priority]}>{priorityLabels[task.priority]}</Tag>
-              <Tag icon={task.status === 'completed' ? <CheckCircleOutlined /> : <SyncOutlined spin={task.status === 'in_progress'} />}>
-                {statusLabels[task.status]}
-              </Tag>
-              <Tag>{sourceLabels[source]}</Tag>
-              {task.stageName && <Tag color="blue">{task.stageName}</Tag>}
-            </Space>
-          }
-          description={
-            <div>
-              <Space wrap size={6} style={{ marginBottom: 4 }}>
-                {task.assigneeName && <Text type="secondary">负责人：{task.assigneeName}</Text>}
-                {task.dueAt && <Text type="secondary">截止：{dayjs(task.dueAt).format('MM-DD')}</Text>}
-                {relatedDoc && <Text type="secondary">文档：{relatedDoc.name}</Text>}
-                {task.sectionTitle && <Text type="secondary">章节：{task.sectionTitle}</Text>}
-              </Space>
-              {task.description && (
-                <Paragraph ellipsis={{ rows: 2 }} style={{ marginBottom: 4 }}>
-                  {task.description}
-                </Paragraph>
-              )}
-              {task.result && (
-                <div style={{ marginTop: 8, padding: 10, background: '#f6f8fa', borderRadius: 6, fontSize: 12 }}>
-                  <Text type="secondary">AI 执行结果：</Text>
-                  <Paragraph ellipsis={{ rows: 3, expandable: true }} style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
-                    {task.result}
-                  </Paragraph>
-                </div>
-              )}
-            </div>
-          }
-        />
-      </List.Item>
-    );
-  };
-
   const versionSummary = selectedReportDoc
     ? `V${selectedStageVersionIndex + 1} / ${stageDocs.length} · ${dayjs(getDocCreatedAt(selectedReportDoc)).format('YYYY-MM-DD HH:mm')}`
     : '暂无阶段版本';
-
-  const renderTaskGroup = (title: string, subtitle: string, items: TaskItem[], color: string) => (
-    <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, background: '#fff', overflow: 'hidden' }}>
-      <div style={{ padding: '10px 12px', borderTop: `3px solid ${color}`, borderBottom: '1px solid #eef0f4' }}>
-        <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
-          <div>
-            <Text strong>{title}</Text>
-            <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{subtitle}</Text>
-          </div>
-          <Tag color={items.length ? 'blue' : 'default'} style={{ margin: 0 }}>{items.length}</Tag>
-        </Space>
-      </div>
-      <div style={{ padding: '0 10px' }}>
-        <List
-          size="small"
-          dataSource={items}
-          renderItem={renderTaskItem}
-          locale={{ emptyText: '暂无匹配任务' }}
-        />
-      </div>
-    </div>
-  );
 
   return (
     <div
@@ -2150,728 +1890,77 @@ ${documentContent.slice(0, 9000)}`;
         </div>
         <Space>
           <Button icon={<FileTextOutlined />} onClick={handleCreateReportTask}>保存为报告任务</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>新建任务</Button>
         </Space>
       </div>}
 
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        <Card>
-          <Row gutter={16}>
-            <Col span={6}><Statistic title="项目进度" value={projectProgress} suffix="%" /></Col>
-            <Col span={6}><Statistic title="阶段版本" value={stageDocs.length} /></Col>
-            <Col span={6}><Statistic title="待处理任务" value={taskStats.open} /></Col>
-            <Col span={6}><Statistic title="审查待办" value={taskStats.review} /></Col>
-          </Row>
-          <Progress percent={stageProgressPercent || projectProgress} style={{ marginTop: 12, marginBottom: 0 }} />
-        </Card>
-
-        <Card
-          title="阶段文档报告"
+        <StageDocumentPanel
           extra={hideHeader ? <Button size="small" icon={<FileTextOutlined />} onClick={handleCreateReportTask}>保存为报告任务</Button> : null}
+          stageOptions={stageOptions}
+          selectedStage={selectedStage}
+          onStageChange={(value) => {
+            setSelectedStageName(value);
+            setCurrentStageName(value);
+            // 用户明确选择阶段，取消此前由文件详情带入的阶段锁定。
+            setPendingReportDocId(null);
+            setPendingReportDocOnly(false);
+            setFocusedReportDocId('');
+            setSelectedReportDocId('');
+          }}
+          stageDocuments={stageDocs}
+          selectedDocument={selectedReportDoc}
+          selectedVersionIndex={selectedStageVersionIndex}
+          stageProgress={stageProgressPercent}
+          onPickDocument={() => void handlePickStageDocument()}
         >
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Row gutter={12} align="bottom">
-              <Col span={8}>
-                <Text strong style={{ display: 'block', marginBottom: 6 }}>选择阶段</Text>
-                <Select
-                  style={{ width: '100%' }}
-                  value={selectedStage || undefined}
-                  placeholder="选择阶段"
-                                      onChange={(value) => {
-                      setSelectedStageName(value);
-                      setCurrentStageName(value);
-                      setFocusedReportDocId('');
-                      setSelectedReportDocId('');
-                      setVersionsExpanded(false);
-                    }}
-                  options={stageOptions}
-                />
-              </Col>
-              <Col span={16}>
-                <Text strong style={{ display: 'block', marginBottom: 6 }}>阶段版本</Text>
-                <Text type="secondary">一个阶段有多少个相关文档，就形成多少个版本；版本按文档创建时间排序，默认打开最新版本。</Text>
-              </Col>
-            </Row>
-
-            {stageDocs.length > 0 ? (
-              <div style={{ border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
-                <button
-                  type="button"
-                  onClick={() => setVersionsExpanded(prev => !prev)}
-                  style={{
-                    width: '100%',
-                    border: 0,
-                    background: '#f8fbff',
-                    padding: '12px 14px',
-                    textAlign: 'left',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-                    <Space size={8} style={{ minWidth: 0 }}>
-                      <Tag color="blue" style={{ margin: 0 }}>当前</Tag>
-                      <Text strong>
-                        V{Math.max(selectedStageVersionIndex + 1, 1)} / {stageDocs.length}
-                      </Text>
-                      <Text style={{ maxWidth: 620 }} ellipsis={{ tooltip: selectedReportDoc?.name }}>
-                        {selectedReportDoc?.name || '请选择版本'}
-                      </Text>
-                    </Space>
-                    <Space size={10}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {selectedReportDoc ? dayjs(getDocCreatedAt(selectedReportDoc)).format('MM-DD HH:mm') : ''}
-                      </Text>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {versionsExpanded ? '收起版本' : '展开全部版本'}
-                      </Text>
-                    </Space>
-                  </div>
-                  {selectedReportDoc && (
-                    <Progress percent={stageProgressPercent} size="small" showInfo={false} style={{ marginTop: 8, marginBottom: 0 }} />
-                  )}
-                </button>
-
-                {versionsExpanded && (
-                  <div style={{ padding: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10, borderTop: '1px solid #e5e7eb' }}>
-                    {stageDocs.map((doc, index) => {
-                      const selected = doc.id === selectedReportDoc?.id;
-                      return (
-                        <button
-                          key={doc.id}
-                          type="button"
-                          onClick={() => setSelectedReportDocId(doc.id)}
-                          style={{
-                            textAlign: 'left',
-                            border: selected ? '1px solid #1677ff' : '1px solid #e5e7eb',
-                            background: selected ? '#eef6ff' : '#fff',
-                            boxShadow: selected ? '0 8px 18px rgba(22, 119, 255, 0.12)' : 'none',
-                            borderRadius: 8,
-                            padding: '10px 12px',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <Space size={6}>
-                              <Text strong>V{index + 1}</Text>
-                              {selected && <Tag color="blue" style={{ margin: 0 }}>已选</Tag>}
-                              {index === stageDocs.length - 1 && <Tag color="green" style={{ margin: 0 }}>最新</Tag>}
-                            </Space>
-                            <Text type="secondary" style={{ fontSize: 12 }}>{dayjs(getDocCreatedAt(doc)).format('MM-DD HH:mm')}</Text>
-                          </div>
-                          <Text style={{ display: 'block' }} ellipsis={{ tooltip: doc.name }}>{doc.name}</Text>
-                          <Progress percent={doc.overallProgress} size="small" showInfo={false} style={{ marginTop: 8, marginBottom: 0 }} />
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <Empty description="该阶段暂无可出具报告的文档" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-            )}
 
             {selectedReportDoc && (
               <>
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-                    gap: 12,
-                  }}
-                >
-                  {[
-                    { label: '当前版本', value: versionSummary, note: '当前选中文档', color: '#1677ff', icon: <FileTextOutlined /> },
-                    { label: '文档完成度', value: `${stageProgressPercent}%`, note: `${completionScore}/${totalSections || 0} 章节分`, color: '#52c41a', icon: <CheckCircleOutlined /> },
-                    { label: '章节问题', value: missingSections.length + partialSections.length, note: `缺失 ${missingSections.length} · 部分 ${partialSections.length}`, color: '#fa8c16', icon: <SyncOutlined /> },
-                    { label: '关联待办', value: openSelectedDocTasks.length, note: '未完成任务', color: '#722ed1', icon: <RobotOutlined /> },
-                  ].map((item) => (
-                    <div
-                      key={item.label}
-                      style={{
-                        position: 'relative',
-                        minWidth: 0,
-                        minHeight: 96,
-                        border: '1px solid #e8edf5',
-                        borderRadius: 10,
-                        padding: '14px 16px',
-                        background: 'linear-gradient(180deg, #ffffff 0%, #fbfdff 100%)',
-                        boxShadow: '0 6px 18px rgba(15, 23, 42, 0.04)',
-                        overflow: 'hidden',
-                      }}
-                    >
-                      <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: item.color }} />
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
-                        <div style={{ minWidth: 0 }}>
-                          <Text type="secondary" style={{ fontSize: 12 }}>{item.label}</Text>
-                          <Title level={5} ellipsis={{ tooltip: String(item.value) }} style={{ margin: '7px 0 2px', fontSize: 17, lineHeight: 1.35 }}>
-                            {item.value}
-                          </Title>
-                          <Text type="secondary" style={{ fontSize: 12 }}>{item.note}</Text>
-                        </div>
-                        <div
-                          style={{
-                            width: 32,
-                            height: 32,
-                            borderRadius: 8,
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            color: item.color,
-                            background: `${item.color}14`,
-                            flexShrink: 0,
-                          }}
-                        >
-                          {item.icon}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <Row gutter={16}>
-                  <Col span={10}>
-                    <div style={{ border: '1px solid #edf0f5', borderRadius: 8, padding: 14, height: '100%' }}>
-                      <Title level={5} style={{ marginTop: 0 }}>报告摘要</Title>
-                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                        <Text>阶段：{selectedStage || '未识别阶段'}</Text>
-                        <Text>文档：{selectedReportDoc.name}</Text>
-                        <Text>模板：{selectedDocTemplate?.name || '未关联模板'}</Text>
-                        <Text>创建时间：{dayjs(getDocCreatedAt(selectedReportDoc)).format('YYYY-MM-DD HH:mm')}</Text>
-                        <Text>最近审查：{latestDocReview ? `${latestDocReview.score} 分，${latestReviewIssues.length} 个问题` : '暂无'}</Text>
-                      </Space>
-                    </div>
-                  </Col>
-                  <Col span={14}>
-                    <div style={{ border: '1px solid #edf0f5', borderRadius: 8, padding: 14, height: '100%' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                        <Title level={5} style={{ margin: 0 }}>阶段文档状态</Title>
-                        <Button size="small" loading={isRefreshingDocStatus} onClick={handleRefreshReportDocStatus}>
-                          获取文档状态
-                        </Button>
-                      </div>
-                      <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                        <div>
-                          <Text type="secondary">已完成章节</Text>
-                          <Progress percent={stageProgressPercent} size="small" />
-                        </div>
-                        <Space wrap>
-                          <Tag color="green">已完成 {completedSections.length}</Tag>
-                          <Tag color="orange">部分完成 {partialSections.length}</Tag>
-                          <Tag color="red">缺失 {missingSections.length}</Tag>
-                          <Tag color="blue">待办 {openSelectedDocTasks.length}</Tag>
-                        </Space>
-                        <Text type="secondary">{completionFormulaText}</Text>
-                        {selectedSections.length > 0 && (
-                          <div style={{ borderTop: '1px solid #edf0f5', paddingTop: 10 }}>
-                            <Text strong>章节列表</Text>
-                            <List
-                              size="small"
-                              dataSource={selectedSections}
-                              style={{ marginTop: 6 }}
-                              renderItem={(section) => {
-                                const statusColor = section.status === 'missing' ? 'red' : section.status === 'partial' ? 'orange' : 'green';
-                                const statusText = section.status === 'missing' ? '缺失' : section.status === 'partial' ? '部分完成' : '已完成';
-                                return (
-                                  <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
-                                    <List.Item.Meta
-                                      title={
-                                        <Space wrap>
-                                          <Tag color={statusColor}>{statusText}</Tag>
-                                          <Text>{cleanReportHeadingTitle(section.title)}</Text>
-                                          <Text type="secondary">{section.wordCount} 字</Text>
-                                        </Space>
-                                      }
-                                      description={
-                                        section.aiComment ||
-                                        (section.status === 'missing'
-                                          ? '当前文档中未稳定提取到该章节正文。'
-                                          : section.status === 'partial'
-                                            ? '已识别到该章节，但内容仍需补充完善。'
-                                            : '已识别到该章节，内容相对完整。')
-                                      }
-                                    />
-                                  </List.Item>
-                                );
-                              }}
-                            />
-                          </div>
-                        )}
-                      </Space>
-                    </div>
-                  </Col>
-                </Row>
-
-                <div style={{ border: '1px solid #edf0f5', borderRadius: 8, padding: 14 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 12 }}>
-                    <div>
-                      <Title level={5} style={{ marginTop: 0, marginBottom: 4 }}>下一步需要做什么</Title>
-                      <Text type="secondary">这里面向当前文章内容：AI负责框架/提纲/初稿/扩写，人工负责资料/口径/成稿确认</Text>
-                    </div>
-                    <Space wrap>
-                      <Button size="small" onClick={handleFillNextActionDraftItems}>填充建议草稿</Button>
-                      <Button size="small" icon={<UserOutlined />} onClick={() => handleAddNextActionDraftItem('manual')}>增加人工下一步</Button>
-                      <Button size="small" icon={<RobotOutlined />} onClick={() => handleAddNextActionDraftItem('ai')}>增加AI下一步</Button>
-                    </Space>
-                  </div>
-                  <List
-                    size="small"
-                    dataSource={nextActionDraftItems}
-                    locale={{ emptyText: '暂无下一步。点击“填充建议草稿”、手动增加，或先运行 AI 写作框架建议。' }}
-                    renderItem={(item, index) => (
-                      <List.Item style={{ alignItems: 'flex-start' }}>
-                        <div style={{ width: '100%' }}>
-                          <Row gutter={[8, 8]} align="middle">
-                            <Col flex="56px"><Tag color={item.type === 'ai' ? 'blue' : 'orange'}>{index + 1}</Tag></Col>
-                            <Col flex="112px">
-                              <Select
-                                size="small"
-                                value={item.type}
-                                style={{ width: '100%' }}
-                                options={[{ value: 'manual', label: '人工处理' }, { value: 'ai', label: 'AI处理' }]}
-                                onChange={(value) => handleUpdateNextActionDraftItem(item.id, { type: value })}
-                              />
-                            </Col>
-                            <Col flex="auto">
-                              <Input
-                                size="small"
-                                value={item.title}
-                                placeholder="输入下一步任务"
-                                onChange={(event) => handleUpdateNextActionDraftItem(item.id, { title: event.target.value })}
-                              />
-                            </Col>
-                            <Col flex="104px">
-                              <Select
-                                size="small"
-                                value={item.priority}
-                                style={{ width: '100%' }}
-                                options={[{ value: 'high', label: '高优先级' }, { value: 'medium', label: '中优先级' }, { value: 'low', label: '低优先级' }]}
-                                onChange={(value) => handleUpdateNextActionDraftItem(item.id, { priority: value })}
-                              />
-                            </Col>
-                            <Col flex="64px">
-                              <Button size="small" danger onClick={() => handleDeleteNextActionDraftItem(item.id)}>删除</Button>
-                            </Col>
-                            <Col span={24}>
-                              <Input.TextArea
-                                autoSize={{ minRows: 1, maxRows: 3 }}
-                                value={item.description}
-                                placeholder={item.type === 'ai' ? '说明 AI 应该如何搭框架、列提纲、补写、扩写或润色' : '说明人工需要补充、确认或协调的内容'}
-                                onChange={(event) => handleUpdateNextActionDraftItem(item.id, { description: event.target.value })}
-                              />
-                            </Col>
-                          </Row>
-                        </div>
-                      </List.Item>
-                    )}
-                  />
-                  <Space style={{ marginTop: 12 }} wrap>
-                    <Button type="primary" icon={<UserOutlined />} onClick={() => handleCreateNextActionTasks('manual')}>
-                      生成人工下一步任务
-                    </Button>
-                    <Button icon={<RobotOutlined />} onClick={() => handleCreateNextActionTasks('ai')}>
-                      生成AI下一步任务
-                    </Button>
-                    <Button icon={<FileTextOutlined />} onClick={handleCreateReportTask}>
-                      保存为报告任务
-                    </Button>
-                    <Button icon={<RobotOutlined />} loading={isGeneratingAiReport} onClick={handleGenerateAiStageReport}>
-                      AI写作框架与任务建议
-                    </Button>
-                  </Space>
-                </div>
+                <StageDocumentOverview
+                  document={selectedReportDoc}
+                  selectedStage={selectedStage}
+                  versionSummary={versionSummary}
+                  templateName={selectedDocTemplate?.name}
+                  reviewSummary={latestDocReview ? `${latestDocReview.score} 分，${latestReviewIssues.length} 个问题` : '暂无'}
+                  stageProgress={stageProgressPercent}
+                  completionScore={completionScore}
+                  sections={selectedSections}
+                  completedCount={completedSections.length}
+                  partialCount={partialSections.length}
+                  missingCount={missingSections.length}
+                  openTaskCount={openSelectedDocTasks.length}
+                  completionFormulaText={completionFormulaText}
+                  isRefreshing={isRefreshingDocStatus}
+                  onRefresh={handleRefreshReportDocStatus}
+                  formatSectionTitle={cleanReportHeadingTitle}
+                />
 
                 {(aiStageReport || isGeneratingAiReport) && (
-                  <div style={{ border: '1px solid #dbeafe', background: '#f8fbff', borderRadius: 8, padding: 14 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 12 }}>
-                      <div>
-                        <Title level={5} style={{ margin: 0 }}>{aiStageReport?.reportTitle || 'AI写作框架'}</Title>
-                        <Text type="secondary">基于模板要求、范文结构、参考内容和当前正文规划</Text>
-                      </div>
-                      <Space wrap>
-                        {aiStageReport?.parallelVersions?.length ? (
-                          <Select
-                            size="small"
-                            value={selectedAiReportVersionId}
-                            style={{ minWidth: 220 }}
-                            onChange={setSelectedAiReportVersionId}
-                            options={[
-                              { value: 'synthesis', label: `综合版本${aiStageReport.synthesisModelName ? `（${aiStageReport.synthesisModelName}）` : ''}` },
-                              ...aiStageReport.parallelVersions.map(item => ({ value: item.id, label: `${item.modelName}${item.ok ? '' : '（失败）'}` })),
-                            ]}
-                          />
-                        ) : null}
-                        <Button icon={<RobotOutlined />} loading={isGeneratingAiReport} onClick={handleGenerateAiStageReport}>
-                          重新生成
-                        </Button>
-                      </Space>
-                    </div>
-
-                    {aiStageReport && (
-                      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                        {/* 报告摘要 */}
-                        <div style={{ padding: '12px 14px', background: '#fff', borderRadius: 8, border: '1px solid #e5e7eb' }}>
-                          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>报告摘要</Text>
-                          <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
-                            {aiStageReport.reportSummary || '暂无摘要'}
-                          </Paragraph>
-                        </div>
-
-                        {/* 质量评估 */}
-                        {displayAiStageReport?.qualityAssessment && displayAiStageReport.qualityAssessment.length > 0 && (
-                          <div style={{ padding: '12px 14px', background: '#fff', borderRadius: 8, border: '1px solid #e5e7eb' }}>
-                            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>质量评估</Text>
-                            <List
-                              size="small"
-                              dataSource={displayAiStageReport.qualityAssessment}
-                              renderItem={(item) => <List.Item style={{ paddingLeft: 0 }}><Text>{item}</Text></List.Item>}
-                            />
-                          </div>
-                        )}
-
-                        <div style={{ border: '1px solid #dbeafe', background: '#fff', borderRadius: 10, padding: 14 }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-                            <Title level={5} style={{ margin: 0 }}>按章节的问题与建议</Title>
-                            <Text type="secondary" style={{ fontSize: 12 }}>按当前文档一级标题组织；无问题章节不显示</Text>
-                          </div>
-                          {sectionAdviceItems.length > 0 ? (
-                            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                              {sectionAdviceItems.map((section, sectionIndex) => (
-                                <div key={`${section.title}-${sectionIndex}`} style={{ border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
-                                  <div style={{ padding: '10px 12px', background: '#f8fafc', borderBottom: '1px solid #e5e7eb', display: 'flex', justifyContent: 'space-between', gap: 10 }}>
-                                    <Text strong>{cleanReportHeadingTitle(section.title)}</Text>
-                                    <Tag color="blue" style={{ margin: 0 }}>一级标题</Tag>
-                                  </div>
-                                  <Row gutter={0}>
-                                    <Col span={12}>
-                                      <div style={{ padding: 12, borderRight: '1px solid #eef2f7', minHeight: 120 }}>
-                                        <Text strong style={{ color: '#cf1322', display: 'block', marginBottom: 8 }}>问题</Text>
-                                        <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                                          {(section.problems?.length ? section.problems : ['暂无明确问题']).map((item, index) => (
-                                            <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', lineHeight: 1.7 }}>
-                                              <Tag color={section.problems?.length ? 'red' : 'default'} style={{ margin: 0, flexShrink: 0 }}>{index + 1}</Tag>
-                                              <Text type={section.problems?.length ? undefined : 'secondary'}>{item}</Text>
-                                            </div>
-                                          ))}
-                                        </Space>
-                                      </div>
-                                    </Col>
-                                    <Col span={12}>
-                                      <div style={{ padding: 12, minHeight: 120 }}>
-                                        <Text strong style={{ color: '#1677ff', display: 'block', marginBottom: 8 }}>建议</Text>
-                                        <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                                          {(section.suggestions?.length ? section.suggestions : ['暂无具体建议']).map((item, index) => (
-                                            <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', lineHeight: 1.7 }}>
-                                              <Tag color={section.suggestions?.length ? 'blue' : 'default'} style={{ margin: 0, flexShrink: 0 }}>{index + 1}</Tag>
-                                              <Text type={section.suggestions?.length ? undefined : 'secondary'}>{item}</Text>
-                                            </div>
-                                          ))}
-                                        </Space>
-                                      </div>
-                                    </Col>
-                                  </Row>
-                                </div>
-                              ))}
-                            </Space>
-                          ) : (
-                            <Empty description="暂无需要展示的问题与建议，请重新生成 AI 写作建议" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                          )}
-                        </div>
-
-                        <Row gutter={12}>
-                          <Col span={12}>
-                            <div style={{ border: '1px solid #e5e7eb', background: '#fff', borderRadius: 8, padding: 12, height: '100%' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-                                <Title level={5} style={{ margin: 0 }}>人工改稿/确认</Title>
-                                <Text type="secondary">分类建议，不会自动生成任务</Text>
-                              </div>
-                              <List
-                                size="small"
-                                dataSource={displayAiStageReport?.humanTasks || []}
-                                locale={{ emptyText: '暂无人工任务建议' }}
-                                renderItem={(item, index) => <List.Item><Space align="start"><Tag color="orange">{index + 1}</Tag><Text>{item}</Text></Space></List.Item>}
-                              />
-                            </div>
-                          </Col>
-                          <Col span={12}>
-                            <div style={{ border: '1px solid #e5e7eb', background: '#fff', borderRadius: 8, padding: 12, height: '100%' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-                                <Title level={5} style={{ margin: 0 }}>AI框架/写作</Title>
-                                <Text type="secondary">分类建议，不会自动生成任务</Text>
-                              </div>
-                              <List
-                                size="small"
-                                dataSource={displayAiStageReport?.aiTasks || []}
-                                locale={{ emptyText: '暂无AI任务建议' }}
-                                renderItem={(item, index) => <List.Item><Space align="start"><Tag color="blue">{index + 1}</Tag><Text>{item}</Text></Space></List.Item>}
-                              />
-                            </div>
-                          </Col>
-                        </Row>
-
-                        {/* 内容缺口与优化重点 */}
-                        {(displayAiStageReport?.contentGaps?.length || displayAiStageReport?.optimizationFocus?.length) ? (
-                          <Row gutter={12}>
-                            {displayAiStageReport?.contentGaps && displayAiStageReport.contentGaps.length > 0 && (
-                              <Col span={12}>
-                                <div style={{ border: '1px solid #e5e7eb', background: '#fff', borderRadius: 8, padding: 12, height: '100%' }}>
-                                  <Title level={5} style={{ marginTop: 0 }}>内容缺口</Title>
-                                  <List
-                                    size="small"
-                                    dataSource={displayAiStageReport.contentGaps}
-                                    renderItem={(item) => <List.Item><Text>{item}</Text></List.Item>}
-                                  />
-                                </div>
-                              </Col>
-                            )}
-                            {displayAiStageReport?.optimizationFocus && displayAiStageReport.optimizationFocus.length > 0 && (
-                              <Col span={displayAiStageReport?.contentGaps?.length ? 12 : 24}>
-                                <div style={{ border: '1px solid #e5e7eb', background: '#fff', borderRadius: 8, padding: 12, height: '100%' }}>
-                                  <Title level={5} style={{ marginTop: 0 }}>优化重点</Title>
-                                  <List
-                                    size="small"
-                                    dataSource={displayAiStageReport.optimizationFocus}
-                                    renderItem={(item) => <List.Item><Text>{item}</Text></List.Item>}
-                                  />
-                                </div>
-                              </Col>
-                            )}
-                          </Row>
-                        ) : null}
-
-                        <div style={{ border: '1px solid #e5e7eb', background: '#fff', borderRadius: 8, padding: 12 }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 12 }}>
-                            <div>
-                              <Title level={5} style={{ margin: 0 }}>工作流草稿</Title>
-                              <Text type="secondary">按 AI框架/初稿、人工补资料、AI扩写/润色、人工成稿确认的流转排序，确认前可调整</Text>
-                            </div>
-                            <Space wrap>
-                              <Button size="small" onClick={() => handleAddWorkflowDraftItem('ai')}>增加AI步骤</Button>
-                              <Button size="small" onClick={() => handleAddWorkflowDraftItem('manual')}>增加人工步骤</Button>
-                              <Button type="primary" size="small" disabled={workflowDraftItems.length === 0} onClick={handleConfirmWorkflowDraft}>确认并生成工作流</Button>
-                            </Space>
-                          </div>
-                          <List
-                            size="small"
-                            dataSource={[...workflowDraftItems].sort((a, b) => a.order - b.order)}
-                            locale={{ emptyText: '暂无工作流草稿，请先生成 AI 报告或手动增加步骤' }}
-                            renderItem={(item, index) => (
-                              <List.Item style={{ alignItems: 'flex-start' }}>
-                                <div style={{ width: '100%' }}>
-                                  <Row gutter={[8, 8]} align="middle">
-                                    <Col flex="64px"><Tag color={item.type === 'ai' ? 'blue' : 'orange'}>第{index + 1}步</Tag></Col>
-                                    <Col flex="112px">
-                                      <Select
-                                        size="small"
-                                        value={item.type}
-                                        style={{ width: '100%' }}
-                                        options={[{ value: 'ai', label: 'AI执行' }, { value: 'manual', label: '人工处理' }]}
-                                        onChange={(value) => handleUpdateWorkflowDraftItem(item.id, { type: value })}
-                                      />
-                                    </Col>
-                                    <Col flex="auto">
-                                      <Input
-                                        size="small"
-                                        value={item.title}
-                                        placeholder="输入任务标题"
-                                        onChange={(event) => handleUpdateWorkflowDraftItem(item.id, { title: event.target.value })}
-                                      />
-                                    </Col>
-                                    <Col flex="104px">
-                                      <Select
-                                        size="small"
-                                        value={item.priority}
-                                        style={{ width: '100%' }}
-                                        options={[{ value: 'high', label: '高优先级' }, { value: 'medium', label: '中优先级' }, { value: 'low', label: '低优先级' }]}
-                                        onChange={(value) => handleUpdateWorkflowDraftItem(item.id, { priority: value })}
-                                      />
-                                    </Col>
-                                    <Col flex="184px">
-                                      <Space size={4}>
-                                        <Button size="small" disabled={index === 0} onClick={() => handleMoveWorkflowDraftItem(item.id, 'up')}>上移</Button>
-                                        <Button size="small" disabled={index === workflowDraftItems.length - 1} onClick={() => handleMoveWorkflowDraftItem(item.id, 'down')}>下移</Button>
-                                        <Button size="small" danger onClick={() => handleDeleteWorkflowDraftItem(item.id)}>删除</Button>
-                                      </Space>
-                                    </Col>
-                                    <Col span={24}>
-                                      <Input.TextArea
-                                        autoSize={{ minRows: 1, maxRows: 3 }}
-                                        value={item.description}
-                                        placeholder="补充执行说明，可留空"
-                                        onChange={(event) => handleUpdateWorkflowDraftItem(item.id, { description: event.target.value })}
-                                      />
-                                    </Col>
-                                    {item.reason && (
-                                      <Col span={24}>
-                                        <Text type="secondary">排序理由：{item.reason}</Text>
-                                      </Col>
-                                    )}
-                                  </Row>
-                                </div>
-                              </List.Item>
-                            )}
-                          />
-                        </div>
-
-                        {/* 原始响应（可折叠，用于调试） */}
-                        {displayAiStageReport?.rawText && (
-                          <details style={{ marginTop: 8 }}>
-                            <summary style={{ cursor: 'pointer', color: '#94a3b8', fontSize: 12 }}>
-                              查看 AI 原始响应
-                            </summary>
-                            <pre style={{
-                              marginTop: 8,
-                              padding: 12,
-                              background: '#f8f9fa',
-                              borderRadius: 6,
-                              fontSize: 11,
-                              lineHeight: 1.6,
-                              overflow: 'auto',
-                              maxHeight: 300,
-                              whiteSpace: 'pre-wrap',
-                              wordBreak: 'break-all',
-                              color: '#475569',
-                            }}>
-                              {displayAiStageReport.rawText}
-                            </pre>
-                          </details>
-                        )}
-                      </Space>
-                    )}
-                  </div>
+                  <AiStageReportPanel
+                    report={aiStageReport}
+                    displayReport={displayAiStageReport}
+                    adviceItems={sectionAdviceDraftItems}
+                    onUpdateAdviceItem={handleUpdateSectionAdviceDraftItem}
+                    onToggleAllAdvice={handleToggleAllSectionAdvice}
+                    isGenerating={isGeneratingAiReport}
+                    selectedVersionId={selectedAiReportVersionId}
+                    onVersionChange={setSelectedAiReportVersionId}
+                    onRegenerate={() => void handleGenerateAiStageReport()}
+                    workflowItems={workflowDraftItems}
+                    onAddWorkflowItem={handleAddWorkflowDraftItem}
+                    onUpdateWorkflowItem={handleUpdateWorkflowDraftItem}
+                    onDeleteWorkflowItem={handleDeleteWorkflowDraftItem}
+                    onMoveWorkflowItem={handleMoveWorkflowDraftItem}
+                    onConfirmWorkflow={() => void handleConfirmWorkflowDraft()}
+                    formatSectionTitle={cleanReportHeadingTitle}
+                  />
                 )}
               </>
             )}
-          </Space>
-        </Card>
+        </StageDocumentPanel>
 
-        <Card
-          title={`任务工作台${selectedStage ? ` · ${selectedStage}` : ''}`}
-          extra={
-            <Space>
-              {hideHeader && <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>新建任务</Button>}
-              <Select
-                size="small"
-                value={statusFilter}
-                onChange={setStatusFilter}
-                style={{ width: 112 }}
-                options={[
-                  { value: 'all', label: '全部状态' },
-                  { value: 'pending', label: '待处理' },
-                  { value: 'in_progress', label: '进行中' },
-                  { value: 'completed', label: '已完成' },
-                ]}
-              />
-              <Select
-                size="small"
-                value={sourceFilter}
-                onChange={setSourceFilter}
-                style={{ width: 112 }}
-                options={[
-                  { value: 'all', label: '全部来源' },
-                  { value: 'manual', label: '手动' },
-                  { value: 'review', label: '审查' },
-                  { value: 'stage', label: '阶段' },
-                  { value: 'report', label: '报告' },
-                ]}
-              />
-            </Space>
-          }
-        >
-          {hasWorkflowDraft ? (
-            <Empty
-              description="当前仅生成了可编辑的工作流草稿；点击“确认并生成工作流”后，才会在这里生成正式任务"
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-            />
-          ) : (hasStandaloneTasks || showWorkflowTasks) ? (
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: showWorkflowTasks && hasStandaloneTasks
-                  ? 'minmax(240px, 0.8fr) minmax(240px, 0.8fr) minmax(520px, 1.4fr)'
-                  : showWorkflowTasks
-                    ? 'minmax(0, 1fr)'
-                    : 'repeat(2, minmax(260px, 1fr))',
-                gap: 12,
-                alignItems: 'start',
-              }}
-            >
-              {hasStandaloneTasks && renderTaskGroup('人工任务', '资料、口径、改稿、成稿确认', manualTasks, '#52c41a')}
-              {hasStandaloneTasks && renderTaskGroup('AI任务', '框架、提纲、初稿、扩写、润色', aiTasks, '#1677ff')}
-              {showWorkflowTasks && renderTaskGroup('工作流任务', '报告页确认后的顺序执行计划', workflowTasks, '#722ed1')}
-            </div>
-          ) : (
-            <Empty
-              description="暂无任务"
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-            />
-          )}
-        </Card>
       </Space>
 
-      <Modal
-        title="新建任务"
-        open={isModalOpen}
-        onOk={handleCreate}
-        onCancel={() => setIsModalOpen(false)}
-        okText="创建"
-        cancelText="取消"
-      >
-        <Form form={form} layout="vertical" initialValues={{ type: 'manual', priority: 'medium', source: 'manual' }}>
-          <Form.Item name="title" label="任务标题" rules={[{ required: true, message: '请输入任务标题' }]}>
-            <Input placeholder="例如：补充可研报告风险章节" />
-          </Form.Item>
-          <Form.Item name="description" label="任务说明">
-            <Input.TextArea rows={3} placeholder="说明任务背景、验收标准或 AI 执行要求" />
-          </Form.Item>
-          <Row gutter={12}>
-            <Col span={12}>
-              <Form.Item name="type" label="处理方式" rules={[{ required: true, message: '请选择处理方式' }]}>
-                <Select options={[{ value: 'manual', label: '人工处理' }, { value: 'ai', label: 'AI 处理' }]} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="priority" label="优先级">
-                <Select options={[{ value: 'high', label: '高' }, { value: 'medium', label: '中' }, { value: 'low', label: '低' }]} />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Row gutter={12}>
-            <Col span={12}>
-              <Form.Item name="source" label="任务来源">
-                <Select options={[{ value: 'manual', label: '手动' }, { value: 'stage', label: '阶段' }, { value: 'review', label: '审查' }, { value: 'report', label: '报告' }]} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="assigneeName" label="负责人">
-                <Input placeholder="未分配" />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Row gutter={12}>
-            <Col span={12}>
-              <Form.Item name="stageName" label="关联阶段">
-                <Select
-                  allowClear
-                  options={allStages.map((stage) => ({ value: stage.name, label: stage.name }))}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="dueAt" label="截止时间">
-                <DatePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item name="relatedDocId" label="关联文档">
-            <Select
-              allowClear
-              showSearch
-              optionFilterProp="label"
-              options={projectDocsList.map((doc) => ({ value: doc.id, label: doc.name }))}
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
     </div>
   );
 };

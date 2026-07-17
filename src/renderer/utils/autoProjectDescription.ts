@@ -178,7 +178,7 @@ export const maybeGenerateAutoProjectDescription = async (
       },
       async ({ jobId, setProgress, throwIfCancelled }) => {
         setProgress(45);
-        const value = await window.electronAPI.callAI({ prompt, mode: 'single', usageRequestId: jobId });
+        const value = await window.electronAPI.callAI({ prompt, mode: 'single', usageRequestId: jobId, usageTitle: `AI 项目概述：${project.name}`, usageScene: 'description' });
         throwIfCancelled();
         setProgress(85);
         if (!normalizeAiSummary(String(value || ''))) {

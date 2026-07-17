@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { isAIJobCancelledError, useAIJobStore } from './aiJobStore';
 import { WritingTemplate, ReviewResult, ReviewConfig } from '../../shared/types';
+import { assertIpcMutationSucceeded, requireIpcArray } from '../utils/ipcResult';
 
 interface TemplateState {
   templates: WritingTemplate[];
@@ -27,7 +28,7 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
   loadTemplates: async () => {
     set({ isLoading: true });
     try {
-      const templates = await window.electronAPI.loadTemplates();
+      const templates = requireIpcArray<WritingTemplate>(await window.electronAPI.loadTemplates(), '加载模板失败');
       set({ templates, isLoading: false });
     } catch (error) {
       console.error('Failed to load templates:', error);
@@ -36,43 +37,52 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
   },
 
   addTemplate: async (template) => {
-    const newTemplates = [...get().templates, template];
+    const previous = get().templates;
+    const newTemplates = [...previous, template];
     set({ templates: newTemplates });
     try {
-      await window.electronAPI.saveTemplate(template);
+      const result = await window.electronAPI.saveTemplate(template);
+      assertIpcMutationSucceeded(result, '保存模板失败');
     } catch (error) {
       console.error('Failed to save template:', error);
+      set({ templates: previous });
     }
   },
 
   updateTemplate: async (id, updates) => {
-    const templates = get().templates.map((t) =>
+    const previous = get().templates;
+    const templates = previous.map((t) =>
       t.id === id ? { ...t, ...updates, updatedAt: new Date().toISOString() } : t
     );
     set({ templates });
     const updatedTemplate = templates.find(t => t.id === id);
     if (updatedTemplate) {
       try {
-        await window.electronAPI.saveTemplate(updatedTemplate);
+        const result = await window.electronAPI.saveTemplate(updatedTemplate);
+        assertIpcMutationSucceeded(result, '更新模板失败');
       } catch (error) {
         console.error('Failed to update template:', error);
+        set({ templates: previous });
       }
     }
   },
 
   deleteTemplate: async (id) => {
-    const newTemplates = get().templates.filter((t) => t.id !== id);
+    const previous = get().templates;
+    const newTemplates = previous.filter((t) => t.id !== id);
     set({ templates: newTemplates });
     try {
-      await window.electronAPI.deleteTemplate(id);
+      const result = await window.electronAPI.deleteTemplate(id);
+      assertIpcMutationSucceeded(result, '删除模板失败');
     } catch (error) {
       console.error('Failed to delete template:', error);
+      set({ templates: previous });
     }
   },
 
   loadReviews: async () => {
     try {
-      const reviews = await window.electronAPI.loadReviews();
+      const reviews = requireIpcArray<ReviewResult>(await window.electronAPI.loadReviews(), '加载审查结果失败');
       set({ reviews });
     } catch (error) {
       console.error('Failed to load reviews:', error);
@@ -116,12 +126,15 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
   },
 
   deleteReview: async (id) => {
-    const newReviews = get().reviews.filter((r) => r.id !== id);
+    const previous = get().reviews;
+    const newReviews = previous.filter((r) => r.id !== id);
     set({ reviews: newReviews });
     try {
-      await window.electronAPI.deleteReview(id);
+      const result = await window.electronAPI.deleteReview(id);
+      assertIpcMutationSucceeded(result, '删除审查结果失败');
     } catch (error) {
       console.error('Failed to delete review:', error);
+      set({ reviews: previous });
     }
   },
 }));

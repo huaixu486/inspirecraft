@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { AppSettings } from '../types';
 import { settingsFile, dataDir, projectsFile } from './paths';
+import { extractRegisteredProjectPaths } from './registeredProjectPaths';
 
 // ─── 内部工具 ────────────────────────────────────────────
 
@@ -40,12 +41,7 @@ function isPathWithin(targetPath: string, root: string): boolean {
 function getProjectRoots(): string[] {
   try {
     if (!fs.existsSync(projectsFile)) return [];
-    const rows = JSON.parse(fs.readFileSync(projectsFile, 'utf-8'));
-    if (!Array.isArray(rows)) return [];
-    return rows
-      .map(project => String(project?.folderPath || '').trim())
-      .filter(Boolean)
-      .map(folderPath => path.resolve(folderPath));
+    return extractRegisteredProjectPaths(JSON.parse(fs.readFileSync(projectsFile, 'utf-8')));
   } catch {
     return [];
   }
@@ -168,5 +164,29 @@ export function checkPathInside(fullPath: string, targetRoot: string): { ok: tru
     return { ok: true };
   } catch (error: any) {
     return { ok: false, error: error.message };
+  }
+}
+
+export type ExistingPathKind = 'file' | 'directory' | 'any';
+
+/**
+ * Validate a user-selected external path without forcing it into the workspace.
+ * This is intentionally separate from checkWithinWorkspace: import/open inputs
+ * may live anywhere, while every write target still needs a workspace guard.
+ */
+export function checkExistingPath(
+  targetPath: string,
+  kind: ExistingPathKind = 'any',
+): { ok: true; path: string } | { ok: false; error: string } {
+  const value = String(targetPath || '').trim();
+  if (!value || /\x00/.test(value)) return { ok: false, error: '路径无效' };
+  const resolvedPath = path.resolve(value);
+  try {
+    const stat = fs.statSync(resolvedPath);
+    if (kind === 'file' && !stat.isFile()) return { ok: false, error: '路径不是文件' };
+    if (kind === 'directory' && !stat.isDirectory()) return { ok: false, error: '路径不是文件夹' };
+    return { ok: true, path: resolvedPath };
+  } catch {
+    return { ok: false, error: '路径不存在或无法访问' };
   }
 }

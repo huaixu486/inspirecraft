@@ -15,6 +15,8 @@ export interface Project {
   autoDescriptionRetryAt?: string;
   autoDescriptionLastErrorAt?: string;
   autoDescriptionGenerationToken?: string;
+  stageSummarySourceDocIds?: Record<string, string>;
+  stageCompletionEvents?: StageCompletionEvent[];
   folderPath: string;
   folderModifiedAt?: string; // 项目文件夹内最近文件/目录修改时间
   status: 'active' | 'completed' | 'paused';
@@ -55,6 +57,17 @@ export interface TaskItem {
   title: string;
   description: string; // 任务描述
   type: 'ai' | 'manual'; // AI处理或人工处理
+  executor?: 'human' | 'ai' | 'friend';
+  workStatus?: 'draft' | 'pending' | 'in_progress' | 'blocked' | 'completed' | 'cancelled';
+  action?: 'write' | 'revise' | 'review' | 'format' | 'open_file' | 'dispatch';
+  documentContext?: {
+    projectDocumentId?: string;
+    versionId?: string;
+    filePath?: string;
+    sectionTitle?: string;
+    lineNumber?: number;
+    selectedText?: string;
+  };
   status: 'pending' | 'in_progress' | 'completed';
   priority: 'high' | 'medium' | 'low';
   source?: 'manual' | 'review' | 'stage' | 'report';
@@ -62,16 +75,36 @@ export interface TaskItem {
   relatedReviewId?: string;
   relatedIssueId?: string;
   sectionTitle?: string;
+  /** 审查结果给出的原始行号，用于任务执行时定位文档内容 */
+  sourceLineNumber?: number;
   stageName?: string;
   workflowId?: string;
   workflowName?: string;
   workflowOrder?: number;
   dependsOnTaskId?: string;
+  dependsOn?: string[];
   assigneeName?: string;
   dueAt?: string;
   completedAt?: string;
   result?: string; // AI执行结果
+  sourceMessageId?: string;
   createdAt: string;
+  updatedAt?: string;
+}
+
+export interface StageCompletionEvent {
+  id: string;
+  projectId: string;
+  stageName: string;
+  sourceDocIds: string[];
+  extractionDocId?: string;
+  extractionVersionId?: string;
+  completedAt: string;
+  status: 'completed' | 'learning' | 'learned' | 'learning_failed' | 'reopened';
+  memoryId?: string;
+  learnedAt?: string;
+  learningError?: string;
+  reopenedAt?: string;
 }
 
 // AI配置
@@ -257,6 +290,17 @@ export interface SectionAnalysis {
 }
 
 // 项目文档（关联模板+文件）
+export type ProjectDocumentLifecycleStatus =
+  | 'imported'
+  | 'identified'
+  | 'writing'
+  | 'analyzed'
+  | 'reviewed'
+  | 'needs_revision'
+  | 'completed'
+  | 'learned'
+  | 'archived';
+
 export interface ProjectDocument {
   id: string;
   projectId: string;
@@ -265,8 +309,15 @@ export interface ProjectDocument {
   name: string;             // 显示名称，如 "XX项目-提案表"
   sections: SectionAnalysis[];  // 各章节分析结果
   overallProgress: number;  // 0-100 整体完成度
+  lifecycleStatus?: ProjectDocumentLifecycleStatus;
+  lifecycleStatusBeforeCompletion?: ProjectDocumentLifecycleStatus;
+  lifecycleUpdatedAt?: string;
+  reviewedAt?: string;
+  learnedAt?: string;
+  reopenedAt?: string;
   deadline?: string;        // 截止日期 ISO string
   completedAt?: string;     // 完成日期 ISO string
+  completionEventId?: string;
   analyzedAt?: string;      // 最近分析时间
   aiReport?: string;        // AI writing framework report JSON
   sourceFilePath?: string;  // 自动阶段识别关联的真实文件路径
@@ -285,6 +336,10 @@ export interface StageMemoryEntry {
   docId?: string;
   docName: string;
   sourceFilePath?: string;
+  sourceVersionId?: string;
+  sourceModifiedAt?: string;
+  sourceKind?: 'stage-completion' | 'manual';
+  completionEventId?: string;
   summary: string;
   model?: string;
   createdAt: string;
@@ -306,7 +361,7 @@ export interface ReferenceMaterial {
 export interface UserProfile {
   nickname: string;
   email: string;
-  avatar?: string; // base64 或文件路径
+  avatar?: string; // 压缩后的 data URL，用于本机显示和局域网好友同步
 }
 
 // 自定义阶段配置
@@ -349,6 +404,7 @@ export interface AppSettings {
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
   enableSystemNotifications?: boolean; // Enable Windows system notifications
   autoProjectDescriptionEnabled?: boolean; // Automatically generate an empty project overview after file activity settles
+  autoStageMemoryEnabled?: boolean; // Learn reusable stage-writing memory after completion
   holidayDataSource?: HolidayDataSource; // Calendar holiday source
   holidayApiUrl?: string; // Calendar holiday API URL, supports {year}
   calendarDayRecords?: CalendarDayRecord[];

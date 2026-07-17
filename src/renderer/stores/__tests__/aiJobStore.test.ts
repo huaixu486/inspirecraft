@@ -57,3 +57,24 @@ test('AI job without a registered whole-operation retry does not expose a fake r
   assert.equal(await useAIJobStore.getState().retryJob(failedJob.id), false);
   resetJobs();
 });
+
+test('AI jobs retain correlation and work item identifiers', async () => {
+  resetJobs();
+  await useAIJobStore.getState().runAIJob(
+    {
+      scene: 'taskExecute',
+      title: 'correlation test',
+      inputHash: 'correlation-test',
+      taskId: 'legacy-task-1',
+      workItemId: 'work-item-1',
+      correlationId: 'correlation-1',
+    },
+    async () => 'done',
+  );
+
+  const job = useAIJobStore.getState().jobs.find(item => item.title === 'correlation test');
+  assert.equal(job?.taskId, 'legacy-task-1');
+  assert.equal(job?.workItemId, 'work-item-1');
+  assert.equal(job?.correlationId, 'correlation-1');
+  resetJobs();
+});

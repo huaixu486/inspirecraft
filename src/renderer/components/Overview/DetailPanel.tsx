@@ -4,17 +4,16 @@ import { Typography, Tabs, Progress, List, Button, Space, Tag, Empty, Modal, Sel
 const { TextArea } = Input;
 import {
   CheckCircleOutlined, ClockCircleOutlined, CloseOutlined,
-  FolderOutlined, FileOutlined, ExclamationCircleOutlined,
+  FileOutlined, ExclamationCircleOutlined,
   PlusOutlined, DeleteOutlined, ReloadOutlined, ExperimentOutlined,
-  RightOutlined, DownOutlined, UserOutlined,
-  WarningOutlined, FileTextOutlined, CalendarOutlined,
-  BookOutlined, EditOutlined, DiffOutlined,
+  RightOutlined, DownOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useProjectStore, WorkflowWorkbenchTarget } from '../../stores/projectStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { useTemplateStore } from '../../stores/templateStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
 import { useKnowledgeStore } from '../../stores/knowledgeStore';
+import { useStageLifecycleStore } from '../../stores/stageLifecycleStore';
 import { Project, ProjectDocument, ReferenceMaterial, StageMemoryEntry, WritingTemplate, TaskItem } from '../../../shared/types';
 import {
   buildProjectStageSegments,
@@ -28,22 +27,19 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useTaskStore } from '../../stores/taskStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { getAutoProjectDescriptionStatus, isManualProjectDescription, maybeGenerateAutoProjectDescription, shouldGenerateAutoProjectDescription, convertToManualDescription, resetAutoDescriptionLock } from '../../utils/autoProjectDescription';
-import { composePrompt } from '../../utils/promptComposer';
+import { composePromptAsync } from '../../utils/promptComposer';
+import { mapDraftToTemplateSections } from '../../utils/draftSectionMapper';
 import { useAIJobStore } from '../../stores/aiJobStore';
 import { deriveProjectNextActions, ProjectNextAction } from '../../utils/projectNextActions';
-import { buildLifecyclePatch, getProjectDocumentLifecycleColor, getProjectDocumentLifecycleLabel, reopenLifecycleStatus } from '../../utils/documentLifecycle';
+import { getProjectDocumentLifecycleColor, getProjectDocumentLifecycleLabel } from '../../utils/documentLifecycle';
+import { getActiveStageCompletionEvent, selectStageExtractionDocument } from '../../utils/stageCompletion';
+import ProjectDescriptionSection from './ProjectDescriptionSection';
+import ProjectNextActions from './ProjectNextActions';
+import ProjectOverviewStats from './ProjectOverviewStats';
+import ProjectQuickPlanSection from './ProjectQuickPlanSection';
+import DetailPanelHeader from './DetailPanelHeader';
 
 const { Title, Text, Paragraph } = Typography;
-
-const ACTION_KIND_ICON: Record<string, React.ReactNode> = {
-  task: <CheckCircleOutlined style={{ color: '#1677ff' }} />,
-  review: <WarningOutlined style={{ color: '#ff4d4f' }} />,
-  document: <FileTextOutlined style={{ color: '#722ed1' }} />,
-  stage: <CalendarOutlined style={{ color: '#13c2c2' }} />,
-  diff: <DiffOutlined style={{ color: '#faad14' }} />,
-  memory: <BookOutlined style={{ color: '#52c41a' }} />,
-  description: <EditOutlined style={{ color: '#8c8c8c' }} />,
-};
 
 const ACTION_KIND_TARGET_PAGE: Record<string, string> = {
   task: 'plan',
@@ -383,29 +379,6 @@ const StageProgressPieRing = React.memo(({ percent }: StageProgressRingProps) =>
   );
 });
 
-const StageProgressLinearBar = React.memo(({ percent }: StageProgressRingProps) => {
-  const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
-  const color = safePercent >= 80 ? '#52c41a' : safePercent >= 40 ? '#1890ff' : '#faad14';
-
-  return (
-    <div className="stage-progress-linear">
-      <div className="stage-progress-linear-header">
-        <Text type="secondary" style={{ fontSize: 12 }}>完成进度</Text>
-        <Text style={{ fontSize: 18, fontWeight: 700, color }}>{safePercent}%</Text>
-      </div>
-      <div className="stage-progress-linear-track" aria-hidden="true">
-        <div
-          className="stage-progress-linear-fill"
-          style={{
-            backgroundColor: color,
-            transform: `scaleX(${safePercent / 100}) translateZ(0)`,
-          }}
-        />
-      </div>
-    </div>
-  );
-});
-
 const StageProgressCanvasRing = React.memo(({ percent }: StageProgressRingProps) => {
   const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
   const color = safePercent >= 80 ? '#52c41a' : safePercent >= 40 ? '#1890ff' : '#faad14';
@@ -522,7 +495,6 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   const setCurrentStageName = useProjectStore(s => s.setCurrentStageName);
   const setPendingReportDocId = useProjectStore(s => s.setPendingReportDocId);
   const setPendingReportDocOnly = useProjectStore(s => s.setPendingReportDocOnly);
-  const setPendingWorkflowFocus = useProjectStore(s => s.setPendingWorkflowFocus);
   const updateProject = useProjectStore(s => s.updateProject);
   const deleteProject = useProjectStore(s => s.deleteProject);
   const templates = useTemplateStore(s => s.templates);
@@ -534,8 +506,10 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   const stageMemories = useKnowledgeStore(s => s.stageMemories);
   const referenceMaterials = useKnowledgeStore(s => s.referenceMaterials);
   const loadKnowledge = useKnowledgeStore(s => s.loadKnowledge);
-  const learnStageFinal = useKnowledgeStore(s => s.learnStageFinal);
-  const deleteStageMemoriesForDoc = useKnowledgeStore(s => s.deleteStageMemoriesForDoc);
+  const completeStage = useStageLifecycleStore(s => s.completeStage);
+  const reopenStage = useStageLifecycleStore(s => s.reopenStage);
+  const retryStageLearning = useStageLifecycleStore(s => s.retryStageLearning);
+  const busyStageKeys = useStageLifecycleStore(s => s.busyStageKeys);
   const tasks = useTaskStore(s => s.tasks);
   const updateTask = useTaskStore(s => s.updateTask);
   const addTask = useTaskStore(s => s.addTask);
@@ -543,6 +517,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   const navigateWorkbench = useNavigationStore(state => state.navigate);
   const customStages = useSettingsStore(s => s.customStages);
   const autoProjectDescriptionEnabled = useSettingsStore(s => s.autoProjectDescriptionEnabled);
+  const autoStageMemoryEnabled = useSettingsStore(s => s.autoStageMemoryEnabled);
   const allStages = getAllStages(customStages);
   const stageMeta = getStageMeta(allStages);
 
@@ -716,6 +691,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   const autoDescriptionStatus = getAutoProjectDescriptionStatus(currentProject);
   const totalAnalyzed = projectDocsList.filter(doc => doc.analyzedAt).length;
   const totalUnread = totalAnalyzed - analyzedDocsByStage.reduce((sum, g) => sum + g.docs.filter(d => readReportIds.has(d.id)).length, 0);
+  const projectExtractionCount = stageMemories.filter(item => item.projectId === currentProject.id).length;
 
   const selectedDoc = projectDocsList.find(d => d.id === selectedDocId) || null;
 
@@ -768,7 +744,8 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
   };
 
   const resolveWorkflowWorkbench = (task: TaskItem): ProjectDetailPage => {
-    if (task.source === 'review' || task.relatedReviewId || task.relatedIssueId) return 'review';
+    // 审查已经完成，后续 AI 处理必须进入“AI 修订”而不是再次审查或重新起草。
+    if (task.source === 'review' || task.relatedReviewId || task.relatedIssueId) return task.type === 'ai' ? 'team' : 'files';
     if (isAiRevisionTask(task)) return 'team';
     if (task.source === 'report') return task.type === 'ai' ? 'team' : 'report';
     if (task.relatedDocId && task.type === 'ai') return 'team';
@@ -776,6 +753,15 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
     if (task.source === 'stage' || task.stageName) return 'plan';
     if (task.type === 'ai') return 'team';
     return 'team';
+  };
+
+  const getWorkflowDestinationLabel = (task: TaskItem) => {
+    const target = resolveWorkflowWorkbench(task);
+    if (target === 'report') return '报告工作台';
+    if (target === 'review') return '审查工作台';
+    if (target === 'plan') return '计划工作台';
+    if (target === 'writing') return 'AI协同';
+    return '团队-AI协同';
   };
 
   const buildWorkflowPrompt = (task: TaskItem) => {
@@ -793,16 +779,26 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
 
   const openWorkflowTask = (task: TaskItem) => {
     const target = resolveWorkflowWorkbench(task);
+    if (task.type === 'manual' && task.relatedDocId) {
+      const doc = projectDocsList.find(item => item.id === task.relatedDocId);
+      const version = doc?.versionId ? versions.find(item => item.id === doc.versionId) : undefined;
+      const sourcePath = doc?.sourceFilePath || version?.filePath;
+      if (sourcePath) {
+        void window.electronAPI.openFileWithApp(sourcePath);
+        return;
+      }
+    }
     if (task.stageName) setCurrentStageName(task.stageName);
-    setPendingWorkflowFocus({
+    navigateWorkbench({
       projectId: currentProject.id,
-      workflowId: task.workflowId,
       taskId: task.id,
-      relatedDocId: task.relatedDocId,
+      docId: task.relatedDocId,
       stageName: task.stageName,
-      source: task.source,
+      sectionTitle: task.sectionTitle,
+      sourceLineNumber: task.sourceLineNumber,
+      source: task.source === 'review' ? 'review' : 'task',
       prompt: buildWorkflowPrompt(task),
-      target: target as WorkflowWorkbenchTarget,
+      target,
     });
     if (target === 'report') {
       setPendingReportDocId(task.relatedDocId || null);
@@ -811,7 +807,6 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
       setPendingReportDocId(null);
       setPendingReportDocOnly(false);
     }
-    openDetail(target);
   };
 
   const syncReportWorkflowTasks = async (doc: ProjectDocument, aiReport: any, stage: string) => {
@@ -1107,7 +1102,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
       'reference',
     );
     const fallbackTitle = `${stage}阶段写作报告：${getDocDisplayName(doc)}`;
-    const prompt = composePrompt('report', {
+    const prompt = await composePromptAsync('report', {
       projectName: currentProject.name,
       stage,
       docName: doc.name,
@@ -1133,9 +1128,9 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
         docId: doc.id,
         resultPreview: (value) => value,
       },
-      async ({ setProgress, throwIfCancelled }) => {
+      async ({ jobId, setProgress, throwIfCancelled }) => {
         setProgress(35);
-        const value = await window.electronAPI.callAI({ prompt });
+        const value = await window.electronAPI.callAI({ prompt, usageRequestId: jobId, usageTitle: `AI 阶段报告：${getDocDisplayName(doc)}`, usageScene: 'report' });
         throwIfCancelled();
         setProgress(85);
         return String(value || '');
@@ -1281,7 +1276,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
     try {
       const result = await window.electronAPI.generateFromContent({
         template,
-        sectionContents: { 'main': writingContent },
+        sectionContents: mapDraftToTemplateSections(template, writingContent),
         folderPath: currentProject.folderPath,
         fileName: `${currentProject.name}-${template.name}`,
       });
@@ -1336,79 +1331,34 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
     await handleBatchImportDocs(allDocIds);
   };
 
-  const getProjectDocumentStage = (doc: ProjectDocument) =>
-    planSegments.find(segment => segment.sourceDocIds.includes(doc.id))?.stage
-    || detectTimelineStage(allStages, doc.name, doc.sourceFilePath);
-
-  const learnCompletedProjectDocument = async (doc: ProjectDocument, stageName = getProjectDocumentStage(doc), showToast = true) => {
-    const version = doc.versionId ? versions.find(item => item.id === doc.versionId) : undefined;
-    try {
-      const entry = await learnStageFinal({
-        projectId: currentProject.id,
-        projectName: currentProject.name,
-        stageName,
-        docId: doc.id,
-        docName: doc.name,
-        sourceFilePath: doc.sourceFilePath || version?.filePath,
-        content: version?.content,
-      });
-      if (entry) {
-        await updateProjectDoc(doc.id, { learnedAt: entry.updatedAt || new Date().toISOString(), ...buildLifecyclePatch('learned') });
-        if (showToast) message.success('\u6587\u6863\u5df2\u5b66\u4e60\u5230\u9636\u6bb5\u8bb0\u5fc6\u5e93');
-      }
-    } catch (error: any) {
-      if (showToast) message.warning('\u6587\u6863\u5df2\u6807\u8bb0\u5b8c\u6210\uff0c\u4f46\u9636\u6bb5\u8bb0\u5fc6\u5b66\u4e60\u5931\u8d25: ' + (error.message || error));
-    }
-  };
-
-  const rollbackProjectDocumentMemory = async (docId: string) => {
-    await deleteStageMemoriesForDoc(docId);
-  };
   const handleStageDeadline = async (segment: TimelineStageSegment, deadline?: string) => {
     await Promise.all(segment.sourceDocIds.map(id => updateProjectDoc(id, { deadline })));
     message.success(deadline ? '已更新计划截止时间' : '已清除计划截止时间');
   };
 
-  const handleDocComplete = async (doc: ProjectDocument) => {
-    const completedAt = new Date().toISOString();
-    await updateProjectDoc(doc.id, { completedAt, ...buildLifecyclePatch('completed', completedAt) });
-    await learnCompletedProjectDocument({ ...doc, completedAt });
-    message.success('\u5df2\u6807\u8bb0\u6587\u6863\u5b8c\u6210');
-  };
-
-  const handleDocReopen = async (doc: ProjectDocument) => {
-    await updateProjectDoc(doc.id, {
-      completedAt: undefined,
-      learnedAt: undefined,
-      reopenedAt: new Date().toISOString(),
-      ...buildLifecyclePatch(reopenLifecycleStatus({ ...doc, completedAt: undefined, learnedAt: undefined })),
-    });
-    await rollbackProjectDocumentMemory(doc.id);
-    message.success('\u5df2\u53d6\u6d88\u6587\u6863\u5b8c\u6210\uff0c\u5e76\u56de\u6863\u9636\u6bb5\u8bb0\u5fc6');
-  };
-
   const handleStageComplete = async (segment: TimelineStageSegment) => {
-    const completedAt = new Date().toISOString();
     const docs = segment.sourceDocIds
       .map(id => projectDocsList.find(doc => doc.id === id))
       .filter((doc): doc is ProjectDocument => Boolean(doc));
-    await Promise.all(docs.map(doc => updateProjectDoc(doc.id, { completedAt, ...buildLifecyclePatch('completed', completedAt) })));
-    await Promise.all(docs.map(doc => learnCompletedProjectDocument({ ...doc, completedAt }, segment.stage, false)));
-    message.success('\u5df2\u6807\u8bb0\u9636\u6bb5\u5b8c\u6210\uff0c\u5e76\u66f4\u65b0\u9636\u6bb5\u8bb0\u5fc6');
+    const scope = { projectId: currentProject.id, stageName: segment.stage, sourceDocIds: segment.sourceDocIds };
+    const defaultDoc = selectStageExtractionDocument(currentProject, scope, docs);
+    let selectedDocId = defaultDoc?.id;
+    Modal.confirm({
+      title: `确认完成“${segment.label}”`,
+      width: 520,
+      content: <Space direction="vertical" size={8} style={{ width: '100%' }}><Text type="secondary">请选择用于阶段记忆提炼的最终文档。</Text><Select defaultValue={selectedDocId} style={{ width: '100%' }} onChange={value => { selectedDocId = value; }} options={docs.map(doc => ({ value: doc.id, label: doc.name }))} /></Space>,
+      okText: '完成阶段',
+      onOk: async () => {
+        const result = await completeStage({ project: currentProject, scope, extractionDocId: selectedDocId, autoLearn: autoStageMemoryEnabled });
+        if (result.status === 'learning_failed') message.warning('阶段已完成，但记忆学习失败，可重试');
+        else message.success(result.status === 'learned' ? '阶段已完成并生成阶段记忆' : '阶段已完成');
+      },
+    });
   };
 
   const handleStageReopen = async (segment: TimelineStageSegment) => {
-    await Promise.all(segment.sourceDocIds.map(id => {
-      const doc = projectDocsList.find(item => item.id === id);
-      return updateProjectDoc(id, {
-        completedAt: undefined,
-        learnedAt: undefined,
-        reopenedAt: new Date().toISOString(),
-        ...buildLifecyclePatch(doc ? reopenLifecycleStatus({ ...doc, completedAt: undefined, learnedAt: undefined }) : 'identified'),
-      });
-    }));
-    await Promise.all(segment.sourceDocIds.map(id => rollbackProjectDocumentMemory(id)));
-    message.success('\u5df2\u53d6\u6d88\u5b8c\u6210\u72b6\u6001\uff0c\u5e76\u56de\u6863\u9636\u6bb5\u8bb0\u5fc6');
+    await reopenStage(currentProject, { projectId: currentProject.id, stageName: segment.stage, sourceDocIds: segment.sourceDocIds });
+    message.success('已取消阶段完成；手工记忆不受影响');
   };
 
 
@@ -1422,18 +1372,93 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
     onOpenDetail?.(page);
   };
 
-  const handleDeleteCurrentProject = async () => {
+  const handleRenameProject = async (name: string): Promise<boolean> => {
+    const nextName = name.trim();
+    if (!nextName) {
+      message.warning('项目名称不能为空');
+      return false;
+    }
+    if (nextName === currentProject.name) return true;
+
+    await updateProject(currentProject.id, { name: nextName });
+    const savedProject = useProjectStore.getState().projects.find(item => item.id === currentProject.id);
+    if (savedProject?.name !== nextName) {
+      message.error('项目名称保存失败，请重试');
+      return false;
+    }
+
+    message.success('项目名称已更新');
+    return true;
+  };
+
+  const handleDeleteCurrentProject = async (mode: 'unregister' | 'delete-folder') => {
     if (!currentProject || deletingProject) return;
     setDeletingProject(true);
     try {
-      await deleteProject(currentProject.id);
-      message.success('项目已移入回收站，可在回收站恢复');
+      const result = await deleteProject(currentProject.id, { mode });
+      message.success(mode === 'unregister'
+        ? '已移除项目注册关系，原文件夹未作改动'
+        : result.recycleEntry ? '项目文件夹已移入回收站，可在回收站恢复' : '已移除项目记录，原文件夹不存在');
       onClose();
     } catch (error: any) {
       message.error(error?.message || '删除项目失败');
     } finally {
       setDeletingProject(false);
     }
+  };
+
+  const openDeleteProjectConfirm = (mode: 'unregister' | 'delete-folder') => {
+    if (!currentProject) return;
+    const deletingFolder = mode === 'delete-folder';
+    Modal.confirm({
+      title: deletingFolder ? '删除项目文件夹？' : '移除项目注册关系？',
+      content: deletingFolder
+        ? `“${currentProject.name}”的文件夹和项目记录将移入回收站，可在回收站恢复。`
+        : `仅从项目列表移除“${currentProject.name}”及其软件记录，原文件夹不会被删除，也不会进入回收站。`,
+      okText: deletingFolder ? '移入回收站' : '移除注册关系',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => handleDeleteCurrentProject(mode),
+    });
+  };
+
+  const handleStartDescriptionEditing = () => {
+    setDescEditing(true);
+    setDescEditText(currentProject.description || '');
+    window.setTimeout(() => descEditRef.current?.focus(), 100);
+  };
+
+  const handleSaveDescription = async () => {
+    const text = descEditText.trim();
+    if (text) {
+      await convertToManualDescription(currentProject, updateProject, text);
+      message.success('已保存为手动描述');
+    } else {
+      setDescEditText('');
+      await resetAutoDescriptionLock(currentProject, updateProject);
+      message.success('已清空，AI 将在满足条件后重新编写');
+    }
+    setDescEditing(false);
+  };
+
+  const handleClearDescription = async () => {
+    setDescEditText('');
+    await resetAutoDescriptionLock(currentProject, updateProject);
+    setDescEditing(false);
+    message.success('已清空，AI 将在满足条件后重新编写');
+  };
+
+  const handleOpenNextAction = (action: ProjectNextAction) => {
+    const targetPage = (ACTION_KIND_TARGET_PAGE[action.kind] || action.target) as ProjectDetailPage;
+    navigateWorkbench({
+      projectId: currentProject.id,
+      target: targetPage,
+      stageName: action.stageName,
+      docId: action.docId,
+      taskId: action.taskId,
+      reviewId: action.reviewId,
+      source: 'overview',
+    });
   };
 
   const handleOpenQuickPlanEditor = () => {
@@ -1503,313 +1528,49 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
       label: '概览',
       children: (
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-            <Title level={5} style={{ fontSize: 14, margin: 0 }}>{'项目描述'}</Title>
-            {autoDescriptionStatus === 'completed' && (
-              <Tag color="green" style={{ margin: 0, fontSize: 11 }}>AI 编写完毕</Tag>
-            )}
-            {autoDescriptionStatus === 'pending' && (
-              <Tag color="gold" style={{ margin: 0, fontSize: 11 }}>待 AI 编写</Tag>
-            )}
-            {autoDescriptionStatus === 'failed' && (
-              <Tag color="red" style={{ margin: 0, fontSize: 11 }}>AI 编写失败，等待重试</Tag>
-            )}
-            {autoDescriptionStatus === 'manual' && (
-              <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>手动编辑</Tag>
-            )}
-            {!descEditing && (
-              <Button type="text" size="small" icon={<EditOutlined />}
-                onClick={() => { setDescEditing(true); setDescEditText(currentProject.description || ''); setTimeout(() => descEditRef.current?.focus(), 100); }}
-                style={{ marginLeft: 'auto', color: '#8c8c8c', fontSize: 11 }}
-                title={currentProject.description ? '编辑描述' : '添加描述'}
-              />
-            )}
-          </div>
+          <ProjectDescriptionSection
+            project={currentProject}
+            status={autoDescriptionStatus}
+            editing={descEditing}
+            draft={descEditText}
+            editorRef={descEditRef}
+            onStartEditing={handleStartDescriptionEditing}
+            onDraftChange={setDescEditText}
+            onSave={() => { void handleSaveDescription(); }}
+            onCancel={() => setDescEditing(false)}
+            onClear={() => { void handleClearDescription(); }}
+          />
 
-          {descEditing ? (
-            <div style={{ marginBottom: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <Input.TextArea
-                ref={descEditRef}
-                value={descEditText}
-                onChange={e => setDescEditText(e.target.value)}
-                placeholder="输入项目描述…"
-                autoSize={{ minRows: 2, maxRows: 6 }}
-                style={{ fontSize: 12 }}
-              />
-              <div style={{ display: 'flex', gap: 6 }}>
-                <Button size="small" type="primary" onClick={async () => {
-                  const text = descEditText.trim();
-                  if (text) {
-                    await convertToManualDescription(currentProject, updateProject, text);
-                    message.success('已保存为手动描述');
-                  } else {
-                    setDescEditText('');
-                    await resetAutoDescriptionLock(currentProject, updateProject);
-                    message.success('已清空，AI 将在满足条件后重新编写');
-                  }
-                  setDescEditing(false);
-                }}>保存</Button>
-                <Button size="small" onClick={() => setDescEditing(false)}>取消</Button>
-                {currentProject.description && (
-                  <Popconfirm title="确定清空描述？" onConfirm={async () => {
-                    setDescEditText('');
-                    await resetAutoDescriptionLock(currentProject, updateProject);
-                    setDescEditing(false);
-                    message.success('已清空，AI 将在满足条件后重新编写');
-                  }}>
-                    <Button size="small" danger>清空</Button>
-                  </Popconfirm>
-                )}
-              </div>
-            </div>
-          ) : (
-            <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 20 }}>
-              {currentProject.description
-                || (autoDescriptionStatus === 'failed'
-                  ? 'AI 编写失败，系统将在下次重试时间后自动再试。'
-                  : autoDescriptionStatus === 'pending'
-                    ? '满足至少两个文件且三天无更新后，将自动编写项目描述。'
-                    : '暂无描述')}
-            </Paragraph>
-          )}
+          <ProjectNextActions actions={nextActions} onOpen={handleOpenNextAction} />
 
-          {/* \u4e0b\u4e00\u6b65\u884c\u52a8\u4e2d\u5fc3 */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <Title level={5} style={{ fontSize: 14, margin: 0 }}>下一步行动</Title>
-              <Tag color="default" style={{ margin: 0, fontSize: 10 }}>{nextActions.length} 项</Tag>
-            </div>
-            {nextActions.length === 0 ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>当前项目没有待推进事项</Text>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {nextActions.map(action => (
-                  <div
-                    key={action.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => {
-                      const targetPage = (ACTION_KIND_TARGET_PAGE[action.kind] || action.target) as any;
-                      navigateWorkbench({
-                        projectId: currentProject.id,
-                        target: targetPage,
-                        stageName: action.stageName,
-                        docId: action.docId,
-                        taskId: action.taskId,
-                        reviewId: action.reviewId,
-                        source: 'overview',
-                      });
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        (e.currentTarget as HTMLElement).click();
-                      }
-                    }}
-                    style={{
-                      display: 'flex', alignItems: 'flex-start', gap: 8,
-                      padding: '8px 10px', borderRadius: 8,
-                      border: `1px solid ${action.severity === 'high' ? '#ffccc7' : action.severity === 'medium' ? '#ffe58f' : '#f0f0f0'}`,
-                      background: action.severity === 'high' ? '#fff1f0' : action.severity === 'medium' ? '#fffbe6' : '#fafafa',
-                      cursor: 'pointer', transition: 'background 150ms',
-                    }}
-                  >
-                    <span style={{ marginTop: 2, flexShrink: 0, fontSize: 14 }}>
-                      {ACTION_KIND_ICON[action.kind] || <RightOutlined style={{ color: '#8c8c8c' }} />}
-                    </span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <Text strong style={{ fontSize: 12, display: 'block' }}>{action.title}</Text>
-                      <Text type="secondary" style={{ fontSize: 11, display: 'block', lineHeight: 1.4 }}>{action.detail}</Text>
-                    </div>
-                    <RightOutlined style={{ color: '#bbb', fontSize: 10, marginTop: 4, flexShrink: 0 }} />
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <ProjectOverviewStats
+            status={statusInfo}
+            createdAtLabel={formatDate(currentProject.createdAt)}
+            fileVersionCount={fileVersionEntries.length}
+            documentCount={projectDocsList.length}
+            extractionCount={projectExtractionCount}
+            completedStagePercent={completedStagePercent}
+            activeStagePercent={activeStagePercent}
+          />
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>{'\u72b6\u6001'}</Text>
-              <Tag color={statusInfo.color} style={{ margin: 0, fontSize: 11 }}>{statusInfo.label}</Tag>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>{'\u521b\u5efa\u65f6\u95f4'}</Text>
-              <Text style={{ fontSize: 12 }}>{formatDate(currentProject.createdAt)}</Text>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>{'\u6587\u4ef6\u7248\u672c'}</Text>
-              <Text style={{ fontSize: 12 }}>{fileVersionEntries.length} {'\u4e2a'}</Text>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>{'\u5173\u8054\u6587\u6863'}</Text>
-              <Text style={{ fontSize: 12 }}>{projectDocsList.length} {'\u4efd'}</Text>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>{'\u5173\u8054\u6587\u4ef6\u5939'}</Text>
-              <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: currentProject.folderPath }}>
-                {currentProject.folderPath ? currentProject.folderPath.split(/[/\\]/).pop() : '\u672a\u5173\u8054'}
-              </Text>
-            </div>
-          </div>
-
-          <Title level={5} style={{ fontSize: 14, marginBottom: 12 }}>{'\u9636\u6bb5\u5b8c\u6210\u5ea6'}</Title>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
-            {/* 圆形进度条暂时停用：跨 50% 的双半圆接续会产生卡顿。 */}
-            {/* <StageProgressPieRing percent={completedStagePercent} /> */}
-            <StageProgressLinearBar percent={completedStagePercent} />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#52c41a', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>{'\u5df2\u5b8c\u6210'}</Text></Space>
-                <Text style={{ fontSize: 12 }}>{completedStagePercent}%</Text>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Space size={4}><span style={{ width: 8, height: 8, borderRadius: 2, background: '#1890ff', display: 'inline-block' }} /><Text style={{ fontSize: 12 }}>{'\u8fdb\u884c\u4e2d'}</Text></Space>
-                <Text style={{ fontSize: 12 }}>{activeStagePercent}%</Text>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-            <Title level={5} style={{ fontSize: 14, margin: 0 }}>{'\u4e0b\u4e00\u6b65\u8ba1\u5212'}</Title>
-            {!quickPlanEditing && (
-              <Button
-                type="text"
-                size="small"
-                shape="circle"
-                icon={<PlusOutlined />}
-                title="新增计划"
-                onClick={handleOpenQuickPlanEditor}
-                style={{ color: '#1677ff', background: '#edf7ff' }}
-              />
-            )}
-          </div>
-
-          {/* 内联编辑器 */}
-          {quickPlanEditing && (
-            <div style={{
-              padding: '10px 12px',
-              borderRadius: 8,
-              border: '1px solid #b7d4ff',
-              background: '#f0f7ff',
-              marginBottom: 10,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 8,
-            }}>
-              <Input
-                ref={quickPlanTitleRef as any}
-                value={quickPlanTitle}
-                onChange={e => setQuickPlanTitle(e.target.value)}
-                placeholder="计划标题"
-                size="small"
-                style={{ fontSize: 13 }}
-                onPressEnter={() => { void handleConfirmQuickPlan(); }}
-              />
-              <TextArea
-                value={quickPlanDesc}
-                onChange={e => setQuickPlanDesc(e.target.value)}
-                placeholder="计划描述（可选）"
-                autoSize={{ minRows: 2, maxRows: 4 }}
-                size="small"
-                style={{ fontSize: 12 }}
-              />
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <Button
-                  type="text"
-                  size="small"
-                  shape="circle"
-                  icon={quickPlanType === 'ai' ? <ExperimentOutlined /> : <UserOutlined />}
-                  onClick={() => setQuickPlanType(quickPlanType === 'ai' ? 'manual' : 'ai')}
-                  title={quickPlanType === 'ai' ? '当前为 AI 任务，点击切换为人工任务' : '当前为人工任务，点击切换为 AI 任务'}
-                  aria-label={quickPlanType === 'ai' ? '切换为人工任务' : '切换为 AI 任务'}
-                  style={{
-                    width: 28,
-                    minWidth: 28,
-                    height: 28,
-                    color: quickPlanType === 'ai' ? '#1677ff' : '#d46b08',
-                    background: quickPlanType === 'ai' ? '#e6f4ff' : '#fff7e6',
-                  }}
-                />
-                <Space size={6}>
-                  <Button size="small" onClick={handleCancelQuickPlan}>{'取消'}</Button>
-                  <Button size="small" type="primary" onClick={() => { void handleConfirmQuickPlan(); }}>{'确认'}</Button>
-                </Space>
-              </div>
-            </div>
-          )}
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-            {recentPlanTasks.length === 0 && !quickPlanEditing ? (
-              <div style={{ padding: '18px 12px', textAlign: 'center' }}>
-                <ClockCircleOutlined style={{ fontSize: 22, color: '#bfbfbf', marginBottom: 8 }} />
-                <div><Text type="secondary" style={{ fontSize: 12 }}>{'\u6682\u672a\u751f\u6210\u8ba1\u5212'}</Text></div>
-              </div>
-            ) : (
-              recentPlanTasks.map(task => {
-                const checked = task.status === 'completed';
-                const color = task.priority === 'high' ? '#ff4d4f' : task.priority === 'medium' ? '#faad14' : '#52c41a';
-                return (
-                  <div
-                    key={task.id}
-                    role="button"
-                    tabIndex={0}
-                    title="进入对应工作台"
-                    onClick={() => openWorkflowTask(task)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        openWorkflowTask(task);
-                      }
-                    }}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: 8,
-                      padding: '8px 10px',
-                      borderRadius: 6,
-                      border: '1px solid #eef2f7',
-                      background: checked ? '#f6ffed' : '#fafafa',
-                      cursor: 'pointer',
-                      transition: 'border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease',
-                    }}
-                  >
-                    <Checkbox
-                      checked={checked}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={event => { void handleToggleTaskComplete(task, event.target.checked); }}
-                      style={{ marginTop: 2 }}
-                    />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <Button
-                          type="text"
-                          size="small"
-                          title={task.type === 'ai' ? '当前为 AI 任务，点击切换为人工任务' : '当前为人工任务，点击切换为 AI 任务'}
-                          icon={task.type === 'ai' ? <ExperimentOutlined /> : <UserOutlined />}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleToggleTaskType(task);
-                          }}
-                          style={{ padding: 0, width: 18, minWidth: 18, height: 18, color: task.type === 'ai' ? '#1677ff' : '#d46b08' }}
-                        />
-                        <span style={{ width: 6, height: 6, borderRadius: 2, background: color, flexShrink: 0 }} />
-                        <Text strong={!checked} delete={checked} style={{ fontSize: 12, minWidth: 0 }} ellipsis={{ tooltip: task.title }}>{task.title}</Text>
-                      </div>
-                      {(task.description || task.workflowName || task.stageName) && (
-                        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }} ellipsis={{ tooltip: task.description }}>
-                          {task.description || task.workflowName || task.stageName}
-                        </Text>
-                      )}
-                      <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 3 }}>
-                        点击进入{resolveWorkflowWorkbench(task) === 'report' ? '报告工作台' : resolveWorkflowWorkbench(task) === 'review' ? '审查工作台' : resolveWorkflowWorkbench(task) === 'plan' ? '计划工作台' : resolveWorkflowWorkbench(task) === 'writing' ? 'AI协同' : '团队-AI协同'}
-                      </Text>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
+          <ProjectQuickPlanSection
+            editing={quickPlanEditing}
+            title={quickPlanTitle}
+            description={quickPlanDesc}
+            type={quickPlanType}
+            tasks={recentPlanTasks}
+            titleInputRef={quickPlanTitleRef}
+            onOpenEditor={handleOpenQuickPlanEditor}
+            onTitleChange={setQuickPlanTitle}
+            onDescriptionChange={setQuickPlanDesc}
+            onTypeChange={setQuickPlanType}
+            onConfirm={() => { void handleConfirmQuickPlan(); }}
+            onCancel={handleCancelQuickPlan}
+            onOpenTask={openWorkflowTask}
+            onToggleComplete={(task, checked) => { void handleToggleTaskComplete(task, checked); }}
+            onToggleType={task => { void handleToggleTaskType(task); }}
+            getDestinationLabel={getWorkflowDestinationLabel}
+          />
         </div>
       ),
     },
@@ -1943,13 +1704,6 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
                                   <Button type="text" size="small" title={'\u91cd\u65b0\u5206\u6790'} icon={<ReloadOutlined />} loading={analyzingDocId === doc.id} onClick={() => handleAnalyze(doc, false)} style={{ padding: '0 3px' }} />
                                   <Button type="text" size="small" title={'AI\u5206\u6790'} icon={<ExperimentOutlined />} loading={analyzingDocId === doc.id} onClick={() => handleAnalyze(doc, true)} style={{ padding: '0 3px' }} />
                                   <Tag color={getProjectDocumentLifecycleColor(doc)} style={{ margin: 0, fontSize: 9, lineHeight: '14px', padding: '0 4px' }}>{getProjectDocumentLifecycleLabel(doc)}</Tag>
-                                  {doc.completedAt ? (
-                                    <Popconfirm title={'\u786e\u5b9a\u53d6\u6d88\u5b8c\u6210\u5e76\u56de\u6863\u9636\u6bb5\u8bb0\u5fc6\uff1f'} onConfirm={() => handleDocReopen(doc)} okText={'\u786e\u5b9a'} cancelText={'\u53d6\u6d88'}>
-                                      <Button type="text" size="small" title={'\u53d6\u6d88\u5b8c\u6210'} icon={<CloseOutlined />} style={{ padding: '0 3px', color: '#fa8c16' }} />
-                                    </Popconfirm>
-                                  ) : (
-                                    <Button type="text" size="small" title={'\u6807\u8bb0\u5b8c\u6210\u5e76\u5b66\u4e60'} icon={<CheckCircleOutlined />} onClick={() => handleDocComplete(doc)} style={{ padding: '0 3px', color: '#52c41a' }} />
-                                  )}
                                   <Popconfirm title={'\u786e\u5b9a\u5220\u9664\u8fd9\u6761\u6587\u6863\u8bb0\u5f55\uff1f'} onConfirm={() => deleteProjectDoc(doc.id)}>
                                     <Button type="text" size="small" danger icon={<DeleteOutlined />} style={{ padding: '0 3px' }} />
                                   </Popconfirm>
@@ -2034,6 +1788,8 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
               {planSegments.map(segment => {
                 const color = stageMeta[segment.stage].color;
                 const isCompleted = Boolean(segment.completedAt);
+                const completionEvent = getActiveStageCompletionEvent(currentProject, segment.stage);
+                const stageBusy = busyStageKeys.includes(`${currentProject.id}:${segment.stage}`);
                 const segDlStatus = getDlStatus(segment.deadline, segment.completedAt);
                 const statusColor = segDlStatus === 'overdue' ? '#ff4d4f' : segDlStatus === 'aboutToExpire' ? '#faad14' : color;
 
@@ -2060,15 +1816,24 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
                         ) : (
                           <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>进行中</Tag>
                         )}
+                        {completionEvent?.status === 'learning' && <Tag color="processing" style={{ margin: 0, fontSize: 11 }}>学习中</Tag>}
+                        {completionEvent?.status === 'learning_failed' && <Tag color="red" style={{ margin: 0, fontSize: 11 }}>学习失败</Tag>}
                       </Space>
                       {isCompleted ? (
-                        <Button size="small" onClick={() => handleStageReopen(segment)}>
+                        <Button size="small" loading={stageBusy} onClick={() => handleStageReopen(segment)}>
                           取消完成
                         </Button>
                       ) : (
-                        <Button size="small" type="primary" onClick={() => handleStageComplete(segment)}>
+                        <Button size="small" type="primary" loading={stageBusy} onClick={() => handleStageComplete(segment)}>
                           完成
                         </Button>
+                      )}
+                      {completionEvent && ['learning_failed', 'learned'].includes(completionEvent.status) && (
+                        <Button size="small" danger={completionEvent?.status === 'learning_failed'} loading={stageBusy} onClick={async () => {
+                          const result = await retryStageLearning(currentProject, completionEvent.id);
+                          if (result?.status === 'learned') message.success('阶段记忆重学成功');
+                          else message.warning('阶段记忆仍未生成');
+                        }}>{completionEvent?.status === 'learned' ? '重新学习' : '重试学习'}</Button>
                       )}
                     </div>
 
@@ -2539,41 +2304,13 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
 
   return (
     <div className="detail-panel detail-panel-polished detail-panel-ready" style={{ padding: '16px 18px', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* Header */}
-      <div className="detail-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{
-            width: 40, height: 40, background: '#e6f7ff', borderRadius: 10,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
-            <FolderOutlined style={{ fontSize: 20, color: '#1890ff' }} />
-          </div>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <Title level={5} title={currentProject.name} ellipsis style={{ margin: 0, fontSize: 15, maxWidth: 260 }}>{currentProject.name}</Title>
-          </div>
-        </div>
-        <Space size={2}>
-          <Popconfirm
-            title="删除项目？"
-            description="项目文件夹和关联记录会移入回收站，可在回收站恢复。"
-            okText="移入回收站"
-            cancelText="取消"
-            okButtonProps={{ danger: true, loading: deletingProject }}
-            onConfirm={() => void handleDeleteCurrentProject()}
-          >
-            <Button type="text" danger icon={<DeleteOutlined />} size="small" title="删除项目" loading={deletingProject} />
-          </Popconfirm>
-          <Button
-            type="text"
-            icon={<CloseOutlined />}
-            onClick={onClose}
-            size="small"
-            style={{ transition: 'transform 0.15s ease, background 0.15s ease' }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = 'rotate(90deg)'; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'rotate(0deg)'; }}
-          />
-        </Space>
-      </div>
+      <DetailPanelHeader
+        projectName={currentProject.name}
+        deleting={deletingProject}
+        onRename={handleRenameProject}
+        onDelete={openDeleteProjectConfirm}
+        onClose={onClose}
+      />
 
       {contentReady ? (
         <Tabs className="detail-panel-tabs detail-panel-tabs-polished" activeKey={activeTab} onChange={setActiveTab} items={tabItems} size="small" style={{ flex: 1, overflow: 'hidden' }} animated={false} />

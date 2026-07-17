@@ -1,6 +1,8 @@
 import { create } from 'zustand';
-import { AITokenUsage, TaskItem } from '../../shared/types';
+import { AITokenUsage, TaskItem, WorkItem, WorkItemExecutor, WorkItemStatus } from '../../shared/types';
 import { isAIJobCancelledError, useAIJobStore } from './aiJobStore';
+import { adaptTaskItemsToWorkItems, normalizeTaskItemContract, selectWorkItems, WorkItemQuery } from '../utils/workflowAdapter';
+import { assertIpcMutationSucceeded, requireIpcArray } from '../utils/ipcResult';
 
 const taskTimeMs = (value?: string) => {
   if (!value) return 0;
@@ -38,6 +40,7 @@ const dedupeTasks = (tasks: TaskItem[]) => {
 
 interface TaskState {
   tasks: TaskItem[];
+  workItems: WorkItem[];
   isLoading: boolean;
 
   // 任务操作
@@ -45,6 +48,10 @@ interface TaskState {
   addTask: (task: TaskItem) => Promise<void>;
   updateTask: (id: string, updates: Partial<TaskItem>) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
+  getWorkItems: (query?: WorkItemQuery) => WorkItem[];
+  isTaskBlocked: (id: string) => boolean;
+  setTaskExecutor: (id: string, executor: WorkItemExecutor) => Promise<void>;
+  transitionTaskStatus: (id: string, status: Extract<WorkItemStatus, 'pending' | 'in_progress' | 'completed'>) => Promise<boolean>;
 
   // AI 执行
   executeAITask: (taskId: string, content: string, instruction: string) => Promise<{ success: boolean; result?: string; usage?: AITokenUsage; error?: string }>;
@@ -52,13 +59,15 @@ interface TaskState {
 
 export const useTaskStore = create<TaskState>((set, get) => ({
   tasks: [],
+  workItems: [],
   isLoading: false,
 
   loadTasks: async () => {
     set({ isLoading: true });
     try {
-      const tasks = await window.electronAPI.loadTasks();
-      set({ tasks: dedupeTasks(tasks), isLoading: false });
+      const tasks = requireIpcArray<TaskItem>(await window.electronAPI.loadTasks(), '加载任务失败');
+      const normalized = dedupeTasks(tasks);
+      set({ tasks: normalized, workItems: adaptTaskItemsToWorkItems(normalized), isLoading: false });
     } catch (error) {
       console.error('Failed to load tasks:', error);
       set({ isLoading: false });
@@ -67,29 +76,32 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   addTask: async (task) => {
     const prev = get().tasks;
-    const newTasks = dedupeTasks([...prev.filter(t => t.id !== task.id), task]);
-    set({ tasks: newTasks });
+    const normalizedTask = normalizeTaskItemContract(task);
+    const newTasks = dedupeTasks([...prev.filter(t => t.id !== task.id), normalizedTask]);
+    set({ tasks: newTasks, workItems: adaptTaskItemsToWorkItems(newTasks) });
     try {
-      await window.electronAPI.saveTask(task);
+      const result = await window.electronAPI.saveTask(normalizedTask);
+      assertIpcMutationSucceeded(result, '保存任务失败');
     } catch (error) {
       console.error('Failed to save task:', error);
-      set({ tasks: prev });
+      set({ tasks: prev, workItems: adaptTaskItemsToWorkItems(prev) });
     }
   },
 
   updateTask: async (id, updates) => {
     const prev = get().tasks;
     const tasks = dedupeTasks(prev.map((t) =>
-      t.id === id ? { ...t, ...updates } : t
+      t.id === id ? normalizeTaskItemContract({ ...t, ...updates, updatedAt: new Date().toISOString() }) : t
     ));
-    set({ tasks });
+    set({ tasks, workItems: adaptTaskItemsToWorkItems(tasks) });
     const updatedTask = tasks.find(t => t.id === id);
     if (updatedTask) {
       try {
-        await window.electronAPI.saveTask(updatedTask);
+        const result = await window.electronAPI.saveTask(updatedTask);
+        assertIpcMutationSucceeded(result, '更新任务失败');
       } catch (error) {
         console.error('Failed to update task:', error);
-        set({ tasks: prev });
+        set({ tasks: prev, workItems: adaptTaskItemsToWorkItems(prev) });
       }
     }
   },
@@ -97,17 +109,46 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   deleteTask: async (id) => {
     const prev = get().tasks;
     const newTasks = prev.filter((t) => t.id !== id);
-    set({ tasks: newTasks });
+    set({ tasks: newTasks, workItems: adaptTaskItemsToWorkItems(newTasks) });
     try {
-      await window.electronAPI.deleteTask(id);
+      const result = await window.electronAPI.deleteTask(id);
+      assertIpcMutationSucceeded(result, '删除任务失败');
     } catch (error) {
       console.error('Failed to delete task:', error);
-      set({ tasks: prev });
+      set({ tasks: prev, workItems: adaptTaskItemsToWorkItems(prev) });
     }
+  },
+
+  getWorkItems: (query) => selectWorkItems(get().workItems, query),
+
+  isTaskBlocked: (id) => get().workItems.some(item => item.id === id && item.status === 'blocked'),
+
+  setTaskExecutor: async (id, executor) => {
+    await get().updateTask(id, {
+      executor,
+      type: executor === 'ai' ? 'ai' : 'manual',
+      updatedAt: new Date().toISOString(),
+    });
+  },
+
+  transitionTaskStatus: async (id, status) => {
+    const task = get().tasks.find(item => item.id === id);
+    if (!task) return false;
+    if (status !== 'pending' && get().isTaskBlocked(id)) return false;
+    await get().updateTask(id, {
+      status,
+      workStatus: status,
+      completedAt: status === 'completed' ? new Date().toISOString() : undefined,
+      updatedAt: new Date().toISOString(),
+    });
+    return true;
   },
 
   executeAITask: async (taskId, content, instruction) => {
     const prevTask = get().tasks.find(t => t.id === taskId);
+    if (get().isTaskBlocked(taskId)) {
+      return { success: false, error: '前置任务尚未完成' };
+    }
     try {
       await get().updateTask(taskId, { status: 'in_progress' });
 

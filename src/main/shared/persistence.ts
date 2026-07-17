@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import { Project, DocumentVersion, WritingTemplate, ReviewResult, AIConfig, TaskItem, AppSettings, ProjectDocument } from '../types';
 import { dataDir, projectsFile, versionsFile, templatesFile, reviewsFile, aiConfigFile, tasksFile, settingsFile, projectDocsFile } from './paths';
 import { normalizeAIConfig } from './aiConfig';
+import { readVersionedJsonFile, writeVersionedJsonFile } from './versionedJson';
 
 // ========== 原子写 + 写队列 ==========
 const writeQueues = new Map<string, Promise<void>>();
@@ -31,95 +32,88 @@ export function ensureDataDir() {
 // ========== Projects ==========
 export function loadProjectsFromDisk(): Project[] {
   ensureDataDir();
-  if (!fs.existsSync(projectsFile)) return [];
-  try { return JSON.parse(fs.readFileSync(projectsFile, 'utf-8')); } catch { return []; }
+  return readVersionedJsonFile<Project[]>(projectsFile, []).data;
 }
 
 export function saveProjectsToDisk(projects: Project[]) {
   ensureDataDir();
-  atomicWriteJson(projectsFile, projects);
+  writeVersionedJsonFile(projectsFile, projects);
 }
 
 // ========== Versions ==========
 export function loadVersionsFromDisk(): DocumentVersion[] {
   ensureDataDir();
-  if (!fs.existsSync(versionsFile)) return [];
-  try { return JSON.parse(fs.readFileSync(versionsFile, 'utf-8')); } catch { return []; }
+  return readVersionedJsonFile<DocumentVersion[]>(versionsFile, []).data;
 }
 
 export function saveVersionsToDisk(versions: DocumentVersion[]) {
   ensureDataDir();
-  atomicWriteJson(versionsFile, versions);
+  writeVersionedJsonFile(versionsFile, versions);
 }
 
 // ========== Templates ==========
 export function loadTemplatesFromDisk(): WritingTemplate[] {
   ensureDataDir();
-  if (!fs.existsSync(templatesFile)) return [];
-  try { return JSON.parse(fs.readFileSync(templatesFile, 'utf-8')); } catch { return []; }
+  return readVersionedJsonFile<WritingTemplate[]>(templatesFile, []).data;
 }
 
 export function saveTemplatesToDisk(templates: WritingTemplate[]) {
   ensureDataDir();
-  atomicWriteJson(templatesFile, templates);
+  writeVersionedJsonFile(templatesFile, templates);
 }
 
 // ========== Reviews ==========
 export function loadReviewsFromDisk(): ReviewResult[] {
   ensureDataDir();
-  if (!fs.existsSync(reviewsFile)) return [];
-  try { return JSON.parse(fs.readFileSync(reviewsFile, 'utf-8')); } catch { return []; }
+  return readVersionedJsonFile<ReviewResult[]>(reviewsFile, []).data;
 }
 
 export function saveReviewsToDisk(reviews: ReviewResult[]) {
   ensureDataDir();
-  atomicWriteJson(reviewsFile, reviews);
+  writeVersionedJsonFile(reviewsFile, reviews);
 }
 
 // ========== AI Config ==========
 export function loadAIConfigFromDisk(): AIConfig | null {
   ensureDataDir();
-  if (!fs.existsSync(aiConfigFile)) return null;
-  try { return normalizeAIConfig(JSON.parse(fs.readFileSync(aiConfigFile, 'utf-8'))); } catch { return null; }
+  const config = readVersionedJsonFile<AIConfig | null>(aiConfigFile, null).data;
+  return config ? normalizeAIConfig(config) : null;
 }
 
 export function saveAIConfigToDisk(config: AIConfig) {
   ensureDataDir();
-  atomicWriteJson(aiConfigFile, normalizeAIConfig(config));
+  writeVersionedJsonFile(aiConfigFile, normalizeAIConfig(config));
 }
 
 // ========== Tasks ==========
 export function loadTasksFromDisk(): TaskItem[] {
   ensureDataDir();
-  if (!fs.existsSync(tasksFile)) return [];
-  try { return JSON.parse(fs.readFileSync(tasksFile, 'utf-8')); } catch { return []; }
+  return readVersionedJsonFile<TaskItem[]>(tasksFile, []).data;
 }
 
 export function saveTasksToDisk(tasks: TaskItem[]) {
   ensureDataDir();
-  atomicWriteJson(tasksFile, tasks);
+  writeVersionedJsonFile(tasksFile, tasks);
 }
 
 // ========== Settings ==========
 export function loadSettingsFromDisk(): AppSettings {
   ensureDataDir();
-  if (!fs.existsSync(settingsFile)) return { workspacePath: '', workspaceCapacity: 10 };
-  try { return JSON.parse(fs.readFileSync(settingsFile, 'utf-8')); } catch { return { workspacePath: '', workspaceCapacity: 10 }; }
+  return readVersionedJsonFile<AppSettings>(settingsFile, { workspacePath: '', workspaceCapacity: 10 }).data;
 }
 
 export function saveSettingsToDisk(settings: AppSettings) {
   ensureDataDir();
-  atomicWriteJson(settingsFile, settings);
+  writeVersionedJsonFile(settingsFile, settings);
 }
 
 // ========== Project Documents ==========
 export function loadProjectDocsFromDisk(): ProjectDocument[] {
   ensureDataDir();
-  if (!fs.existsSync(projectDocsFile)) return [];
-  try { return JSON.parse(fs.readFileSync(projectDocsFile, 'utf-8')); } catch { return []; }
+  return readVersionedJsonFile<ProjectDocument[]>(projectDocsFile, []).data;
 }
 
 export function saveProjectDocsToDisk(docs: ProjectDocument[]) {
   ensureDataDir();
-  atomicWriteJson(projectDocsFile, docs);
+  writeVersionedJsonFile(projectDocsFile, docs);
 }

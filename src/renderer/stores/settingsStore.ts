@@ -9,6 +9,7 @@ import {
   UserProfile,
 } from '../../shared/types';
 import { DEFAULT_STAGES } from '../utils/timelineStages';
+import { assertIpcMutationSucceeded, requireIpcObject } from '../utils/ipcResult';
 
 interface SettingsState {
   workspacePath: string;
@@ -18,8 +19,10 @@ interface SettingsState {
   userProfile: UserProfile | null;
   customStages: StageConfig[];
   compositionWeights: CompositionWeightConfig | null;
+  compositionWeightsByScene: Partial<Record<import('../../shared/types').PromptScene, CompositionWeightConfig>>;
   enableSystemNotifications: boolean;
   autoProjectDescriptionEnabled: boolean;
+  autoStageMemoryEnabled: boolean;
   holidayDataSource: HolidayDataSource;
   holidayApiUrl: string;
   calendarDayRecords: CalendarDayRecord[];
@@ -33,11 +36,13 @@ interface SettingsState {
   updateUserProfile: (profile: UserProfile) => Promise<void>;
   updateSystemNotifications: (enabled: boolean) => Promise<void>;
   updateAutoProjectDescriptionEnabled: (enabled: boolean) => Promise<void>;
+  updateAutoStageMemoryEnabled: (enabled: boolean) => Promise<void>;
   updateHolidaySettings: (settings: { source?: HolidayDataSource; apiUrl?: string }) => Promise<void>;
   updateCalendarDayRecords: (records: CalendarDayRecord[]) => Promise<void>;
   updateCalendarItineraries: (itineraries: CalendarItinerary[]) => Promise<void>;
   updateCalendarItineraryById: (id: string, updates: Partial<CalendarItinerary>) => Promise<void>;
   updateCompositionWeights: (weights: CompositionWeightConfig | null) => Promise<void>;
+  updateCompositionWeightsForScene: (scene: import('../../shared/types').PromptScene, weights: CompositionWeightConfig | null) => Promise<void>;
   refreshWorkspaceUsed: () => Promise<void>;
   addStage: (stage: StageConfig) => Promise<void>;
   updateStage: (id: string, updates: Partial<StageConfig>) => Promise<void>;
@@ -46,7 +51,8 @@ interface SettingsState {
 }
 
 const saveSettings = async (settings: AppSettings) => {
-  await window.electronAPI.saveSettings(settings);
+  const result = await window.electronAPI.saveSettings(settings);
+  assertIpcMutationSucceeded(result, '保存设置失败');
 };
 
 function buildSettingsSnapshot(state: SettingsState, overrides: Partial<AppSettings> = {}): AppSettings {
@@ -57,8 +63,10 @@ function buildSettingsSnapshot(state: SettingsState, overrides: Partial<AppSetti
     userProfile: state.userProfile ?? undefined,
     customStages: state.customStages,
     compositionWeights: state.compositionWeights ?? undefined,
+    compositionWeightsByScene: state.compositionWeightsByScene,
     enableSystemNotifications: state.enableSystemNotifications,
     autoProjectDescriptionEnabled: state.autoProjectDescriptionEnabled,
+    autoStageMemoryEnabled: state.autoStageMemoryEnabled,
     holidayDataSource: state.holidayDataSource,
     holidayApiUrl: state.holidayApiUrl,
     calendarDayRecords: state.calendarDayRecords,
@@ -75,8 +83,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   userProfile: null,
   customStages: [],
   compositionWeights: null,
+  compositionWeightsByScene: {},
   enableSystemNotifications: true,
   autoProjectDescriptionEnabled: true,
+  autoStageMemoryEnabled: true,
   holidayDataSource: 'auto',
   holidayApiUrl: 'https://timor.tech/api/holiday/year/{year}',
   calendarDayRecords: [],
@@ -86,7 +96,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   loadSettings: async () => {
     set({ isLoading: true });
     try {
-      const settings = await window.electronAPI.loadSettings();
+      const settings = requireIpcObject<AppSettings>(await window.electronAPI.loadSettings(), '加载设置失败');
       if (settings) {
         set({
           workspacePath: settings.workspacePath,
@@ -95,8 +105,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           userProfile: settings.userProfile ?? null,
           customStages: settings.customStages ?? [],
           compositionWeights: settings.compositionWeights ?? null,
+          compositionWeightsByScene: settings.compositionWeightsByScene ?? {},
           enableSystemNotifications: settings.enableSystemNotifications !== false,
           autoProjectDescriptionEnabled: settings.autoProjectDescriptionEnabled !== false,
+          autoStageMemoryEnabled: settings.autoStageMemoryEnabled !== false,
           holidayDataSource: settings.holidayDataSource || 'auto',
           holidayApiUrl: settings.holidayApiUrl || 'https://timor.tech/api/holiday/year/{year}',
           calendarDayRecords: settings.calendarDayRecords || [],
@@ -159,6 +171,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to save settings:', error);
       set({ userProfile: prevProfile });
+      throw error;
     }
   },
 
@@ -181,6 +194,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to save auto project description setting:', error);
       set({ autoProjectDescriptionEnabled: previous });
+    }
+  },
+
+  updateAutoStageMemoryEnabled: async (enabled: boolean) => {
+    const previous = get().autoStageMemoryEnabled;
+    set({ autoStageMemoryEnabled: enabled });
+    try {
+      await saveSettings(buildSettingsSnapshot(get(), { autoStageMemoryEnabled: enabled }));
+    } catch (error) {
+      console.error('Failed to save automatic stage memory setting:', error);
+      set({ autoStageMemoryEnabled: previous });
     }
   },
 
@@ -245,6 +269,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to save composition weights:', error);
       set({ compositionWeights: prevWeights });
+    }
+  },
+
+  updateCompositionWeightsForScene: async (scene, weights) => {
+    const previous = get().compositionWeightsByScene;
+    const next = { ...previous };
+    if (weights) next[scene] = weights;
+    else delete next[scene];
+    set({ compositionWeightsByScene: next });
+    try {
+      await saveSettings(buildSettingsSnapshot(get(), { compositionWeightsByScene: next }));
+    } catch (error) {
+      console.error('Failed to save scene composition weights:', error);
+      set({ compositionWeightsByScene: previous });
     }
   },
 
