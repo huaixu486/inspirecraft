@@ -1,6 +1,15 @@
-# 灵作（ProjectHub）
+# 灵作（InspireCraft）
 
-灵作是一款面向项目资料、阶段文档与协作流程的桌面项目管理工具。它将项目文件、模板写作、审查修订、任务规划与团队协作放在同一个工作台中，帮助团队持续推进从项目资料到阶段交付物的完整流程。
+<p align="center">
+  <a href="https://github.com/huaixu486/inspirecraft/releases"><img src="https://img.shields.io/github/v/release/huaixu486/inspirecraft?display_name=tag&style=flat-square" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/huaixu486/inspirecraft?style=flat-square" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white&style=flat-square" alt="Windows">
+  <img src="https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white&style=flat-square" alt="Electron 33">
+  <img src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white&style=flat-square" alt="React 18">
+  <img src="https://img.shields.io/github/downloads/huaixu486/inspirecraft/total?style=flat-square" alt="Downloads">
+</p>
+
+灵作（InspireCraft）是一款面向项目资料、阶段文档与协作流程的桌面项目管理工具。它将项目文件、模板写作、审查修订、任务规划与团队协作放在同一个工作台中，帮助团队持续推进从项目资料到阶段交付物的完整流程。
 
 ## 功能概览
 
