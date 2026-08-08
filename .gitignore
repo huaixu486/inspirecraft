@@ -5,3 +5,14 @@ output/
 .DS_Store
 *.log
 .docx-qa/
+
+# Internal documentation: keep local, never publish.
+/docs/
+/AI_GUIDE.md
+/CLAUDE.md
+/PROJECT_MINDMAP.md
+/PROJECT_REFACTOR_PLAN.md
+/STAGE_PROGRESS_ROLLBACK.md
+/UI设计目标.md
+/架构设计.md
+/需求文档.md
