@@ -1,4 +1,4 @@
-# 灵作（InspireCraft）
+# InspireCraft
 
 <p align="center">
   <a href="https://github.com/huaixu486/inspirecraft/releases"><img src="https://img.shields.io/github/v/release/huaixu486/inspirecraft?display_name=tag&style=flat-square" alt="Release"></a>
@@ -9,19 +9,19 @@
   <img src="https://img.shields.io/github/downloads/huaixu486/inspirecraft/total?style=flat-square" alt="Downloads">
 </p>
 
-灵作（InspireCraft）是一款面向项目资料、阶段文档与协作流程的桌面项目管理工具。它将项目文件、模板写作、审查修订、任务规划与团队协作放在同一个工作台中，帮助团队持续推进从项目资料到阶段交付物的完整流程。
+InspireCraft is a desktop workspace for managing project materials, stage deliverables, and collaborative workflows. It brings project files, template-based writing, document review, task planning, and team collaboration into one place—from source materials to completed stage deliverables.
 
-## 功能概览
+## Highlights
 
-- 项目与阶段管理：按项目、阶段组织文件，查看阶段进度与下一步事项。
-- 文件工作台：导入、检索、版本管理和文件属性管理。
-- AI 写作：基于提示词、模板、参考资料和阶段信息生成初稿，并支持后续修订。
-- 模板与格式：配置写作模板、章节结构和 Word 格式规则，导出时应用对应格式。
-- 文档审查：检查章节、格式和内容问题，生成可编辑的 AI 与人工工作流。
-- 计划与协作：管理计划、任务、协作动态、消息和待办事项。
-- AI 接入：支持配置多个模型供应商和模型，用于不同写作与审查场景。
+- **Projects and stages** — Organize files by project and stage, monitor progress, and keep next actions visible.
+- **File workspace** — Import, search, version, and manage properties for project files.
+- **AI-assisted writing** — Generate first drafts from prompts, templates, reference materials, and stage context, then refine them collaboratively.
+- **Templates and formatting** — Define document structures and Word formatting rules, then apply them during export.
+- **Document review** — Check chapters, formatting, and content issues, then turn findings into editable AI and human workflows.
+- **Planning and collaboration** — Manage plans, tasks, collaboration activity, messages, and reminders.
+- **Flexible AI providers** — Configure multiple model providers and models for different writing and review scenarios.
 
-## 技术栈
+## Tech Stack
 
 - Electron 33
 - React 18 + TypeScript
@@ -29,45 +29,45 @@
 - Ant Design
 - Zustand
 
-## 开发运行
+## Getting Started
 
-请先安装 Node.js 18 或更高版本，然后执行：
+Install Node.js 18 or later, then run:
 
 ```bash
 npm install
 npm run dev
 ```
 
-## 常用命令
+## Common Commands
 
 ```bash
-# 类型检查、主进程与渲染进程构建
+# Type-check and build the main and renderer processes
 npm run build
 
-# 运行测试
+# Run tests
 npm run test
 
-# 打包 Windows x64 NSIS 安装程序
+# Package a Windows x64 NSIS installer
 npm run pack:win
 ```
 
-安装包默认输出到 `release/ProjectHub-Setup-<version>.exe`。
+The installer is written to `release/ProjectHub-Setup-<version>.exe` by default.
 
-## 使用说明
+## Workflow Overview
 
-1. 在项目总览中新建项目，或导入已有项目文件夹。
-2. 在文件详情中整理项目资料，并为文件关联阶段和模板。
-3. 通过团队写作或报告工作台生成初稿、审查文档并安排后续任务。
-4. 在设置页配置 AI 模型、提示词模板、自动化规则和快捷键。
+1. Create a project from the overview, or import an existing project folder.
+2. Organize source materials in File Details and associate files with stages and templates.
+3. Use Team Writing or the Report workspace to create drafts, review documents, and plan follow-up work.
+4. Configure AI models, prompt templates, automation rules, and keyboard shortcuts in Settings.
 
-## 数据与隐私
+## Data and Privacy
 
-项目文件和 AI 配置可能包含敏感信息。请仅将适合公开的内容提交到代码仓库；个人项目资料、模板范文、密钥与内部文档应保留在本地，并通过 `.gitignore` 排除。
+Project files and AI settings may contain sensitive information. Only commit content suitable for public distribution. Keep project materials, sample templates, API keys, and internal documentation local, and exclude them through `.gitignore`.
 
-## 贡献
+## Contributing
 
-欢迎提交 Issue 和 Pull Request。提交前请运行与修改相关的测试，并避免提交项目资料、账号凭据、模型密钥或其他内部文件。
+Issues and pull requests are welcome. Before submitting a change, run the relevant tests and do not commit project materials, account credentials, model keys, or other internal files.
 
-## 许可证
+## License
 
-本项目采用 [MIT License](LICENSE) 开源。
+This project is licensed under the [MIT License](LICENSE).
