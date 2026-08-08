@@ -3,8 +3,8 @@ import {
   Card, Form, Input, Select, Button, Typography, message, Space, InputNumber,
   Avatar, Divider, Alert, Progress, Switch, Modal, Checkbox, Tag,
 } from 'antd';
-import { CameraOutlined, DeleteOutlined, FolderOpenOutlined, UserOutlined } from '@ant-design/icons';
-import { HolidayDataSource } from '../../../shared/types';
+import { CameraOutlined, DeleteOutlined, FolderOpenOutlined, PoweroffOutlined, UserOutlined } from '@ant-design/icons';
+import { AppSettings, HolidayDataSource } from '../../../shared/types';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjectDocStore } from '../../stores/projectDocStore';
@@ -29,6 +29,8 @@ const BasicSettings: React.FC = () => {
   const [preparingMigration, setPreparingMigration] = useState(false);
   const [migratingWorkspace, setMigratingWorkspace] = useState(false);
   const [profileAvatar, setProfileAvatar] = useState('');
+  const [autoLaunchUpdating, setAutoLaunchUpdating] = useState(false);
+  const [closeWindowBehavior, setCloseWindowBehavior] = useState<NonNullable<AppSettings['closeWindowBehavior']>>('ask');
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const {
     workspacePath, updateWorkspacePath,
@@ -37,6 +39,7 @@ const BasicSettings: React.FC = () => {
     workspaceUsedBytes, refreshWorkspaceUsed,
     userProfile, updateUserProfile,
     enableSystemNotifications, updateSystemNotifications,
+    autoLaunchEnabled, updateAutoLaunchEnabled,
     holidayDataSource, holidayApiUrl, updateHolidaySettings,
   } = useSettingsStore();
 
@@ -59,6 +62,22 @@ const BasicSettings: React.FC = () => {
 
   useEffect(() => {
     void refreshWorkspaceUsed();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const refreshCloseWindowBehavior = () => void window.electronAPI.loadSettings().then(settings => {
+      if (active) setCloseWindowBehavior(settings?.closeWindowBehavior || 'ask');
+    });
+    refreshCloseWindowBehavior();
+    const handleVisibilityChange = () => {
+      if (!document.hidden) refreshCloseWindowBehavior();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      active = false;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -109,6 +128,33 @@ const BasicSettings: React.FC = () => {
   const handleHolidaySourceChange = async (source: HolidayDataSource) => {
     await updateHolidaySettings({ source });
     message.success('节假日数据源已更新');
+  };
+
+  const handleAutoLaunchChange = async (enabled: boolean) => {
+    setAutoLaunchUpdating(true);
+    try {
+      await updateAutoLaunchEnabled(enabled);
+      message.success(enabled ? '已开启开机自启动' : '已关闭开机自启动');
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '更新开机自启动失败');
+    } finally {
+      setAutoLaunchUpdating(false);
+    }
+  };
+
+  const handleCloseWindowBehaviorChange = async (behavior: NonNullable<AppSettings['closeWindowBehavior']>) => {
+    try {
+      const settings = await window.electronAPI.loadSettings();
+      if (!settings) throw new Error('无法读取当前设置');
+      const result = await window.electronAPI.saveSettings({ ...settings, closeWindowBehavior: behavior });
+      if (result && 'success' in result && result.success === false) {
+        throw new Error(result.error || '保存关闭行为失败');
+      }
+      setCloseWindowBehavior(behavior);
+      message.success('关闭窗口行为已更新');
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '保存关闭窗口行为失败');
+    }
   };
 
   const handleSelectFolder = async () => {
@@ -282,6 +328,45 @@ const BasicSettings: React.FC = () => {
         </div>
       </Modal>
 
+      <Card style={{ marginTop: 16 }}>
+        <Title level={5}>应用启动与关闭</Title>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 20 }}>
+          <div style={{ minWidth: 0 }}>
+            <Space size={8}>
+              <PoweroffOutlined style={{ color: '#1677ff' }} />
+              <Text>开机自启动</Text>
+            </Space>
+            <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
+              登录 Windows 后自动启动 ProjectHub，也可以在 Windows“启动应用”中管理。
+            </Text>
+          </div>
+          <Switch
+            checked={autoLaunchEnabled}
+            loading={autoLaunchUpdating}
+            onChange={enabled => { void handleAutoLaunchChange(enabled); }}
+          />
+        </div>
+        <Divider style={{ margin: '16px 0' }} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 20 }}>
+          <div style={{ minWidth: 0 }}>
+            <Text>点击关闭按钮时</Text>
+            <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
+              可以每次询问，也可以直接转入后台或彻底退出程序。
+            </Text>
+          </div>
+          <Select
+            value={closeWindowBehavior}
+            style={{ width: 190, flex: '0 0 auto' }}
+            onChange={behavior => { void handleCloseWindowBehaviorChange(behavior); }}
+            options={[
+              { value: 'ask', label: '每次询问' },
+              { value: 'background', label: '后台运行' },
+              { value: 'quit', label: '退出程序' },
+            ]}
+          />
+        </div>
+      </Card>
+
       {/* 通知设置 */}
       <Card style={{ marginTop: 16 }}>
         <Title level={5}>通知设置</Title>
@@ -355,6 +440,7 @@ const BasicSettings: React.FC = () => {
               <input
                 ref={avatarInputRef}
                 type="file"
+                className="profile-avatar-file-input"
                 accept="image/png,image/jpeg,image/webp,image/gif"
                 hidden
                 onChange={event => {

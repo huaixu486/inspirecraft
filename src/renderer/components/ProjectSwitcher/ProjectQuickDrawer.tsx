@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Drawer, Empty, Input, Progress, Space, Spin, Tag, Tooltip, Typography } from 'antd';
 import { CheckOutlined, CloseOutlined, FolderOpenOutlined, FolderOutlined, LeftOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
@@ -12,45 +12,21 @@ const { Text } = Typography;
 
 type DirectoryEntry = { name: string; path: string; isDirectory: boolean; modifiedAt?: string; size?: number };
 
-const ProjectSwitcherCard: React.FC<{ project: Project; selected: boolean; docCount: number; onSelect: () => void }> = ({ project, selected, docCount, onSelect }) => {
-  const cardRef = useRef<HTMLButtonElement>(null);
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    const node = cardRef.current;
-    if (!node) return;
-    let animationFrame = 0;
-    const observer = new IntersectionObserver(([entry]) => {
-      window.cancelAnimationFrame(animationFrame);
-      if (!entry.isIntersecting) {
-        setVisible(false);
-        return;
-      }
-      // Reset the animation state outside the viewport, then re-apply it on
-      // every re-entry so scrolling back to a card has the same feedback.
-      setVisible(false);
-      animationFrame = window.requestAnimationFrame(() => setVisible(true));
-    }, { root: node.parentElement, threshold: 0.08 });
-    observer.observe(node);
-    return () => {
-      window.cancelAnimationFrame(animationFrame);
-      observer.disconnect();
-    };
-  }, []);
-
-  return <button ref={cardRef} type="button" className={`project-switcher-card${selected ? ' is-selected' : ''}${visible ? ' is-visible' : ''}`} onClick={onSelect}>
+const ProjectSwitcherCard = memo<{ project: Project; selected: boolean; docCount: number; onSelect: (project: Project) => void }>(({ project, selected, docCount, onSelect }) => {
+  return <button type="button" className={`project-switcher-card is-visible${selected ? ' is-selected' : ''}`} onClick={() => onSelect(project)}>
     <span className="project-switcher-icon"><FolderOpenOutlined /></span>
     <span className="project-switcher-copy"><Text strong ellipsis>{project.name}</Text><Text type="secondary" ellipsis>{docCount} 个已关联文档 · {project.status === 'completed' ? '已完成' : '进行中'}</Text><Progress percent={project.progress || 0} showInfo={false} size="small" /></span>
     {selected && <CheckOutlined className="project-switcher-check" />}
   </button>;
-};
+});
 
 interface ProjectQuickDrawerProps {
   onOpenProjectFiles: (project: Project) => void;
 }
 
 const ProjectQuickDrawer: React.FC<ProjectQuickDrawerProps> = ({ onOpenProjectFiles }) => {
-  const { projects, currentProject } = useProjectStore();
+  const projects = useProjectStore(state => state.projects);
+  const currentProject = useProjectStore(state => state.currentProject);
   const projectDocs = useProjectDocStore(state => state.projectDocs);
   const customStages = useSettingsStore(state => state.customStages);
   const { open, mode, projectId, title, selectedPaths, searchQuery: initialSearchQuery, stageName, close, confirmFiles } = useProjectPickerStore();
@@ -151,13 +127,17 @@ const ProjectQuickDrawer: React.FC<ProjectQuickDrawerProps> = ({ onOpenProjectFi
     };
   }, []);
 
-  const chooseProject = (project: typeof projects[number]) => {
+  const chooseProject = useCallback((project: typeof projects[number]) => {
     setDrawerWidth(390);
     close();
     onOpenProjectFiles(project);
-  };
+  }, [close, onOpenProjectFiles]);
 
-  const projectDocCount = (projectIdValue: string) => projectDocs.filter(doc => doc.projectId === projectIdValue).length;
+  const projectDocCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    projectDocs.forEach(doc => counts.set(doc.projectId, (counts.get(doc.projectId) || 0) + 1));
+    return counts;
+  }, [projectDocs]);
   const fileEntries = entries.filter(entry => !entry.isDirectory);
   const folderEntries = (searchQuery.trim() || stageName) ? [] : entries.filter(entry => entry.isDirectory);
 
@@ -180,6 +160,7 @@ const ProjectQuickDrawer: React.FC<ProjectQuickDrawerProps> = ({ onOpenProjectFi
   return (
     <Drawer
       open={open}
+      forceRender
       onClose={close}
       placement="left"
       width={drawerWidth}
@@ -205,8 +186,8 @@ const ProjectQuickDrawer: React.FC<ProjectQuickDrawerProps> = ({ onOpenProjectFi
         <div className="project-switcher-list">
           {projects.map(project => {
             const selected = project.id === currentProject?.id;
-            const docCount = projectDocCount(project.id);
-            return <ProjectSwitcherCard key={project.id} project={project} selected={selected} docCount={docCount} onSelect={() => chooseProject(project)} />;
+            const docCount = projectDocCounts.get(project.id) || 0;
+            return <ProjectSwitcherCard key={project.id} project={project} selected={selected} docCount={docCount} onSelect={chooseProject} />;
           })}
           {!projects.length && <Empty description="暂无项目" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
         </div>

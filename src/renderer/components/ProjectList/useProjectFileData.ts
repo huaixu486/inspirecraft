@@ -7,6 +7,7 @@ export interface FileItem {
   size: number;
   modifiedAt: string;
   path: string;
+  readOnly?: boolean;
 }
 
 export interface TreeFileItem {
@@ -16,6 +17,7 @@ export interface TreeFileItem {
   ext: string;
   size: number;
   modifiedAt: string;
+  readOnly?: boolean;
 }
 
 export interface TreeFolderItem {
@@ -80,6 +82,11 @@ const useProjectFileData = ({ currentPath, onContentsLoaded }: UseProjectFileDat
     }
   }, [currentPath]);
 
+  const updateFileItem = useCallback((filePath: string, updates: Partial<Pick<FileItem, 'readOnly'>>) => {
+    setItems(previous => previous.map(item => item.path === filePath ? { ...item, ...updates } : item));
+    setTreeFiles(previous => previous.map(item => item.path === filePath ? { ...item, ...updates } : item));
+  }, []);
+
   useEffect(() => {
     void loadContents();
     void loadTreeStats();
@@ -94,6 +101,7 @@ const useProjectFileData = ({ currentPath, onContentsLoaded }: UseProjectFileDat
     treeLoading,
     loadContents,
     loadTreeStats,
+    updateFileItem,
   };
 };
 

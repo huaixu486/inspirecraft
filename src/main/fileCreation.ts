@@ -134,16 +134,23 @@ function buildBodyParagraphsXml(content: string, template: WritingTemplate, node
   const bold = font.fontWeight === 'bold';
   const italic = font.fontStyle === 'italic';
   const runSpacing = `<w:spacing w:val="${pointsToTwips(font.letterSpacing)}"/>`;
-  const alignment = paragraph.alignment ? `<w:jc w:val="${paragraph.alignment}"/>` : '';
+  const alignmentValue = paragraph.alignment === 'justify' ? 'both' : paragraph.alignment;
+  const alignment = alignmentValue ? `<w:jc w:val="${alignmentValue}"/>` : '';
   const firstLine = paragraph.indentFirstLine ? `<w:ind w:firstLineChars="${Math.round(paragraph.indentFirstLine * 100)}"/>` : '';
   const paragraphSpacing = `<w:spacing w:before="${pointsToTwips(paragraph.spaceBefore)}" w:after="${pointsToTwips(paragraph.spaceAfter)}" w:line="${lineHeightToWordLine(font.lineHeight || template.bodyFontRequirement?.lineHeight)}" w:lineRule="auto"/>`;
   const generatedPPr = `<w:pPr><w:pStyle w:val="Normal"/>${alignment}${firstLine}${paragraphSpacing}</w:pPr>`;
   const generatedRPr = `<w:rPr><w:rFonts w:ascii="${fontFamily}" w:hAnsi="${fontFamily}" w:eastAsia="${fontFamily}"/>${bold ? '<w:b/><w:bCs/>' : '<w:b w:val="0"/><w:bCs w:val="0"/>'}${italic ? '<w:i/><w:iCs/>' : '<w:i w:val="0"/><w:iCs w:val="0"/>'}${runSpacing}<w:color w:val="${color}"/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr>`;
   const prototype = extractPrototypeProperties(prototypeXml);
-  // Preserve the paragraph geometry from the template, but never inherit its
-  // placeholder run formatting. Empty template paragraphs frequently carry
-  // red, bold, or fallback-font properties that must not leak into body text.
-  const pPr = prototype.pPr ? removeParagraphRunProperties(prototype.pPr) : generatedPPr;
+  // Explicit editable paragraph rules are authoritative. If the user has not
+  // configured any, preserve the source template's paragraph geometry while
+  // still replacing its placeholder run formatting below.
+  const hasExplicitParagraphRule = Boolean(
+    template.formatRules?.body?.paragraphRequirement
+    && Object.keys(template.formatRules.body.paragraphRequirement).length,
+  ) || Boolean(node?.paragraphRequirement && Object.keys(node.paragraphRequirement).length);
+  const pPr = hasExplicitParagraphRule
+    ? generatedPPr
+    : prototype.pPr ? removeParagraphRunProperties(prototype.pPr) : generatedPPr;
   const rPr = generatedRPr;
   return content.replace(/\r\n?/g, '\n').split('\n').map(line => {
     const value = line.trim();
@@ -330,7 +337,8 @@ export function buildWordStyle(styleId: string, name: string, rule: ReturnType<t
   const bold = font.fontWeight === 'bold' || defaults.bold;
   const italic = font.fontStyle === 'italic';
   const spacing = font.letterSpacing ? `<w:spacing w:val="${pointsToTwips(font.letterSpacing)}"/>` : '';
-  const align = paragraph.alignment ? `<w:jc w:val="${paragraph.alignment}"/>` : '';
+  const alignmentValue = paragraph.alignment === 'justify' ? 'both' : paragraph.alignment;
+  const align = alignmentValue ? `<w:jc w:val="${alignmentValue}"/>` : '';
   const firstLine = paragraph.indentFirstLine ? `<w:ind w:firstLineChars="${Math.round(paragraph.indentFirstLine * 100)}"/>` : '';
 
   return `

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Typography, Tabs, message } from 'antd';
 import {
-  SettingOutlined, RobotOutlined, FileTextOutlined, AppstoreOutlined, BranchesOutlined, BarChartOutlined, ThunderboltOutlined,
+  SettingOutlined, RobotOutlined, FileTextOutlined, AppstoreOutlined, BranchesOutlined, BarChartOutlined, ThunderboltOutlined, KeyOutlined,
 } from '@ant-design/icons';
 import { AIConfig } from '../../../shared/types';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -14,6 +14,7 @@ import SkillSettings from './SkillSettings';
 import CompositionSettings from './CompositionSettings';
 import AIUsageSettings from './AIUsageSettings';
 import AutomationSettings from './AutomationSettings';
+import ShortcutSettings from './ShortcutSettings';
 import { requireIpcObject } from '../../utils/ipcResult';
 
 const { Title } = Typography;
@@ -71,6 +72,11 @@ const AISettings: React.FC = () => {
       key: 'automation',
       label: <span><ThunderboltOutlined /> 自动化</span>,
       children: <AutomationSettings />,
+    },
+    {
+      key: 'shortcuts',
+      label: <span><KeyOutlined /> 快捷键</span>,
+      children: <ShortcutSettings />,
     },
     {
       key: 'usage',

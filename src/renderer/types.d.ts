@@ -56,7 +56,7 @@ interface ElectronAPI {
   openFileWithApp: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   compressToZip: (sourcePath: string) => Promise<{ success: boolean; filePath?: string; fileName?: string; error?: string }>;
   extractZip: (zipPath: string) => Promise<{ success: boolean; targetPath?: string; fileCount?: number; error?: string }>;
-    startDrag: (filePath: string) => { success: boolean; error?: string };
+    startDrag: (filePaths: string[]) => { success: boolean; error?: string; count?: number };
   getPathForFile: (file: File) => string;
   renameFile: (params: { filePath: string; newName: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
   importFiles: (params: { folderPath: string; filePaths: string[] }) => Promise<{ success: boolean; files?: { name: string; path: string }[]; error?: string }>;
@@ -64,6 +64,7 @@ interface ElectronAPI {
   duplicateFiles: (params: { sourcePaths: string[]; targetFolder: string }) => Promise<{ success: boolean; copies?: { name: string; path: string; isDirectory: boolean }[]; error?: string }>;
   moveFiles: (params: { sourcePaths: string[]; targetFolder: string }) => Promise<{ success: boolean; moved?: { name: string; path: string; sourcePath: string; isDirectory: boolean }[]; errors?: string[]; error?: string }>;
   deleteFile: (filePath: string, options?: { permanent?: boolean }) => Promise<{ success: boolean; recycleEntry?: { id: string }; error?: string }>;
+  setFileReadOnly: (params: { filePath: string; readOnly: boolean }) => Promise<{ success: boolean; readOnly?: boolean; error?: string }>;
   createFolder: (params: { folderPath: string; folderName: string }) => Promise<{ success: boolean; folderPath?: string; error?: string }>;
   readFile: (filePath: string) => Promise<string>;
   readDir: (dirPath: string) => Promise<string[]>;
@@ -72,7 +73,7 @@ interface ElectronAPI {
   showSystemNotification?: (params: { title: string; body?: string; silent?: boolean; target?: string; projectId?: string }) => Promise<{ success: boolean; error?: string; shortcut?: any; appUserModelId?: string }>;
   getSystemNotificationStatus?: () => Promise<{ supported: boolean; shortcut?: any; appUserModelId?: string }>;
   onSystemNotificationClick?: (callback: (payload: { target?: string; projectId?: string }) => void) => () => void;
-  onAIActivity?: (callback: (activity: { id: string; status: 'started' | 'completed' | 'failed'; createdAt: string; modelName: string; model: string; requestId?: string; correlationId?: string; workItemId?: string; error?: string }) => void) => () => void;
+  onAIActivity?: (callback: (activity: { id: string; status: 'started' | 'completed' | 'failed'; createdAt: string; modelName: string; model: string; requestId?: string; correlationId?: string; workItemId?: string; silent?: boolean; error?: string }) => void) => () => void;
   parseWordDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; error?: string }>;
   parseDocument: (filePath: string) => Promise<{ success: boolean; content?: string; fileName?: string; pages?: number; convertedFilePath?: string; error?: string }>;
   replaceDocumentText: (params: { filePath: string; originalText: string; replacementText: string }) => Promise<{ success: boolean; replacedCount?: number; backupPath?: string; matchMode?: 'exact' | 'compact'; error?: string }>;
@@ -107,7 +108,7 @@ interface ElectronAPI {
   // AI操作
   loadAIConfig: () => Promise<any>;
   saveAIConfig: (config: any) => Promise<void | { success: false; error?: string }>;
-  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => Promise<string>;
+  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any; usageRequestId?: string; usageTitle?: string; usageScene?: string; silentActivity?: boolean }) => Promise<string>;
   callAIParallelDetails: (params: { prompt: string; modelId?: string; modelIds?: string[]; config?: any; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => Promise<{ mode: 'single' | 'parallel'; synthesis: string; synthesisModelId?: string; synthesisModelName?: string; variants: Array<{ modelId: string; modelName: string; ok: boolean; output: string; error?: string }> }>;
   getAIUsageStatistics: () => Promise<import('../shared/types').AIUsageStatistics>;
   getAIUsageForRequest: (requestId: string) => Promise<import('../shared/types').AITokenUsage>;
@@ -162,12 +163,26 @@ interface ElectronAPI {
   acceptFriendRequest?: (requestId: string) => Promise<{ success: boolean; friends?: CollaborationPeerInfo[]; error?: string }>;
   rejectFriendRequest?: (requestId: string) => Promise<{ success: boolean; error?: string }>;
   onFriendRequestReceived?: (callback: (payload: CollaborationFriendRequest) => void) => () => void;
-  loadMessageCenterState?: () => Promise<{ success: boolean; state?: { dismissedIds?: string[]; replies?: Array<{ id: string; messageId: string; content: string; createdAt: string }> } | null; error?: string }>;
-  saveMessageCenterState?: (state: { dismissedIds: string[]; replies: Array<{ id: string; messageId: string; content: string; createdAt: string }> }) => Promise<{ success: boolean; error?: string }>;
+  loadMessageCenterState?: () => Promise<{ success: boolean; state?: {
+    dismissedIds?: string[];
+    replies?: Array<{ id: string; messageId: string; content: string; createdAt: string }>;
+    readIds?: string[];
+    hiddenChatIds?: string[];
+    notes?: Array<{ id: string; title: string; content: string; createdAt: string; updatedAt: string; dueAt?: string; completed?: boolean; sourceMessageId?: string; notified?: Array<'due-soon' | 'overdue'> }>;
+  } | null; error?: string }>;
+  saveMessageCenterState?: (state: {
+    dismissedIds: string[];
+    replies: Array<{ id: string; messageId: string; content: string; createdAt: string }>;
+    readIds?: string[];
+    hiddenChatIds?: string[];
+    notes?: Array<{ id: string; title: string; content: string; createdAt: string; updatedAt: string; dueAt?: string; completed?: boolean; sourceMessageId?: string; notified?: Array<'due-soon' | 'overdue'> }>;
+  }) => Promise<{ success: boolean; error?: string }>;
 
   // 设置操作
-  loadSettings: () => Promise<{ workspacePath: string; workspaceCapacity: number; recycleBinRetentionDays?: number; userProfile?: { nickname: string; email: string; avatar?: string }; customStages?: any[]; compositionWeights?: import('../shared/types').CompositionWeightConfig; compositionWeightsByScene?: Partial<Record<import('../shared/types').PromptScene, import('../shared/types').CompositionWeightConfig>>; enableSystemNotifications?: boolean; autoProjectDescriptionEnabled?: boolean; autoStageMemoryEnabled?: boolean; holidayDataSource?: 'auto' | 'local' | 'online'; holidayApiUrl?: string; calendarDayRecords?: import('../shared/types').CalendarDayRecord[]; calendarItineraries?: import('../shared/types').CalendarItinerary[] } | null>;
+  loadSettings: () => Promise<{ workspacePath: string; workspaceCapacity: number; recycleBinRetentionDays?: number; userProfile?: { nickname: string; email: string; avatar?: string }; customStages?: any[]; compositionWeights?: import('../shared/types').CompositionWeightConfig; compositionWeightsByScene?: Partial<Record<import('../shared/types').PromptScene, import('../shared/types').CompositionWeightConfig>>; enableSystemNotifications?: boolean; autoLaunchEnabled?: boolean; closeWindowBehavior?: 'ask' | 'background' | 'quit'; autoProjectDescriptionEnabled?: boolean; autoStageMemoryEnabled?: boolean; holidayDataSource?: 'auto' | 'local' | 'online'; holidayApiUrl?: string; calendarDayRecords?: import('../shared/types').CalendarDayRecord[]; calendarItineraries?: import('../shared/types').CalendarItinerary[] } | null>;
   saveSettings: (config: any) => Promise<void | { success: false; error?: string }>;
+  getAutoLaunch: () => Promise<{ success: boolean; supported: boolean; enabled: boolean; error?: string }>;
+  setAutoLaunch: (enabled: boolean) => Promise<{ success: boolean; supported: boolean; enabled: boolean; error?: string }>;
   createProjectFolder: (params: { projectName: string; workspacePath: string }) => Promise<{ success: boolean; folderPath?: string; error?: string }>;
   getWorkspaceSize: (workspacePath: string) => Promise<{ success: boolean; bytes: number }>;
   listWorkspaceFolders: (dirPath: string) => Promise<{ success: boolean; folders: string[]; error?: string }>;
@@ -208,7 +223,7 @@ interface ElectronAPI {
 
   // 文件创建
   createBlankFile: (params: { folderPath: string; fileName: string; fileType: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
-  getFolderContents: (folderPath: string) => Promise<{ success: boolean; items: { name: string; isDirectory: boolean; ext: string; size: number; modifiedAt: string; path: string }[]; error?: string }>;
+  getFolderContents: (folderPath: string) => Promise<{ success: boolean; items: { name: string; isDirectory: boolean; ext: string; size: number; modifiedAt: string; path: string; readOnly?: boolean }[]; error?: string }>;
   getTreeStats: (folderPath: string) => Promise<{
     success: boolean;
     stats?: {

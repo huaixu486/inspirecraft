@@ -13,6 +13,24 @@ function fillTemplate(template: string, context: Record<string, string>): string
   return template.replace(/\{\{(\w+)\}\}/g, (_, key) => context[key] ?? '');
 }
 
+function normalizeStageName(value?: string): string {
+  return String(value || '').trim().toLocaleLowerCase();
+}
+
+function selectPromptTemplate(
+  templates: PromptTemplate[],
+  scene: PromptScene,
+  context: Record<string, string>,
+): PromptTemplate | undefined {
+  const sceneTemplates = templates.filter(template => template.scene === scene);
+  const stageName = normalizeStageName(context.stage || context.stageName || context.currentStage);
+  if (stageName) {
+    const stageTemplate = sceneTemplates.find(template => normalizeStageName(template.stageName) === stageName);
+    if (stageTemplate) return stageTemplate;
+  }
+  return sceneTemplates.find(template => !template.stageId && !template.stageName) || sceneTemplates[0];
+}
+
 function lineList(items: string[]): string {
   return items.map((item, index) => `${index + 1}. ${item}`).join('\n');
 }
@@ -66,8 +84,7 @@ export function composePrompt(
 ): string {
   const store = usePromptStore.getState();
   const templates = overrides || store.templates;
-  const sceneTemplates = templates.filter(t => t.scene === scene);
-  const chosen = sceneTemplates.find(t => !t.isBuiltin) || sceneTemplates.find(t => t.isBuiltin);
+  const chosen = selectPromptTemplate(templates, scene, context);
 
   if (!chosen) {
     console.warn(`[promptComposer] No template found for scene: ${scene}`);
@@ -76,22 +93,23 @@ export function composePrompt(
 
   const weights = getActiveCompositionWeights(undefined, scene);
   const basePrompt = fillTemplate(getEffectivePromptContent(chosen), context);
+  const configurationHeader = `[提示词配置]\n场景：${scene}\n阶段：${chosen.stageName || context.stage || context.stageName || '通用'}\n配置：${chosen.name}`;
   const sourcePrioritySection = `\n\n[本场景来源优先级]\n${getCompositionRules(scene, weights).map((rule, index) => `${index + 1}. ${rule}`).join('\n')}`;
   const skillStore = useSkillStore.getState();
   const activeSkills = skillStore.getEnabledByScene(scene);
 
   if (activeSkills.length === 0) {
-    return basePrompt + sourcePrioritySection;
+    return configurationHeader + '\n\n' + basePrompt + sourcePrioritySection;
   }
 
   const skillSections = buildSkillSections(activeSkills, scene, weights);
   const rulesSection = buildRulesSection(activeSkills);
 
   if (skillSections.length === 0) {
-    return basePrompt + sourcePrioritySection + rulesSection;
+    return configurationHeader + '\n\n' + basePrompt + sourcePrioritySection + rulesSection;
   }
 
-  return `${basePrompt}
+  return `${configurationHeader}\n\n${basePrompt}
 
 [Skill \u589e\u5f3a\u5c42 - \u4ee5\u4e0b\u4e3a\u9644\u52a0\u6307\u5bfc\uff0c\u4e0d\u5f97\u8986\u76d6\u4e0a\u8ff0\u6a21\u677f\u8981\u6c42]
 ${skillSections.join('\n\n')}${rulesSection}${sourcePrioritySection}`;
@@ -199,16 +217,25 @@ export const WEIGHT_CONSTANTS: CompositionWeightConfig = {
 };
 
 export const SCENE_WEIGHT_KEYS: Record<PromptScene, Array<keyof CompositionWeightConfig>> = {
-  report: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_REPORT', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
-  review: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_REVIEW', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
-  rewrite: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_WRITING', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
-  diff: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_REVIEW', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
-  summary: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'SKILL_GLOBAL', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
-  memory: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
-  description: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
-  taskExecute: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_WRITING', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
-  sectionAnalysis: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'SKILL_GLOBAL', 'SKILL_REVIEW', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
-  templateExtract: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'SKILL_GLOBAL', 'SKILL_MAX_CAP', 'SYSTEM_DEFAULT'],
+  draft: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_WRITING', 'SKILL_MAX_CAP'],
+  longFormSection: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_WRITING', 'SKILL_MAX_CAP'],
+  sectionExpansion: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_WRITING', 'SKILL_MAX_CAP'],
+  precisionRewrite: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_WRITING', 'SKILL_MAX_CAP'],
+  report: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_REPORT', 'SKILL_MAX_CAP'],
+  review: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_REVIEW', 'SKILL_MAX_CAP'],
+  rewrite: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_WRITING', 'SKILL_MAX_CAP'],
+  diff: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_REVIEW', 'SKILL_MAX_CAP'],
+  summary: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'SKILL_GLOBAL', 'SKILL_MAX_CAP'],
+  memory: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_MAX_CAP'],
+  description: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_MAX_CAP'],
+  taskExecute: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_WRITING', 'SKILL_MAX_CAP'],
+  sectionAnalysis: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'SKILL_GLOBAL', 'SKILL_REVIEW', 'SKILL_MAX_CAP'],
+  workflowPlanning: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'STAGE_MEMORY', 'REFERENCE_MATERIAL', 'SKILL_GLOBAL', 'SKILL_REPORT', 'SKILL_MAX_CAP'],
+  templateExtract: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'SKILL_GLOBAL', 'SKILL_MAX_CAP'],
+  templateExampleExtract: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'SKILL_GLOBAL', 'SKILL_MAX_CAP'],
+  templateDirectExtract: ['CURRENT_DOCUMENT', 'TEMPLATE_REQUIREMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'SKILL_GLOBAL', 'SKILL_MAX_CAP'],
+  templateExampleAnalysis: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'SKILL_GLOBAL', 'SKILL_MAX_CAP'],
+  templateExampleCompare: ['CURRENT_DOCUMENT', 'USER_EXPLICIT_INPUT', 'USER_CUSTOM_PROMPT', 'SKILL_GLOBAL', 'SKILL_MAX_CAP'],
 };
 
 export function getActiveCompositionWeights(override?: CompositionWeightConfig | null, scene?: PromptScene): CompositionWeightConfig {
@@ -269,28 +296,16 @@ export function getCompositionSources(scene: PromptScene, overrideWeights?: Comp
       isUsed: true,
     },
   ];
-  const builtinTemplate = promptStore.templates.find(t => t.scene === scene && t.isBuiltin);
-  const userTemplate = promptStore.templates.find(t => t.scene === scene && !t.isBuiltin);
+  const editableTemplate = promptStore.templates.find(t => t.scene === scene);
 
-  if (userTemplate && supports('USER_CUSTOM_PROMPT')) {
+  if (editableTemplate && supports('USER_CUSTOM_PROMPT')) {
     sources.push({
       type: 'user',
-      label: '\u7528\u6237\u81ea\u5b9a\u4e49\u6a21\u677f',
+      label: '可编辑提示词',
       weight: weights.USER_CUSTOM_PROMPT,
-      description: '\u7528\u6237\u5728\u8bbe\u7f6e\u9875\u4fee\u6539\u540e\u7684\u63d0\u793a\u8bcd',
-      content: getEffectivePromptContent(userTemplate).slice(0, 200),
+      description: '当前场景在提示词设置中公开并可修改的完整提示词',
+      content: getEffectivePromptContent(editableTemplate).slice(0, 200),
       isUsed: true,
-    });
-  }
-
-  if (builtinTemplate && supports('SYSTEM_DEFAULT')) {
-    sources.push({
-      type: 'system',
-      label: '\u7cfb\u7edf\u9ed8\u8ba4\u6a21\u677f',
-      weight: weights.SYSTEM_DEFAULT,
-      description: userTemplate ? '\u5df2\u88ab\u7528\u6237\u81ea\u5b9a\u4e49\u6a21\u677f\u8986\u76d6' : '\u7cfb\u7edf\u5185\u7f6e\u7684\u57fa\u7840\u63d0\u793a\u8bcd',
-      content: getEffectivePromptContent(builtinTemplate).slice(0, 200),
-      isUsed: !userTemplate,
     });
   }
 

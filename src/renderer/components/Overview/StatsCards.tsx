@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { Card, Row, Col, Typography, Modal, Tag, Empty, Progress } from 'antd';
 import {
   FolderOutlined,
@@ -15,30 +15,49 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { checkDeadlineStatus, type TimelineStageSegment } from '../../utils/timelineStages';
 import { useSegmentsByProject } from './SegmentsContext';
 
-/** 数字递增动画 Hook */
-function useCountUp(target: number, duration = 600): number {
-  const [display, setDisplay] = useState(0);
-  const rafRef = useRef<number>(0);
+/** CSS-driven odometer. Each digit rolls independently without per-frame React updates. */
+const RollingNumber: React.FC<{ value: number }> = ({ value }) => {
+  const normalizedValue = Math.max(0, Math.round(value));
+  const digits = String(normalizedValue).split('');
+  const [rolling, setRolling] = useState(false);
 
   useEffect(() => {
-    if (target === 0) { setDisplay(0); return; }
-    const start = performance.now();
-    const animate = (now: number) => {
-      const elapsed = now - start;
-      const progress = Math.min(elapsed / duration, 1);
-      // ease-out-cubic
-      const eased = 1 - Math.pow(1 - progress, 3);
-      setDisplay(Math.round(eased * target));
-      if (progress < 1) {
-        rafRef.current = requestAnimationFrame(animate);
-      }
+    setRolling(false);
+    let firstFrame = 0;
+    let secondFrame = 0;
+    firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => setRolling(true));
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
     };
-    rafRef.current = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [target, duration]);
+  }, [normalizedValue]);
 
-  return display;
-}
+  return (
+    <span className={`rolling-number${rolling ? ' is-rolling' : ''}`} aria-label={String(normalizedValue)}>
+      {digits.map((digitText, index) => {
+        const digit = Number(digitText);
+        const targetStep = normalizedValue === 0 ? 0 : 20 + digit;
+        const reel = Array.from({ length: targetStep + 1 }, (_, step) => step % 10);
+        const delay = (digits.length - index - 1) * 35;
+        return (
+          <span className="rolling-number-digit" aria-hidden="true" key={`${index}-${digits.length}`}>
+            <span
+              className="rolling-number-reel"
+              style={{
+                '--rolling-offset': `${-targetStep}em`,
+                '--rolling-delay': `${delay}ms`,
+              } as React.CSSProperties}
+            >
+              {reel.map((reelDigit, step) => <span key={step}>{reelDigit}</span>)}
+            </span>
+          </span>
+        );
+      })}
+    </span>
+  );
+};
 
 const { Text } = Typography;
 
@@ -167,7 +186,7 @@ const StatsCards: React.FC<StatsCardsProps> = ({ onSelectProject }) => {
       {stats.map((stat, index) => (
         <Col xs={12} sm={12} md={6} key={index}>
           <Card
-            className={`dashboard-card stat-card stat-card-action animate-slide-up stagger-${index + 1}`}
+            className={`dashboard-card stat-card stat-card-${stat.key} stat-card-action animate-slide-up stagger-${index + 1}`}
             variant="borderless"
             role="button"
             tabIndex={0}
@@ -254,7 +273,7 @@ const StatsCards: React.FC<StatsCardsProps> = ({ onSelectProject }) => {
   );
 };
 
-/** 单个统计卡片内容（带数字递增动画） */
+/** 单个统计卡片内容（机械滚轮数字动画） */
 interface StatCardData {
   key: StatKind;
   title: string;
@@ -265,28 +284,18 @@ interface StatCardData {
 }
 
 const StatCardContent: React.FC<{ stat: StatCardData }> = ({ stat }) => {
-  const animatedValue = useCountUp(stat.value);
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <Text type="secondary" style={{ fontSize: 12, fontWeight: 500 }}>{stat.title}</Text>
-        <div style={{
-          fontSize: 28, fontWeight: 700, marginTop: 9, lineHeight: 1, color: '#0f172a',
-          transition: 'color 0.2s ease',
-        }}>
-          {animatedValue}
+    <div className="stat-card-content">
+      <div className="stat-card-copy">
+        <Text type="secondary" className="stat-card-label">{stat.title}</Text>
+        <div className="stat-card-value">
+          <RollingNumber value={stat.value} />
         </div>
-        <Text type="secondary" style={{ fontSize: 11, marginTop: 10, display: 'block' }} ellipsis>
+        <Text type="secondary" className="stat-card-subtitle" ellipsis>
           {stat.subtitle}
         </Text>
       </div>
-      <div style={{
-        width: 42, height: 42, borderRadius: 12,
-        background: `${stat.iconBg}15`,
-        display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-        boxShadow: `0 10px 24px ${stat.iconBg}18`,
-        transition: 'transform 0.2s ease, box-shadow 0.2s ease',
-      }}>
+      <div className="stat-card-icon" style={{ '--stat-color': stat.iconBg } as React.CSSProperties}>
         {React.cloneElement(stat.icon as React.ReactElement, { style: { fontSize: 20, color: stat.iconBg } })}
       </div>
     </div>

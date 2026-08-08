@@ -118,6 +118,8 @@ export interface AIModelConfig {
   model: string;
   endpoint?: string;
   enabled?: boolean;
+  /** Maximum tokens requested from this model for one response. */
+  maxOutputTokens?: number;
 }
 
 export interface AIConfig {
@@ -403,6 +405,8 @@ export interface AppSettings {
   recycleBinRetentionDays?: number; // 回收站自动清理天数，1-365
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
   enableSystemNotifications?: boolean; // Enable Windows system notifications
+  autoLaunchEnabled?: boolean; // Launch ProjectHub when the user signs in to Windows
+  closeWindowBehavior?: 'ask' | 'background' | 'quit'; // Close button behavior
   autoProjectDescriptionEnabled?: boolean; // Automatically generate an empty project overview after file activity settles
   autoStageMemoryEnabled?: boolean; // Learn reusable stage-writing memory after completion
   holidayDataSource?: HolidayDataSource; // Calendar holiday source
@@ -410,11 +414,22 @@ export interface AppSettings {
   calendarDayRecords?: CalendarDayRecord[];
   calendarItineraries?: CalendarItinerary[];
   customStages?: StageConfig[]; // 自定义阶段配置
+  keyboardShortcuts?: AppKeyboardShortcuts;
+}
+
+export type AppShortcutAction = 'globalSearch';
+
+export interface AppKeyboardShortcuts {
+  globalSearch: string;
 }
 
 // ─── 提示词模板系统 ─────────────────────────────────────
 
 export type PromptScene =
+  | 'draft'
+  | 'longFormSection'
+  | 'sectionExpansion'
+  | 'precisionRewrite'
   | 'report'
   | 'review'
   | 'rewrite'
@@ -424,7 +439,12 @@ export type PromptScene =
   | 'description'
   | 'taskExecute'
   | 'sectionAnalysis'
-  | 'templateExtract';
+  | 'workflowPlanning'
+  | 'templateExtract'
+  | 'templateExampleExtract'
+  | 'templateDirectExtract'
+  | 'templateExampleAnalysis'
+  | 'templateExampleCompare';
 
 export interface PromptRule {
   id: string;
@@ -452,6 +472,9 @@ export interface StructuredPrompt {
 export interface PromptTemplate {
   id: string;
   scene: PromptScene;
+  /** 未设置时为通用版本；设置后只在对应项目阶段生效。 */
+  stageId?: string;
+  stageName?: string;
   name: string;
   content: string;
   isBuiltin: boolean;

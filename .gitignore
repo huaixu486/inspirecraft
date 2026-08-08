@@ -1,5 +1,7 @@
 node_modules/
 dist/
+release/
+output/
 .DS_Store
 *.log
 .docx-qa/

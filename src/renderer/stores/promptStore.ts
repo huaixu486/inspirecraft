@@ -8,7 +8,7 @@ interface PromptState {
   loadTemplates: () => Promise<void>;
   saveTemplate: (template: PromptTemplate) => Promise<void>;
   resetTemplate: (id: string) => Promise<void>;
-  getByScene: (scene: PromptScene) => PromptTemplate | undefined;
+  getByScene: (scene: PromptScene, stageName?: string) => PromptTemplate | undefined;
   getUserByScene: (scene: PromptScene) => PromptTemplate | undefined;
   getAllByScene: (scene: PromptScene) => PromptTemplate[];
 }
@@ -56,11 +56,16 @@ export const usePromptStore = create<PromptState>((set, get) => ({
     }
   },
 
-  /** 获取指定场景的首选模板（用户自定义 > 内置） */
-  getByScene: (scene: PromptScene): PromptTemplate | undefined => {
+  /** 获取指定场景的可编辑提示词 */
+  getByScene: (scene: PromptScene, stageName?: string): PromptTemplate | undefined => {
     const { templates } = get();
     const sceneTemplates = templates.filter(t => t.scene === scene);
-    return sceneTemplates.find(t => !t.isBuiltin) || sceneTemplates.find(t => t.isBuiltin);
+    const normalizedStage = String(stageName || '').trim().toLocaleLowerCase();
+    return (normalizedStage
+      ? sceneTemplates.find(template => String(template.stageName || '').trim().toLocaleLowerCase() === normalizedStage)
+      : undefined)
+      || sceneTemplates.find(template => !template.stageId && !template.stageName)
+      || sceneTemplates[0];
   },
 
   /** 获取指定场景的用户自定义模板 */

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Notification } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Notification, Menu, Tray } from 'electron';
 import { net } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -7,6 +7,7 @@ import * as zlib from 'zlib';
 import * as http from 'http';
 import * as dgram from 'dgram';
 import * as os from 'os';
+import { createHash } from 'crypto';
 import { pathToFileURL } from 'url';
 import { Project, DocumentVersion, WritingTemplate, ReviewResult, ReviewIssue, ReviewConfig, AIConfig, AIModelConfig, TaskItem, AppSettings, ProjectDocument, SectionAnalysis, TemplateNode, StageMemoryEntry, ReferenceMaterial, PromptScene, PromptTemplate, SkillPackage, StructuredPrompt, PromptRule, OutputField } from './types';
 import {
@@ -58,11 +59,73 @@ import pdfParse from 'pdf-parse';
 const JSZip = require('jszip');
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let closeChoiceWindow: BrowserWindow | null = null;
+let isQuitting = false;
+let isBackgroundMode = false;
+let closePromptOpen = false;
 const DEV_SERVER_URL = 'http://127.0.0.1:5173';
 const APP_USER_MODEL_ID = 'com.projecthub.desktop';
 const APP_DISPLAY_NAME = 'ProjectHub';
 let devReloadTimer: NodeJS.Timeout | null = null;
 let didEnsureWindowsNotificationShortcut = false;
+let appIconImage: ReturnType<typeof nativeImage.createFromPath> | null = null;
+
+const getAppIconPath = () => app.isPackaged
+  ? path.join(process.resourcesPath, 'icon.png')
+  : path.join(app.getAppPath(), 'resources', 'icon.png');
+
+const getAppIconImage = () => {
+  if (!appIconImage || appIconImage.isEmpty()) {
+    appIconImage = nativeImage.createFromPath(getAppIconPath());
+  }
+  return appIconImage;
+};
+
+const getAutoLaunchTarget = () => ({
+  path: process.execPath,
+  args: app.isPackaged ? [] : [path.resolve(app.getAppPath())],
+});
+
+const getAutoLaunchStatus = () => {
+  if (process.platform !== 'win32') {
+    return { success: true, supported: false, enabled: false };
+  }
+  try {
+    const target = getAutoLaunchTarget();
+    const status = app.getLoginItemSettings(target);
+    return {
+      success: true,
+      supported: true,
+      enabled: status.openAtLogin && status.executableWillLaunchAtLogin,
+    };
+  } catch (error: any) {
+    return { success: false, supported: true, enabled: false, error: error?.message || String(error) };
+  }
+};
+
+const setAutoLaunch = (enabled: boolean) => {
+  if (process.platform !== 'win32') {
+    return { success: false, supported: false, enabled: false, error: '当前系统不支持开机自启动设置' };
+  }
+  try {
+    const target = getAutoLaunchTarget();
+    app.setLoginItemSettings({
+      ...target,
+      name: APP_DISPLAY_NAME,
+      openAtLogin: enabled,
+      enabled,
+    });
+    const status = getAutoLaunchStatus();
+    if (!status.success) return status;
+    if (status.enabled !== enabled) {
+      return { ...status, success: false, error: 'Windows 未能更新启动项，请检查系统启动应用权限' };
+    }
+    return status;
+  } catch (error: any) {
+    return { success: false, supported: true, enabled: !enabled, error: error?.message || String(error) };
+  }
+};
 
 let collaborationServer: http.Server | null = null;
 let collaborationPort = 0;
@@ -70,6 +133,8 @@ let collaborationDiscoverySocket: dgram.Socket | null = null;
 let collaborationDiscoveryTimer: NodeJS.Timeout | null = null;
 const COLLABORATION_DISCOVERY_PORT = 39219;
 const COLLABORATION_PEER_TTL_MS = 12000;
+const COLLABORATION_DISCOVERY_FOREGROUND_INTERVAL_MS = 3000;
+const COLLABORATION_DISCOVERY_BACKGROUND_INTERVAL_MS = 9000;
 const discoveredCollaborationPeers = new Map<string, CollaborationPeerRecord>();
 const incomingFolderTransfers = new Map<string, {
   rootPath: string;
@@ -418,10 +483,21 @@ function getCollaborationFriends() {
 }
 
 function emitCollaborationPeersChanged() {
+  if (isBackgroundMode) return;
   mainWindow?.webContents.send('collaboration:peersChanged', {
     peers: getCollaborationPeers(),
     friends: getCollaborationFriends(),
   });
+}
+
+function scheduleCollaborationDiscovery() {
+  if (collaborationDiscoveryTimer) clearInterval(collaborationDiscoveryTimer);
+  collaborationDiscoveryTimer = null;
+  if (!collaborationDiscoverySocket || !collaborationPort) return;
+  const interval = isBackgroundMode
+    ? COLLABORATION_DISCOVERY_BACKGROUND_INTERVAL_MS
+    : COLLABORATION_DISCOVERY_FOREGROUND_INTERVAL_MS;
+  collaborationDiscoveryTimer = setInterval(sendCollaborationDiscoveryBeat, interval);
 }
 
 function sendCollaborationDiscoveryBeat() {
@@ -485,7 +561,7 @@ function startCollaborationDiscovery() {
     socket.bind(COLLABORATION_DISCOVERY_PORT, () => {
       try { socket.setBroadcast(true); } catch {}
       sendCollaborationDiscoveryBeat();
-      collaborationDiscoveryTimer = setInterval(sendCollaborationDiscoveryBeat, 3000);
+      scheduleCollaborationDiscovery();
     });
     collaborationDiscoverySocket = socket;
   } catch {}
@@ -1092,6 +1168,7 @@ function ensureWindowsNotificationShortcut() {
 
 // 文件夹监听器
 const folderWatchers: Map<string, fs.FSWatcher> = new Map();
+const folderWatcherConfigs: Map<string, { projectId: string; folderPath: string }> = new Map();
 // Prevent delayed background saves (folder scans, metadata refreshes) from
 // accidentally recreating a project that has just been moved to the recycle bin.
 const deletedProjectIds = new Set<string>();
@@ -1244,6 +1321,11 @@ onAIActivity((activity) => {
     mainWindow.webContents.send('ai:activity', activity);
   }
 
+  // A long-form business task can make several model calls. Those calls still
+  // report token usage, but only the renderer's outer task may announce final
+  // completion after all sections and validation have finished.
+  if (activity.silent) return;
+
   const settings = loadSettingsFromDisk();
   if (settings.enableSystemNotifications === false || !Notification.isSupported()) return;
   if (!didEnsureWindowsNotificationShortcut) ensureWindowsNotificationShortcut();
@@ -1259,14 +1341,9 @@ onAIActivity((activity) => {
       ? '任务处理完成，结果已返回到当前工作区。'
       : `处理未完成：${activity.error || '请检查模型配置或网络后重试。'}`;
   try {
-    const notification = new Notification({ title, body });
+    const notification = new Notification({ title, body, icon: getAppIconImage() });
     notification.on('click', () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        if (mainWindow.isMinimized()) mainWindow.restore();
-        mainWindow.show();
-        mainWindow.focus();
-      }
-      app.focus({ steal: true });
+      showMainWindow();
     });
     notification.show();
   } catch (error) {
@@ -1358,18 +1435,132 @@ const fileSystemService = createFileSystemService(recycleBinService, {
 // 保存设置
 function saveSettingsToDisk(settings: AppSettings) {
   ensureDataDir();
-  const previousWorkspacePath = String(loadSettingsFromDisk().workspacePath || '').trim();
+  const previousSettings = loadSettingsFromDisk();
+  const previousWorkspacePath = String(previousSettings.workspacePath || '').trim();
   const nextWorkspacePath = String(settings.workspacePath || '').trim();
   if (previousWorkspacePath && nextWorkspacePath && path.resolve(previousWorkspacePath) !== path.resolve(nextWorkspacePath)) {
     copyCollaborationWorkspaceData(previousWorkspacePath, nextWorkspacePath);
   }
-  writeVersionedJsonFile(settingsFile, settings);
+  writeVersionedJsonFile(settingsFile, {
+    ...settings,
+    closeWindowBehavior: settings.closeWindowBehavior ?? previousSettings.closeWindowBehavior ?? 'ask',
+  });
 }
 
 // ─── 提示词模板系统 ─────────────────────────────────────
 
-/** 内置默认提示词 */
-const BUILTIN_PROMPTS: Record<PromptScene, { name: string; content: string }> = {
+/** 首次安装及“恢复默认”使用的可编辑提示词初始值。 */
+const DEFAULT_PROMPTS: Record<PromptScene, { name: string; content: string }> = {
+  draft: {
+    name: '完整第一稿',
+    content: `你是中文项目文档第一稿写作助手。请直接生成一份可供人工继续修改的完整第一稿，不要输出写作建议、分析过程或填空式提纲。
+
+【本次写作要求】
+{{instruction}}
+
+【文档/章节名称】
+{{sectionTitle}}
+
+【模板结构与硬性要求】
+{{templateRequirements}}
+
+【模板范文与参考写法】
+{{templateExamples}}
+
+【当前项目和参考资料】
+{{reference}}
+
+【阶段记忆】
+{{stageMemory}}
+
+【当前正文】
+{{currentContent}}
+
+规则：
+1. 优先遵循用户本次要求、当前项目事实、模板结构及硬性要求。
+2. 即使资料有限，也要形成连贯、专业、可编辑的正文，不要用大量占位符代替写作。
+3. 模板范文仅用于学习结构、术语密度和表达方式，不得照搬其他项目事实。
+4. 不得虚构精确数值、日期、型号、单位名称、已发生事件或未经资料支持的结论。
+5. 确实无法绕开的关键事实可少量标记“待确认”，不要输出“【待补充：……】”式变量说明。
+6. 保留必要章节标题，只输出文稿正文，不要代码块、解释或致歉。`,
+  },
+  longFormSection: {
+    name: '长篇分章写作',
+    content: `你正在撰写长篇中文项目文档《{{templateName}}》第 {{sectionIndex}}/{{sectionCount}} 节：{{sectionTitle}}。
+
+【用户要求】
+{{instruction}}
+
+【当前项目】
+{{projectContext}}
+
+【全文结构】
+{{outline}}
+
+【本节要求】
+{{sectionGuidance}}
+本节正文目标篇幅：{{targetMin}}-{{targetMax}} 个中文字符左右。必须充分展开，不能用提纲、摘要或几段泛泛表述代替正文。
+
+【阶段记忆】
+{{stageMemory}}
+
+【与本节相关的资料摘录】
+{{references}}
+
+【模板约束】
+{{templateRequirements}}
+{{templateExamples}}
+
+规则：
+1. 只输出本节正文，不重复章节标题，不输出分析过程、写作建议、字数说明、致歉或代码块。
+2. 内容须紧扣当前项目及资料；模板范文只用于结构、术语密度和表达方式。
+3. 资料不足时仍要形成连贯正文，但不得虚构试验结果、精确数据、型号、日期或结论。
+4. 用户允许先补数据时，只能明确标记“示例数据（待替换）”或“待试验补充”。
+5. 与其他章节保持边界，避免重复；可使用必要的二级、三级标题。`,
+  },
+  sectionExpansion: {
+    name: '章节篇幅扩写',
+    content: `请扩写“{{sectionTitle}}”章节。现有初稿约 {{currentLength}} 个字符，目标至少 {{targetMin}} 个字符。
+
+【用户原始要求】
+{{instruction}}
+
+【本节要求与模板约束】
+{{sectionGuidance}}
+{{templateRequirements}}
+
+【相关资料】
+{{references}}
+
+【现有正文】
+{{draft}}
+
+请保留现有有效信息，在不虚构事实的前提下补充应用场景、技术机理、实施方法、关键环节、风险和验证方式等实质内容。只输出扩写后的完整本节正文，不输出章节标题、解释、字数说明或代码块。`,
+  },
+  precisionRewrite: {
+    name: '选区精确修订',
+    content: `你是中文文档精确修订助手。只能修改用户选中的原文，不得增删选区外内容。
+
+【修订要求】
+{{instruction}}
+
+【文档/章节】
+{{sectionTitle}}
+
+【模板要求】
+{{templateRequirements}}
+
+【项目和参考资料】
+{{reference}}
+
+【阶段记忆】
+{{stageMemory}}
+
+【选中的原文】
+{{currentContent}}
+
+直接返回修改后的选区文本，不要使用 Markdown，不要解释修改过程，不要输出修改说明。`,
+  },
   report: {
     name: '报告生成',
     content: `你是项目阶段文档的写作框架助手。请基于当前文档、关联模板、模板章节要求和范文写法，生成"报告详情页"可展示的 AI 写作框架报告。
@@ -1523,10 +1714,145 @@ Final content: {{content}}`,
 { "overallStyle": ..., "formatFeatures": ..., "sectionGuidance": [...], "openingPatterns": ..., "closingPatterns": ..., "generalTips": ... }
 范文内容：{{content}}`,
   },
+  workflowPlanning: {
+    name: '阶段写作工作流规划',
+    content: `你是阶段文档写作框架与工作流规划助手。只规划写作与资料补充，不做质量评分或审查结论。
+
+项目：{{projectName}}
+阶段：{{stage}}
+阶段版本：{{stageVersion}}
+当前文档：{{docName}}
+创建时间：{{createdAt}}
+完成度：{{progress}}%
+
+模板：{{templateName}}
+模板分类：{{templateCategory}}
+模板说明：{{templateDescription}}
+模板类型：{{templateMode}}
+模板硬性要求与填写说明：
+{{templateRequirements}}
+模板章节结构：
+{{templateNodes}}
+模板格式规则：
+{{formatRules}}
+范文或参考写法（只学习结构与表达，不照搬事实）：
+{{templateExample}}
+
+当前文档章节状态：
+{{sectionStatus}}
+审查页已有结果（仅作背景，不重复审查）：
+{{reviewIssues}}
+阶段记忆：
+{{stageMemory}}
+项目参考资料：
+{{reference}}
+当前正文：
+{{content}}
+
+请严格返回可被 JSON.parse 解析的 JSON 对象，不要 Markdown 或解释。sectionAdvice 必须首先完整输出，每条 suggestion 都应能被用户独立勾选并转成工作流步骤。需要补资料、确认事实或审核时明确写“人工”；可由 AI 完成时写清具体写作产出。标题优先使用当前文档的一级标题，不得用范文标题替换。
+{
+  "reportTitle": "标题",
+  "reportSummary": "300-600字的写作框架与方向摘要",
+  "sectionAdvice": [{"title":"当前文档章节标题","problems":["具体问题"],"suggestions":["可独立执行的写作步骤"]}],
+  "templateFit": ["模板约束"],
+  "writingStyleNotes": ["写法特征"],
+  "writingFramework": ["章节框架"],
+  "writingDirection": ["写作方向"],
+  "materialPlan": ["人工补充材料"],
+  "draftPlan": ["AI 写作任务"]
+}`,
+  },
+  templateExampleExtract: {
+    name: '范文模板识别',
+    content: `你是范文写作分析助手。请从 {{fileCount}} 篇范文中提炼可迁移的写作方向、章节组织、字数规律和格式特征，不得把个性化项目名称、地点、金额、时间或事实当成模板要求。
+{{multiFileNote}}
+
+只返回可被 JSON.parse 解析的标准 JSON，不要 Markdown、思考过程或解释：
+{
+  "nodes":[{"title":"写作方向名称","level":1,"description":"写作方法、技巧与内容要点","requirementText":"建议字数","exampleText":"","isRequired":true}],
+  "requirementText":"",
+  "exampleText":"范文的通用写法总结",
+  "formatRules":{},
+  "evidence":["识别依据"]
+}
+level 只允许 1-4。多篇范文应综合为 5-7 个一级写作方向，不做标题交集或硬合并；目录、页码、页眉页脚、乱码和正文句子不得作为标题。
+
+范文内容：
+{{content}}`,
+  },
+  templateDirectExtract: {
+    name: '直接套用模板识别',
+    content: `你是文档模板结构与规则识别助手。请从模板原文中区分：标题层级、硬性填写要求、范文示例以及标题/正文/图表格式。不得把范文中的项目事实、金额、时间、数据或背景当成当前模板要求。
+
+只返回可被 JSON.parse 解析的标准 JSON，不要 Markdown、思考过程或解释：
+{
+  "nodes":[{"title":"原始章节标题","level":1,"requirementText":"硬性要求或填写说明","exampleText":"范文或参考写法","isRequired":true}],
+  "requirementText":"全局硬性要求",
+  "exampleText":"全局范文参考",
+  "formatRules":{},
+  "evidence":["识别依据"]
+}
+level 只允许 1-4。目录、页码、页眉页脚、乱码和孤立正文句子不得作为标题；明确说明的格式按说明提取，只有样式证据时应在 evidence 中注明推断依据。
+
+模板原文：
+{{content}}`,
+  },
+  templateExampleAnalysis: {
+    name: '范文写法分析',
+    content: `你是文档写作分析助手。请分析范文的整体格式、章节组织、标题编号、段落习惯、写作风格、数据和引用方式、各章节参考字数、内容要点及常见开头结尾模式。
+模板名称：{{templateName}}
+模板章节结构：
+{{templateNodes}}
+范文数量：{{exampleCount}}
+范文内容：
+{{content}}
+
+只返回标准 JSON：
+{"overallStyle":"","formatFeatures":"","sectionGuidance":[{"title":"","suggestedWordCount":"","keyPoints":"","writingTip":""}],"openingPatterns":"","closingPatterns":"","generalTips":""}`,
+  },
+  templateExampleCompare: {
+    name: '范文差异分析',
+    content: `你是文档写作差异分析助手。对比已有范文分析与新范文，只列出新增或不同的写法、格式、章节和字数特征；相同内容不要重复。若无显著差异，只输出“无显著差异”。
+
+已有分析：
+{{existingAnalysis}}
+
+新范文：
+{{content}}
+
+有差异时按“整体风格差异、格式差异、章节差异、字数差异”四类输出简洁文本。`,
+  },
 };
 
 /** 各场景默认结构化提示词 */
 const DEFAULT_STRUCTURED: Record<PromptScene, Omit<StructuredPrompt, 'scene'>> = {
+  draft: {
+    mode: 'raw', role: '中文项目文档第一稿写作助手', goals: ['生成完整、连贯、可编辑的第一稿'], rules: [], outputFields: [{ key: 'draft', label: '第一稿正文', description: '可继续人工编辑的完整正文' }], rawPrompt: DEFAULT_PROMPTS.draft.content,
+  },
+  longFormSection: {
+    mode: 'raw', role: '长篇中文项目文档分章写作助手', goals: ['按模板和目标篇幅完成单章正文'], rules: [], outputFields: [{ key: 'section', label: '章节正文', description: '当前章节的完整正文' }], rawPrompt: DEFAULT_PROMPTS.longFormSection.content,
+  },
+  sectionExpansion: {
+    mode: 'raw', role: '章节扩写助手', goals: ['将短章节扩写到目标篇幅'], rules: [], outputFields: [{ key: 'section', label: '扩写后正文', description: '扩写后的完整章节正文' }], rawPrompt: DEFAULT_PROMPTS.sectionExpansion.content,
+  },
+  precisionRewrite: {
+    mode: 'raw', role: '选区精确修订助手', goals: ['只修改用户选中的文字'], rules: [], outputFields: [{ key: 'text', label: '修订后选区', description: '用于替换选区的文本' }], rawPrompt: DEFAULT_PROMPTS.precisionRewrite.content,
+  },
+  workflowPlanning: {
+    mode: 'raw', role: '阶段写作工作流规划助手', goals: ['生成可选择、可编辑的写作步骤'], rules: [], outputFields: [{ key: 'sectionAdvice', label: '章节建议', description: '可转换为工作流的章节写作步骤' }], rawPrompt: DEFAULT_PROMPTS.workflowPlanning.content,
+  },
+  templateExampleExtract: {
+    mode: 'raw', role: '范文模板识别助手', goals: ['提炼范文的通用写法与格式'], rules: [], outputFields: [{ key: 'nodes', label: '写作方向', description: '范文中可迁移的写作方向' }], rawPrompt: DEFAULT_PROMPTS.templateExampleExtract.content,
+  },
+  templateDirectExtract: {
+    mode: 'raw', role: '直接套用模板识别助手', goals: ['识别模板结构、要求、范文和格式'], rules: [], outputFields: [{ key: 'nodes', label: '模板章节', description: '模板原始章节与约束' }], rawPrompt: DEFAULT_PROMPTS.templateDirectExtract.content,
+  },
+  templateExampleAnalysis: {
+    mode: 'raw', role: '范文写法分析助手', goals: ['形成可复用的范文写作分析'], rules: [], outputFields: [{ key: 'sectionGuidance', label: '章节指导', description: '各章节的写法与篇幅参考' }], rawPrompt: DEFAULT_PROMPTS.templateExampleAnalysis.content,
+  },
+  templateExampleCompare: {
+    mode: 'raw', role: '范文差异分析助手', goals: ['只输出新范文带来的差异'], rules: [], outputFields: [{ key: 'differences', label: '范文差异', description: '新增或不同的写法与格式' }], rawPrompt: DEFAULT_PROMPTS.templateExampleCompare.content,
+  },
   report: {
     mode: 'structured',
     role: '项目阶段文档写作框架助手',
@@ -1687,33 +2013,50 @@ const DEFAULT_STRUCTURED: Record<PromptScene, Omit<StructuredPrompt, 'scene'>> =
   },
 };
 
-/** 生成内置默认模板列表 */
+/** 生成首次安装时的可编辑提示词列表。默认值只用于初始化和恢复，不参与运行时覆盖。 */
 function getDefaultPromptTemplates(): PromptTemplate[] {
   const now = new Date().toISOString();
-  return Object.entries(BUILTIN_PROMPTS).map(([scene, def]) => ({
-    id: `builtin-${scene}`,
+  return Object.entries(DEFAULT_PROMPTS).map(([scene, def]) => ({
+    id: `prompt-${scene}`,
     scene: scene as PromptScene,
     name: def.name,
     content: def.content,
-    isBuiltin: true,
+    isBuiltin: false,
     createdAt: now,
     updatedAt: now,
-    structured: { ...DEFAULT_STRUCTURED[scene as PromptScene], scene: scene as PromptScene },
+    structured: {
+      ...DEFAULT_STRUCTURED[scene as PromptScene],
+      scene: scene as PromptScene,
+      mode: 'raw',
+      rawPrompt: def.content,
+    },
   }));
 }
 
-/** 加载提示词模板（首次自动生成内置默认） */
+/** 加载提示词；旧版内置记录会迁移为普通可编辑记录，并自动补齐新增场景。 */
 function loadPromptTemplatesFromDisk(): PromptTemplate[] {
   ensureDataDir();
+  const defaults = getDefaultPromptTemplates();
   if (!fs.existsSync(promptTemplatesFile)) {
-    const defaults = getDefaultPromptTemplates();
     savePromptTemplatesToDisk(defaults);
     return defaults;
   }
   try {
-    return readVersionedJsonFile<PromptTemplate[]>(promptTemplatesFile, []).data;
+    const stored = readVersionedJsonFile<PromptTemplate[]>(promptTemplatesFile, []).data;
+    const migrated = defaults.map(defaultTemplate => {
+      const existing = stored.find(item => item.scene === defaultTemplate.scene && !item.isBuiltin)
+        || stored.find(item => item.scene === defaultTemplate.scene);
+      return existing ? { ...existing, isBuiltin: false } : defaultTemplate;
+    });
+    const knownScenes = new Set(defaults.map(item => item.scene));
+    const extras = stored.filter(item => !knownScenes.has(item.scene));
+    const result = [...migrated, ...extras.map(item => ({ ...item, isBuiltin: false }))];
+    const needsMigration = stored.length !== result.length
+      || stored.some(item => item.isBuiltin)
+      || defaults.some(item => !stored.some(saved => saved.scene === item.scene));
+    if (needsMigration) savePromptTemplatesToDisk(result);
+    return result;
   } catch {
-    const defaults = getDefaultPromptTemplates();
     savePromptTemplatesToDisk(defaults);
     return defaults;
   }
@@ -1739,7 +2082,7 @@ function saveSkillPackagesToDisk(skills: SkillPackage[]) {
   writeVersionedJsonFile(skillPackagesFile, skills);
 }
 
-const supportedSkillScenes: PromptScene[] = ['report', 'review', 'rewrite', 'diff', 'summary', 'memory', 'description', 'taskExecute', 'sectionAnalysis', 'templateExtract'];
+const supportedSkillScenes: PromptScene[] = ['draft', 'longFormSection', 'sectionExpansion', 'precisionRewrite', 'report', 'review', 'rewrite', 'diff', 'summary', 'memory', 'description', 'taskExecute', 'sectionAnalysis', 'workflowPlanning', 'templateExtract', 'templateExampleExtract', 'templateDirectExtract', 'templateExampleAnalysis', 'templateExampleCompare'];
 
 function inferSkillScenes(content: string): PromptScene[] {
   const value = content.toLowerCase();
@@ -2346,6 +2689,169 @@ function scheduleDevServerReload(reason: string) {
   }, 900);
 }
 
+function ensureTray() {
+  if (tray) return tray;
+  const icon = getAppIconImage().resize({ width: 16, height: 16, quality: 'best' });
+  tray = new Tray(icon);
+  tray.setToolTip(`${APP_DISPLAY_NAME}（后台运行中）`);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: `打开 ${APP_DISPLAY_NAME}`, click: () => showMainWindow() },
+    { type: 'separator' },
+    {
+      label: '退出程序',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]));
+  tray.on('double-click', () => showMainWindow());
+  return tray;
+}
+
+function enterBackgroundMode() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  isBackgroundMode = true;
+  ensureTray();
+  pauseFolderWatchers();
+  scheduleCollaborationDiscovery();
+  mainWindow.webContents.setAudioMuted(true);
+  mainWindow.hide();
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    isBackgroundMode = false;
+    createWindow();
+    return;
+  }
+
+  const wasBackground = isBackgroundMode;
+  isBackgroundMode = false;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  mainWindow.webContents.setAudioMuted(false);
+  app.focus({ steal: true });
+
+  if (wasBackground) {
+    scheduleCollaborationDiscovery();
+    void resumeFolderWatchers();
+    emitCollaborationPeersChanged();
+  }
+}
+
+function showCloseChoiceDialog(parent: BrowserWindow) {
+  return new Promise<{ action: 'background' | 'quit' | null; remember: boolean }>((resolve) => {
+    const bounds = parent.getBounds();
+    const promptWindow = new BrowserWindow({
+      parent,
+      modal: true,
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
+      hasShadow: false,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      show: false,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        backgroundThrottling: true,
+      },
+    });
+    closeChoiceWindow = promptWindow;
+    let settled = false;
+
+    const finish = (action: 'background' | 'quit' | null, remember = false) => {
+      if (settled) return;
+      settled = true;
+      closeChoiceWindow = null;
+      if (!promptWindow.isDestroyed()) promptWindow.destroy();
+      resolve({ action, remember });
+    };
+
+    promptWindow.on('closed', () => finish(null));
+    promptWindow.webContents.on('will-navigate', (event, targetUrl) => {
+      if (!targetUrl.startsWith('projecthub-close-choice://')) return;
+      event.preventDefault();
+      try {
+        const response = new URL(targetUrl);
+        const action = response.searchParams.get('action');
+        const remember = response.searchParams.get('remember') === '1';
+        finish(action === 'background' || action === 'quit' ? action : null, remember);
+      } catch {
+        finish(null);
+      }
+    });
+
+    const html = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; }
+    body { overflow: hidden; }
+    #overlay { width: 100%; height: 100%; display: grid; place-items: center; padding: 24px; background: rgba(22, 31, 46, .30); }
+    .dialog { position: relative; width: 470px; max-width: 100%; padding: 28px 28px 24px; border: 1px solid rgba(219, 228, 240, .95); border-radius: 16px; background: #fff; box-shadow: 0 22px 60px rgba(15, 23, 42, .24); color: #1f2937; }
+    .close { position: absolute; top: 14px; left: 14px; width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: #7b8794; font-size: 22px; line-height: 28px; cursor: pointer; }
+    .close:hover { background: #f1f5f9; color: #1f2937; }
+    h1 { margin: 5px 0 8px; text-align: center; font-size: 19px; font-weight: 650; }
+    .description { margin: 0 auto 22px; max-width: 380px; text-align: center; color: #718096; font-size: 13px; line-height: 1.65; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .action { min-height: 78px; padding: 13px 15px; border: 1px solid #dbe5f0; border-radius: 12px; background: #fff; text-align: left; cursor: pointer; transition: border-color .16s ease, background .16s ease, transform .16s ease; }
+    .action:hover { border-color: #4096ff; background: #f4f9ff; transform: translateY(-1px); }
+    .action strong { display: block; margin-bottom: 5px; color: #172033; font-size: 15px; }
+    .action span { color: #7b8794; font-size: 12px; line-height: 1.5; }
+    .action.quit:hover { border-color: #ff7875; background: #fff7f6; }
+    .remember { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 18px; color: #5f6b7a; font-size: 13px; cursor: pointer; user-select: none; }
+    .remember input { width: 15px; height: 15px; accent-color: #1677ff; }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="title">
+      <button class="close" type="button" aria-label="取消关闭" data-action="cancel">×</button>
+      <h1 id="title">关闭 ${APP_DISPLAY_NAME}</h1>
+      <p class="description">请选择关闭窗口后的运行方式。后台运行仍可接收协作消息和系统通知。</p>
+      <div class="actions">
+        <button class="action" type="button" data-action="background"><strong>后台运行</strong><span>隐藏到系统托盘，降低资源占用</span></button>
+        <button class="action quit" type="button" data-action="quit"><strong>退出程序</strong><span>结束全部进程并停止后台服务</span></button>
+      </div>
+      <label class="remember"><input id="remember" type="checkbox" />默认使用此选项</label>
+    </section>
+  </div>
+  <script>
+    const respond = (action) => {
+      const remember = document.getElementById('remember').checked ? '1' : '0';
+      window.location.href = 'projecthub-close-choice://respond?action=' + action + '&remember=' + remember;
+    };
+    document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => respond(button.dataset.action)));
+    document.getElementById('overlay').addEventListener('click', event => { if (event.target === event.currentTarget) respond('cancel'); });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') respond('cancel'); });
+  </script>
+</body>
+</html>`;
+
+    promptWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+      .then(() => {
+        if (!promptWindow.isDestroyed()) promptWindow.show();
+      })
+      .catch(() => finish(null));
+  });
+}
+
 function createWindow() {
   const productionEntryPath = path.join(__dirname, '../renderer/index.html');
   const productionEntryUrl = pathToFileURL(productionEntryPath).toString();
@@ -2354,9 +2860,11 @@ function createWindow() {
     height: 900,
     minWidth: 1200,
     minHeight: 800,
+    icon: getAppIconPath(),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      backgroundThrottling: true,
       preload: path.join(__dirname, 'preload.js'),
     },
     title: '项目进度管理工具',
@@ -2394,6 +2902,38 @@ function createWindow() {
   } else {
     mainWindow.loadFile(productionEntryPath);
   }
+
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    if (closePromptOpen || !mainWindow || mainWindow.isDestroyed()) return;
+
+    const configuredBehavior = loadSettingsFromDisk().closeWindowBehavior || 'ask';
+    if (configuredBehavior === 'background') {
+      enterBackgroundMode();
+      return;
+    }
+    if (configuredBehavior === 'quit') {
+      isQuitting = true;
+      app.quit();
+      return;
+    }
+
+    closePromptOpen = true;
+    void showCloseChoiceDialog(mainWindow).then(({ action, remember }) => {
+      if (action && remember) {
+        saveSettingsToDisk({ ...loadSettingsFromDisk(), closeWindowBehavior: action });
+      }
+      if (action === 'background') {
+        enterBackgroundMode();
+      } else if (action === 'quit') {
+        isQuitting = true;
+        app.quit();
+      }
+    }).finally(() => {
+      closePromptOpen = false;
+    });
+  });
 
   mainWindow.on('closed', () => {
     if (devReloadTimer) {
@@ -2448,7 +2988,21 @@ const openFileWithDefaultApp = async (filePath: string) => {
   }
 };
 
-let dragFileIconImage: ReturnType<typeof nativeImage.createFromBuffer> | null = null;
+const dragIconCache = new Map<string, ReturnType<typeof nativeImage.createFromBuffer>>();
+
+type DragIconKind =
+  | 'folder'
+  | 'word'
+  | 'pdf'
+  | 'excel'
+  | 'powerpoint'
+  | 'image'
+  | 'archive'
+  | 'text'
+  | 'multiple'
+  | 'file';
+
+type RgbaColor = readonly [number, number, number, number];
 
 function crc32(buffer: Buffer): number {
   let crc = 0xffffffff;
@@ -2470,22 +3024,151 @@ function pngChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, typeBuffer, data, checksum]);
 }
 
-function createDragIconPng(): Buffer {
-  const width = 32;
-  const height = 32;
+function createDragIconPng(kind: DragIconKind): Buffer {
+  const logicalSize = 48;
+  const renderScale = 4;
+  const width = logicalSize * renderScale;
+  const height = logicalSize * renderScale;
   const rowSize = width * 4 + 1;
   const pixels = Buffer.alloc(rowSize * height);
 
-  for (let y = 0; y < height; y++) {
-    const rowOffset = y * rowSize;
-    pixels[rowOffset] = 0; // PNG filter type: none
-    for (let x = 0; x < width; x++) {
-      const offset = rowOffset + 1 + x * 4;
-      const border = x < 3 || y < 3 || x >= width - 3 || y >= height - 3;
-      pixels[offset] = border ? 0x16 : 0xff;
-      pixels[offset + 1] = border ? 0x77 : 0xff;
-      pixels[offset + 2] = border ? 0xff : 0xff;
-      pixels[offset + 3] = 0xff;
+  for (let y = 0; y < height; y++) pixels[y * rowSize] = 0;
+
+  const setRawPixel = (x: number, y: number, color: RgbaColor) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const offset = y * rowSize + 1 + x * 4;
+    const sourceAlpha = color[3] / 255;
+    const targetAlpha = pixels[offset + 3] / 255;
+    const outputAlpha = sourceAlpha + targetAlpha * (1 - sourceAlpha);
+    if (outputAlpha <= 0) return;
+    pixels[offset] = Math.round((color[0] * sourceAlpha + pixels[offset] * targetAlpha * (1 - sourceAlpha)) / outputAlpha);
+    pixels[offset + 1] = Math.round((color[1] * sourceAlpha + pixels[offset + 1] * targetAlpha * (1 - sourceAlpha)) / outputAlpha);
+    pixels[offset + 2] = Math.round((color[2] * sourceAlpha + pixels[offset + 2] * targetAlpha * (1 - sourceAlpha)) / outputAlpha);
+    pixels[offset + 3] = Math.round(outputAlpha * 255);
+  };
+
+  const setPixel = (x: number, y: number, color: RgbaColor) => {
+    const startX = Math.round(x * renderScale);
+    const startY = Math.round(y * renderScale);
+    for (let py = startY; py < startY + renderScale; py++) {
+      for (let px = startX; px < startX + renderScale; px++) setRawPixel(px, py, color);
+    }
+  };
+
+  const fillRect = (x: number, y: number, rectWidth: number, rectHeight: number, color: RgbaColor) => {
+    const startX = Math.round(x * renderScale);
+    const startY = Math.round(y * renderScale);
+    const endX = Math.round((x + rectWidth) * renderScale);
+    const endY = Math.round((y + rectHeight) * renderScale);
+    for (let py = startY; py < endY; py++) {
+      for (let px = startX; px < endX; px++) setRawPixel(px, py, color);
+    }
+  };
+
+  const fillRoundedRect = (x: number, y: number, rectWidth: number, rectHeight: number, radius: number, color: RgbaColor) => {
+    const startX = Math.round(x * renderScale);
+    const startY = Math.round(y * renderScale);
+    const right = Math.round((x + rectWidth) * renderScale) - 1;
+    const bottom = Math.round((y + rectHeight) * renderScale) - 1;
+    const scaledRadius = radius * renderScale;
+    for (let py = startY; py <= bottom; py++) {
+      for (let px = startX; px <= right; px++) {
+        const cornerX = px < startX + scaledRadius ? startX + scaledRadius : px > right - scaledRadius ? right - scaledRadius : px;
+        const cornerY = py < startY + scaledRadius ? startY + scaledRadius : py > bottom - scaledRadius ? bottom - scaledRadius : py;
+        const dx = px - cornerX;
+        const dy = py - cornerY;
+        if (dx * dx + dy * dy <= scaledRadius * scaledRadius) setRawPixel(px, py, color);
+      }
+    }
+  };
+
+  const fillCircle = (centerX: number, centerY: number, radius: number, color: RgbaColor) => {
+    const scaledCenterX = centerX * renderScale;
+    const scaledCenterY = centerY * renderScale;
+    const scaledRadius = radius * renderScale;
+    const radiusSquared = scaledRadius * scaledRadius;
+    for (let y = Math.floor(scaledCenterY - scaledRadius); y <= Math.ceil(scaledCenterY + scaledRadius); y++) {
+      for (let x = Math.floor(scaledCenterX - scaledRadius); x <= Math.ceil(scaledCenterX + scaledRadius); x++) {
+        const dx = x - scaledCenterX;
+        const dy = y - scaledCenterY;
+        if (dx * dx + dy * dy <= radiusSquared) setRawPixel(x, y, color);
+      }
+    }
+  };
+
+  const palette: Record<DragIconKind, RgbaColor> = {
+    folder: [245, 158, 11, 255],
+    word: [37, 99, 235, 255],
+    pdf: [225, 45, 57, 255],
+    excel: [22, 163, 74, 255],
+    powerpoint: [234, 88, 12, 255],
+    image: [124, 58, 237, 255],
+    archive: [202, 138, 4, 255],
+    text: [71, 85, 105, 255],
+    multiple: [79, 70, 229, 255],
+    file: [14, 116, 144, 255],
+  };
+  const accent = palette[kind];
+  const white: RgbaColor = [255, 255, 255, 255];
+
+  if (kind === 'folder') {
+    fillRoundedRect(5, 15, 39, 28, 7, [15, 23, 42, 28]);
+    fillRoundedRect(7, 8, 20, 14, 5, [217, 119, 6, 255]);
+    fillRoundedRect(4, 12, 40, 29, 7, accent);
+    fillRoundedRect(6, 18, 36, 22, 6, [251, 191, 36, 255]);
+    fillRoundedRect(8, 20, 32, 3, 1.5, [255, 255, 255, 88]);
+  } else if (kind === 'multiple') {
+    fillRoundedRect(8, 8, 27, 34, 5, [15, 23, 42, 26]);
+    fillRoundedRect(7, 6, 27, 34, 5, [165, 180, 252, 255]);
+    fillRoundedRect(11, 4, 27, 35, 5, accent);
+    fillRoundedRect(14, 7, 21, 29, 3.5, white);
+    fillRoundedRect(18, 15, 13, 2.5, 1.2, [79, 70, 229, 118]);
+    fillRoundedRect(18, 21, 13, 2.5, 1.2, [79, 70, 229, 118]);
+    fillRoundedRect(18, 27, 9, 2.5, 1.2, [79, 70, 229, 118]);
+    fillCircle(37, 37, 9, [255, 255, 255, 255]);
+    fillCircle(37, 37, 6.5, accent);
+    fillRoundedRect(35.8, 32.7, 2.4, 8.6, 1.2, white);
+    fillRoundedRect(32.7, 35.8, 8.6, 2.4, 1.2, white);
+  } else {
+    // Floating document: colored outer sheet, white page and folded corner.
+    fillRoundedRect(11, 6, 30, 40, 7, [15, 23, 42, 28]);
+    fillRoundedRect(9, 3, 30, 40, 7, accent);
+    fillRoundedRect(12, 6, 24, 34, 4.5, white);
+    for (let y = 6; y <= 15; y++) {
+      for (let x = 27; x <= 36; x++) {
+        if (x >= 27 + (y - 6)) setPixel(x, y, accent);
+      }
+    }
+
+    if (kind === 'image') {
+      fillCircle(19, 17, 3, [124, 58, 237, 185]);
+      for (let y = 23; y <= 34; y++) {
+        for (let x = 15; x <= 33; x++) {
+          const firstHill = y >= 34 - Math.max(0, 8 - Math.abs(x - 21));
+          const secondHill = y >= 35 - Math.max(0, 6 - Math.abs(x - 29));
+          if (firstHill || secondHill) setPixel(x, y, [124, 58, 237, 175]);
+        }
+      }
+    } else if (kind === 'archive') {
+      for (let y = 14; y <= 31; y += 4) fillRoundedRect(22, y, 4, 2.5, 0.8, [202, 138, 4, 190]);
+      fillRoundedRect(20, 33, 8, 3, 1.2, [202, 138, 4, 190]);
+    } else if (kind === 'excel') {
+      for (let row = 0; row < 3; row++) {
+        for (let column = 0; column < 3; column++) {
+          fillRoundedRect(16 + column * 6, 16 + row * 6, 4.5, 4.5, 0.8, [22, 163, 74, 155]);
+        }
+      }
+    } else if (kind === 'powerpoint') {
+      fillCircle(22, 22, 7, [234, 88, 12, 160]);
+      fillRect(22, 15, 2, 8, white);
+      fillRect(22, 22, 7, 2, white);
+      fillRoundedRect(17, 32, 15, 2.5, 1.2, [234, 88, 12, 120]);
+    } else {
+      const lineAlpha = kind === 'pdf' ? 185 : kind === 'word' ? 150 : 115;
+      fillRoundedRect(16, 17, 16, 2.5, 1.2, [accent[0], accent[1], accent[2], lineAlpha]);
+      fillRoundedRect(16, 23, 16, 2.5, 1.2, [accent[0], accent[1], accent[2], lineAlpha]);
+      fillRoundedRect(16, 29, kind === 'text' ? 16 : 11, 2.5, 1.2, [accent[0], accent[1], accent[2], lineAlpha]);
+      if (kind === 'pdf') fillRoundedRect(16, 35, 16, 2.8, 1.3, [225, 45, 57, 205]);
     }
   }
 
@@ -2506,37 +3189,70 @@ function createDragIconPng(): Buffer {
   ]);
 }
 
-function getDragFileIcon() {
-  if (dragFileIconImage && !dragFileIconImage.isEmpty()) return dragFileIconImage;
-  dragFileIconImage = nativeImage.createFromBuffer(createDragIconPng());
-  if (dragFileIconImage.isEmpty()) {
+function getDragIconKind(filePaths: string[]): DragIconKind {
+  if (filePaths.length > 1) return 'multiple';
+  const firstPath = filePaths[0];
+  if (fs.statSync(firstPath).isDirectory()) return 'folder';
+  const extension = path.extname(firstPath).toLowerCase();
+  if (['.doc', '.docx'].includes(extension)) return 'word';
+  if (extension === '.pdf') return 'pdf';
+  if (['.xls', '.xlsx', '.csv'].includes(extension)) return 'excel';
+  if (['.ppt', '.pptx'].includes(extension)) return 'powerpoint';
+  if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(extension)) return 'image';
+  if (['.zip', '.rar', '.7z', '.tar', '.gz'].includes(extension)) return 'archive';
+  if (['.txt', '.md', '.json', '.xml', '.yaml', '.yml'].includes(extension)) return 'text';
+  return 'file';
+}
+
+function getDragFileIcon(filePaths: string[]) {
+  const kind = getDragIconKind(filePaths);
+  const cached = dragIconCache.get(kind);
+  if (cached && !cached.isEmpty()) return cached;
+  const sourceImage = nativeImage.createFromBuffer(createDragIconPng(kind));
+  if (sourceImage.isEmpty()) {
     throw new Error('拖拽图标创建失败');
   }
-  return dragFileIconImage;
+  const image = sourceImage.resize({ width: 48, height: 48, quality: 'best' });
+  dragIconCache.set(kind, image);
+  return image;
 }
 
 // 原生文件拖拽：同步 IPC 保证 startDrag 在 renderer dragstart 事件结束前执行
-const startNativeFileDrag = (event: any, filePath: string) => {
+const startNativeFileDrag = (event: any, filePaths: string[]) => {
   try {
-    if (!filePath) {
-      event.returnValue = { success: false, error: '文件路径为空' };
+    const requestedPaths = Array.from(new Set(Array.isArray(filePaths) ? filePaths : []));
+    if (requestedPaths.length === 0) {
+      event.returnValue = { success: false, error: '未选择要拖动的文件' };
       return;
     }
-    const resolvedPath = path.resolve(filePath);
-    const workspaceCheck = checkWithinWorkspace(resolvedPath);
-    if (!workspaceCheck.ok) {
-      event.returnValue = { success: false, error: workspaceCheck.error };
+
+    const resolvedPaths: string[] = [];
+    for (const filePath of requestedPaths) {
+      if (!filePath) continue;
+      const resolvedPath = path.resolve(filePath);
+      const workspaceCheck = checkWithinWorkspace(resolvedPath);
+      if (!workspaceCheck.ok) {
+        event.returnValue = { success: false, error: workspaceCheck.error };
+        return;
+      }
+      if (!fs.existsSync(resolvedPath)) {
+        event.returnValue = { success: false, error: `文件不存在：${path.basename(resolvedPath)}` };
+        return;
+      }
+      resolvedPaths.push(resolvedPath);
+    }
+
+    if (resolvedPaths.length === 0) {
+      event.returnValue = { success: false, error: '未找到可拖动的文件' };
       return;
     }
-    if (!fs.existsSync(resolvedPath)) {
-      event.returnValue = { success: false, error: '文件不存在' };
-      return;
-    }
+
     event.sender.startDrag({
-      file: resolvedPath,
-      icon: getDragFileIcon(),
+      file: resolvedPaths[0],
+      files: resolvedPaths,
+      icon: getDragFileIcon(resolvedPaths),
     });
-    event.returnValue = { success: true };
+    event.returnValue = { success: true, count: resolvedPaths.length };
   } catch (error: any) {
     console.warn('Native file drag failed:', error);
     event.returnValue = { success: false, error: error?.message || '系统拖拽启动失败' };
@@ -2599,15 +3315,12 @@ const showSystemNotification = async (params: { title?: string; body?: string; s
     const body = String(params?.body || '');
     const target = typeof params?.target === 'string' ? params.target : undefined;
     const projectId = typeof params?.projectId === 'string' ? params.projectId : undefined;
-    const notification = new Notification({ title, body, silent: Boolean(params?.silent) });
+    const notification = new Notification({ title, body, silent: Boolean(params?.silent), icon: getAppIconImage() });
     notification.on('click', () => {
+      showMainWindow();
       if (mainWindow && !mainWindow.isDestroyed()) {
-        if (mainWindow.isMinimized()) mainWindow.restore();
-        mainWindow.show();
-        mainWindow.focus();
         mainWindow.webContents.send('system:notification-click', { target, projectId });
       }
-      app.focus({ steal: true });
     });
     notification.on('show', () => {
       console.log('[Notification] 已显示:', title);
@@ -2760,6 +3473,7 @@ const deleteProject = async (projectId: string, options?: { mode?: 'unregister' 
       watcher.close();
       folderWatchers.delete(projectId);
     }
+    folderWatcherConfigs.delete(projectId);
     saveProjectsToDisk(projects.filter(item => item.id !== projectId));
     saveVersionsToDisk(loadVersionsFromDisk().filter(item => item.projectId !== projectId));
     saveProjectDocsToDisk(loadProjectDocsFromDisk().filter(item => item.projectId !== projectId));
@@ -4037,8 +4751,23 @@ ${params.templateNodes.map(n => `${'  '.repeat(n.level - 1)}${n.title}`).join('\
 范文内容：
 ${combinedContent}`;
 
+  const configuredPrompt = composePromptMain(
+    hasExisting ? 'templateExampleCompare' : 'templateExampleAnalysis',
+    hasExisting
+      ? {
+          existingAnalysis: params.existingAnalysis || '',
+          content: combinedContent,
+        }
+      : {
+          templateName: params.templateName,
+          templateNodes: params.templateNodes.map(n => `${'  '.repeat(n.level - 1)}${n.title}`).join('\n'),
+          exampleCount: String(params.exampleContents.length),
+          content: combinedContent,
+        },
+  );
+
   try {
-    const result = await callConfiguredAI(prompt);
+    const result = await callConfiguredAI(configuredPrompt);
 
     if (hasExisting) {
       // 对比模式：直接返回文本结果
@@ -4256,9 +4985,25 @@ const deleteReview = async (reviewId: string) => {
 };
 
 // AI 调用
-const callAi = async (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: AIConfig; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => {
+const logOutgoingAiPrompt = (content: string, scene?: string, title?: string) => {
+  if (!content.trim()) throw new Error('AI 提示词为空，已阻止发送');
+  appendAiLog('Outgoing AI prompt verified', {
+    scene: scene || 'general',
+    title: title || '',
+    length: content.length,
+    sha256: createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16),
+    hasPromptConfig: content.includes('[提示词配置]'),
+    hasReferenceMaterial: /【(?:项目资料|外部资料|模板范文)|参考资料清单/.test(content),
+  });
+};
+
+const callAi = async (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: AIConfig; usageRequestId?: string; usageTitle?: string; usageScene?: string; silentActivity?: boolean }) => {
   try {
-    if (typeof prompt === 'string') return await callConfiguredAI(prompt);
+    if (typeof prompt === 'string') {
+      logOutgoingAiPrompt(prompt);
+      return await callConfiguredAI(prompt);
+    }
+    logOutgoingAiPrompt(prompt.prompt, prompt.usageScene, prompt.usageTitle);
     const execute = async () => {
       if (prompt.config) {
         return callAIWithConfig(prompt.config, prompt.prompt, prompt.modelId, prompt.modelIds, prompt.mode);
@@ -4268,7 +5013,7 @@ const callAi = async (prompt: string | { prompt: string; modelId?: string; model
         : callDefaultAI(prompt.prompt, prompt.modelId);
     };
     return prompt.usageRequestId
-      ? await runWithAIUsageContext({ requestId: prompt.usageRequestId, requestTitle: prompt.usageTitle, scene: prompt.usageScene }, execute)
+      ? await runWithAIUsageContext({ requestId: prompt.usageRequestId, requestTitle: prompt.usageTitle, scene: prompt.usageScene, silentActivity: prompt.silentActivity }, execute)
       : await execute();
   } catch (error: any) {
     throw new Error(`AI 调用失败: ${error.message}`);
@@ -4278,6 +5023,7 @@ const callAi = async (prompt: string | { prompt: string; modelId?: string; model
 
 const callAiParallelDetails = async (params: { prompt: string; modelId?: string; modelIds?: string[]; config?: AIConfig; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => {
   try {
+    logOutgoingAiPrompt(params.prompt, params.usageScene, params.usageTitle);
     const execute = () => callParallelAIDetails(params.prompt, params.modelIds, params.config, params.modelId);
     return params.usageRequestId ? await runWithAIUsageContext({ requestId: params.usageRequestId, requestTitle: params.usageTitle, scene: params.usageScene }, execute) : await execute();
   } catch (error: any) {
@@ -4323,10 +5069,14 @@ const startFolderWatch = async (params: { projectId: string; folderPath: string 
     if (!workspaceCheck.ok) return { success: false, error: workspaceCheck.error };
     const folderCheck = checkExistingPath(params.folderPath, 'directory');
     if (!folderCheck.ok) return { success: false, error: folderCheck.error };
+    folderWatcherConfigs.set(params.projectId, { ...params });
     // 如果已经在监听，先停止
     if (folderWatchers.has(params.projectId)) {
       folderWatchers.get(params.projectId)?.close();
+      folderWatchers.delete(params.projectId);
     }
+
+    if (isBackgroundMode) return { success: true, paused: true };
 
     const watcher = fs.watch(params.folderPath, { recursive: true }, async (eventType, filename) => {
       if (!filename) return;
@@ -4361,6 +5111,7 @@ const startFolderWatch = async (params: { projectId: string; folderPath: string 
 
 const stopFolderWatch = async (projectId: string) => {
   try {
+    folderWatcherConfigs.delete(projectId);
     if (folderWatchers.has(projectId)) {
       folderWatchers.get(projectId)?.close();
       folderWatchers.delete(projectId);
@@ -4370,6 +5121,20 @@ const stopFolderWatch = async (projectId: string) => {
     return { success: false, error: error.message };
   }
 };
+
+function pauseFolderWatchers() {
+  folderWatchers.forEach(watcher => {
+    try { watcher.close(); } catch {}
+  });
+  folderWatchers.clear();
+}
+
+async function resumeFolderWatchers() {
+  const configs = Array.from(folderWatcherConfigs.values());
+  for (const config of configs) {
+    await startFolderWatch(config);
+  }
+}
 
 const listSupportedFolderFiles = async (folderPath: string) => {
   try {
@@ -4399,10 +5164,12 @@ const getFolderContents = async (folderPath: string) => {
       const fullPath = path.join(folderPath, entry.name);
       let size = 0;
       let modifiedAt = '';
+      let readOnly = false;
       try {
         const stat = await fs.promises.stat(fullPath);
         size = entry.isDirectory() ? 0 : stat.size;
         modifiedAt = stat.mtime.toISOString();
+        readOnly = !entry.isDirectory() && (stat.mode & 0o200) === 0;
       } catch {}
       return {
         name: entry.name,
@@ -4411,6 +5178,7 @@ const getFolderContents = async (folderPath: string) => {
         size,
         modifiedAt,
         path: fullPath,
+        readOnly,
       };
     }));
     // 目录在前，文件在后，各自按名称排序
@@ -4598,6 +5366,7 @@ interface TreeFileEntry {
   ext: string;
   size: number;
   modifiedAt: string;
+  readOnly: boolean;
 }
 
 interface TreeFolderEntry {
@@ -4659,10 +5428,12 @@ async function collectTreeStats(
 
     let size = 0;
     let modifiedAt = '';
+    let readOnly = false;
     try {
       const stat = await fs.promises.stat(fullPath);
       size = stat.size;
       modifiedAt = stat.mtime.toISOString();
+      readOnly = (stat.mode & 0o200) === 0;
       totalSize += size;
     } catch {}
 
@@ -4671,7 +5442,7 @@ async function collectTreeStats(
     typeCount[typeKey] = (typeCount[typeKey] || 0) + 1;
 
     if (files.length < TREE_STATS_MAX_FILES) {
-      files.push({ name: entry.name, path: fullPath, relativePath, ext, size, modifiedAt });
+      files.push({ name: entry.name, path: fullPath, relativePath, ext, size, modifiedAt, readOnly });
     }
   }
 
@@ -4951,8 +5722,21 @@ const saveMessageCenterState = async (state: any) => {
   try {
     const dismissedIds = Array.isArray(state?.dismissedIds) ? state.dismissedIds.map(String).slice(-400) : [];
     const replies = Array.isArray(state?.replies) ? state.replies.slice(-300) : [];
+    const readIds = Array.isArray(state?.readIds) ? state.readIds.map(String).slice(-1000) : [];
+    const hiddenChatIds = Array.isArray(state?.hiddenChatIds) ? state.hiddenChatIds.map(String).slice(-3000) : [];
+    const notes = Array.isArray(state?.notes) ? state.notes.slice(-500).map((note: any) => ({
+      id: String(note?.id || ''),
+      title: String(note?.title || '').slice(0, 100),
+      content: String(note?.content || '').slice(0, 1000),
+      createdAt: String(note?.createdAt || new Date().toISOString()),
+      updatedAt: String(note?.updatedAt || new Date().toISOString()),
+      dueAt: note?.dueAt ? String(note.dueAt) : undefined,
+      completed: Boolean(note?.completed),
+      sourceMessageId: note?.sourceMessageId ? String(note.sourceMessageId) : undefined,
+      notified: Array.isArray(note?.notified) ? note.notified.filter((item: unknown) => item === 'due-soon' || item === 'overdue') : [],
+    })).filter((note: any) => note.id && note.title) : [];
     const filePath = getCollaborationStorageFile('message-center.json', path.join(dataDir, 'message-center.json'));
-    writeVersionedJsonFile(filePath, { dismissedIds, replies });
+    writeVersionedJsonFile(filePath, { dismissedIds, replies, readIds, hiddenChatIds, notes });
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error?.message || String(error) };
@@ -5187,6 +5971,7 @@ const migrateWorkspaceProjects = async (params: {
           watcher.close();
           folderWatchers.delete(project.id);
         }
+        folderWatcherConfigs.delete(project.id);
         migrated.push({ project, folderPath: targetFolder });
       } catch (error: any) {
         failed.push({ id: project.id, name: project.name, error: error?.message || String(error) });
@@ -6071,7 +6856,12 @@ defineTemplateIpc({
   storeFile: storeTemplateFile,
   analyzeExamples: analyzeTemplateExamples,
 });
-defineSettingsIpc({ load: loadSettingsFromDisk, save: saveSettingsToDisk });
+defineSettingsIpc({
+  load: loadSettingsFromDisk,
+  save: saveSettingsToDisk,
+  getAutoLaunch: getAutoLaunchStatus,
+  setAutoLaunch,
+});
 defineWorkflowIpc({ loadTasks: loadTasksFromDisk, saveTasks: saveTasksToDisk, executeAiTask: executeAiWorkflowTask });
 defineKnowledgeIpc({
   loadStageMemories: loadStageMemoriesFromDisk,
@@ -6180,42 +6970,58 @@ definePlatformIpc({
 });
 registerAllIpc(ipcMain);
 
-app.whenReady().then(() => {
-  ensureWindowsNotificationShortcut();
-  createWindow();
-  startCollaborationServer().catch(() => {});
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
-  // 启动后自动清理回收站过期条目
-  try {
-    const settings = loadSettingsFromDisk();
-    if (settings.workspacePath) {
-      recycleBinService.cleanup(settings.workspacePath).catch((err) => {
-        console.warn('[RecycleBin] Startup cleanup failed:', err);
-      });
-    }
-  } catch {}
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => showMainWindow());
 
-  // 每 12 小时自动清理回收站
-  setInterval(() => {
+  app.whenReady().then(() => {
+    ensureWindowsNotificationShortcut();
+    createWindow();
+    startCollaborationServer().catch(() => {});
+
+    // 启动后自动清理回收站过期条目
     try {
       const settings = loadSettingsFromDisk();
       if (settings.workspacePath) {
         recycleBinService.cleanup(settings.workspacePath).catch((err) => {
-          console.warn('[RecycleBin] Periodic cleanup failed:', err);
+          console.warn('[RecycleBin] Startup cleanup failed:', err);
         });
       }
     } catch {}
-  }, 12 * 60 * 60 * 1000);
+
+    // 每 12 小时自动清理回收站；后台常驻时跳过磁盘清理。
+    setInterval(() => {
+      if (isBackgroundMode) return;
+      try {
+        const settings = loadSettingsFromDisk();
+        if (settings.workspacePath) {
+          recycleBinService.cleanup(settings.workspacePath).catch((err) => {
+            console.warn('[RecycleBin] Periodic cleanup failed:', err);
+          });
+        }
+      } catch {}
+    }, 12 * 60 * 60 * 1000);
+  });
+}
+
+app.on('before-quit', () => {
+  isQuitting = true;
+  pauseFolderWatchers();
+  stopCollaborationDiscovery();
+  void stopCollaborationServer();
+  tray?.destroy();
+  tray = null;
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  if (!isBackgroundMode && process.platform !== 'darwin') {
     app.quit();
   }
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
+  showMainWindow();
 });

@@ -11,6 +11,7 @@ import {
 } from '@ant-design/icons';
 
 const { Text, Title } = Typography;
+const projectHubIconUrl = new URL('../../assets/projecthub-icon.png', import.meta.url).href;
 
 export const FIRST_USE_GUIDE_STORAGE_KEY = 'projecthub.first-use-guide.v1';
 export type GuidePage = 'overview' | 'project-files' | 'project-plan' | 'project-report' | 'project-review' | 'project-team' | 'project-templates' | 'calendar' | 'settings';
@@ -225,7 +226,7 @@ const FirstUseGuide: React.FC<FirstUseGuideProps> = ({ open, activePage, hasProj
         ]}
       >
         <div className="first-use-guide-hero">
-          <span className="first-use-guide-logo">P</span>
+          <span className="first-use-guide-logo"><img src={projectHubIconUrl} alt="ProjectHub" /></span>
           <div>
             <Title level={3}>欢迎使用 ProjectHub</Title>
             <Text type="secondary">围绕项目文件，把计划、AI 写作、报告审查和团队协作串成一条工作流。</Text>

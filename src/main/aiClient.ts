@@ -285,14 +285,15 @@ export async function callClaudeAPI(config: AIModelConfig, prompt: string): Prom
     },
   };
 
-  let result = await makeRequest(url, options, buildBody(4096));
+  const maxOutputTokens = normalizeMaxOutputTokens(config.maxOutputTokens);
+  let result = await makeRequest(url, options, buildBody(maxOutputTokens));
   let text = extractAIText(result);
   if (text) return text;
 
   if (isThinkingOnlyMaxTokensResponse(result)) {
     console.warn('[AI] Claude returned thinking-only max_tokens response; retrying with direct-output prompt.');
     const retryPrompt = `请不要输出思考过程。请直接完成下面任务，并只输出最终结果。\n\n${prompt}`;
-    result = await makeRequest(url, options, buildBody(8192, retryPrompt));
+    result = await makeRequest(url, options, buildBody(Math.max(maxOutputTokens, 8192), retryPrompt));
     text = extractAIText(result);
     if (text) return text;
   }
@@ -308,7 +309,7 @@ export async function callOpenAIAPI(config: AIModelConfig, prompt: string): Prom
   const body = JSON.stringify({
     model: config.model || 'gpt-3.5-turbo',
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 4096,
+    max_tokens: normalizeMaxOutputTokens(config.maxOutputTokens),
   });
 
   const options = {
@@ -431,3 +432,8 @@ export async function callAIWithConfig(configValue: AIConfig, prompt: string, mo
     || enabledModels[0];
   return callAIModel(activeModel, prompt);
 }
+const normalizeMaxOutputTokens = (value?: number) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 8192;
+  return Math.max(512, Math.min(65536, Math.round(parsed)));
+};

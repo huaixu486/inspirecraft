@@ -78,3 +78,22 @@ test('AI jobs retain correlation and work item identifiers', async () => {
   assert.equal(job?.correlationId, 'correlation-1');
   resetJobs();
 });
+
+test('silent model calls do not create premature completed jobs', () => {
+  resetJobs();
+  const state = useAIJobStore.getState();
+  const base = {
+    id: 'section-call-1',
+    createdAt: new Date().toISOString(),
+    modelName: 'section model',
+    model: 'section-model',
+    requestId: 'long-form-job',
+    silent: true,
+  };
+
+  state.syncExternalActivity({ ...base, status: 'started' });
+  state.syncExternalActivity({ ...base, status: 'completed' });
+
+  assert.equal(useAIJobStore.getState().jobs.length, 0);
+  resetJobs();
+});

@@ -14,7 +14,7 @@ const sources = collectTs(mainRoot).map(filePath => ({ filePath, content: fs.rea
 const definitions = sources.flatMap(source => [...source.content.matchAll(/defineIpc(?:Handler|Event)\('([^']+)'/g)].map(match => ({ channel: match[1], filePath: source.filePath })));
 
 test('all IPC channels are unique, classified, and centrally registered', () => {
-  assert.equal(definitions.length, 126);
+  assert.equal(definitions.length, 129);
   assert.equal(new Set(definitions.map(item => item.channel)).size, definitions.length);
   for (const definition of definitions) {
     const matches = IPC_DOMAIN_MATCHERS.filter(matcher => matcher(definition.channel));
@@ -47,11 +47,12 @@ test('destructive filesystem handlers guard paths at the handler boundary', () =
 
   const fileRegistrar = fs.readFileSync(path.join(mainRoot, 'ipc', 'registerFileIpc.ts'), 'utf8');
   const fileService = fs.readFileSync(path.join(mainRoot, 'services', 'fileSystemService.ts'), 'utf8');
-  for (const channel of ['file:rename', 'file:importFolder', 'file:move', 'file:duplicate', 'file:delete', 'file:createFolder', 'file:createBlank']) {
+  for (const channel of ['file:rename', 'file:importFolder', 'file:move', 'file:duplicate', 'file:delete', 'file:setReadOnly', 'file:createFolder', 'file:createBlank']) {
     assert.match(fileRegistrar, new RegExp(`defineIpcHandler\\('${channel}'[\\s\\S]*?service\\.`), `${channel} must delegate through the file service boundary`);
   }
   assert.match(fileService, /rename\([\s\S]*checkWithinWorkspace[\s\S]*checkSafeChildName/);
   assert.match(fileService, /async delete\([\s\S]*checkWithinWorkspace[\s\S]*moveToRecycleBin/);
+  assert.match(fileService, /setReadOnly\([\s\S]*checkWithinWorkspace[\s\S]*chmodSync/);
   assert.match(fileService, /createFolder\([\s\S]*checkParentWithinWorkspace[\s\S]*checkSafeChildName/);
   assert.match(fileService, /async createBlank\([\s\S]*checkParentWithinWorkspace[\s\S]*checkSafeChildName/);
   for (const channel of ['file:compressToZip', 'file:extractZip', 'zip:extractFiles']) {

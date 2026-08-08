@@ -17,12 +17,25 @@ export const definePromptIpc = (deps: {
     deps.save(templates);
   });
   defineIpcHandler('prompt:reset', async (_event, id: string) => {
-    const defaultTemplate = deps.defaults().find(item => item.id === id);
-    if (!defaultTemplate) return;
     const templates = deps.load();
     const index = templates.findIndex(item => item.id === id);
-    if (index >= 0) templates[index] = defaultTemplate;
-    else templates.push(defaultTemplate);
+    const current = index >= 0 ? templates[index] : undefined;
+    const defaultTemplate = deps.defaults().find(item => item.id === id)
+      || deps.defaults().find(item => item.scene === current?.scene);
+    if (!defaultTemplate) return;
+    const restored = current
+      ? {
+          ...defaultTemplate,
+          id: current.id,
+          stageId: current.stageId,
+          stageName: current.stageName,
+          name: current.stageName ? `${defaultTemplate.name} - ${current.stageName}` : defaultTemplate.name,
+          createdAt: current.createdAt,
+          isBuiltin: false,
+        }
+      : defaultTemplate;
+    if (index >= 0) templates[index] = restored;
+    else templates.push(restored);
     deps.save(templates);
   });
 };

@@ -1,23 +1,13 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { AppSettings } from '../types';
 import { settingsFile, dataDir, projectsFile } from './paths';
 import { extractRegisteredProjectPaths } from './registeredProjectPaths';
+import { readWorkspaceRootFromSettingsFile } from './workspaceSettings';
 
 // ─── 内部工具 ────────────────────────────────────────────
 
-function loadSettingsSync(): AppSettings {
-  try {
-    if (!fs.existsSync(settingsFile)) return { workspacePath: '', workspaceCapacity: 10 };
-    return JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
-  } catch {
-    return { workspacePath: '', workspaceCapacity: 10 };
-  }
-}
-
 function getWorkspaceRoot(): string {
-  const settings = loadSettingsSync();
-  return settings.workspacePath ? path.resolve(settings.workspacePath) : '';
+  return readWorkspaceRootFromSettingsFile(settingsFile);
 }
 
 /**

@@ -50,6 +50,11 @@ function ensureDataDir() {
 }
 
 const ENCRYPTED_API_KEY_PREFIX = 'safe-storage:v1:';
+const normalizeMaxOutputTokens = (value?: number) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 8192;
+  return Math.max(512, Math.min(65536, Math.round(parsed)));
+};
 
 const decryptApiKey = (value?: string) => {
   const apiKey = String(value || '');
@@ -112,6 +117,7 @@ export function normalizeAIConfig(config: AIConfig | null): AIConfig | null {
       id: model.id || `model-${Date.now()}-${index}`,
       name: model.name || model.model || `模型 ${index + 1}`,
       enabled: model.enabled !== false,
+      maxOutputTokens: normalizeMaxOutputTokens(model.maxOutputTokens),
     }));
     const activeModelId = config.activeModelId && models.some(model => model.id === config.activeModelId)
       ? config.activeModelId
@@ -134,6 +140,7 @@ export function normalizeAIConfig(config: AIConfig | null): AIConfig | null {
       model: config.model,
       endpoint: config.endpoint,
       enabled: true,
+      maxOutputTokens: 8192,
     };
     return {
       models: [legacyModel],
@@ -419,7 +426,8 @@ async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<str
     headers: { 'Content-Type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01' },
   };
 
-  let result = await makeRequest(url, options, buildBody(4096));
+  const maxOutputTokens = normalizeMaxOutputTokens(config.maxOutputTokens);
+  let result = await makeRequest(url, options, buildBody(maxOutputTokens));
   let text = extractAIText(result);
   recordAIUsage(config, extractTokenUsage(result, prompt, text));
   if (text) return text;
@@ -427,7 +435,7 @@ async function callClaudeAPI(config: AIModelConfig, prompt: string): Promise<str
   if (isThinkingOnlyMaxTokensResponse(result)) {
     console.warn('[AI] Claude returned thinking-only max_tokens response; retrying with direct-output prompt.');
     const retryPrompt = `请不要输出思考过程。请直接完成下面任务，并只输出最终结果。\n\n${prompt}`;
-    result = await makeRequest(url, options, buildBody(8192, retryPrompt));
+    result = await makeRequest(url, options, buildBody(Math.max(maxOutputTokens, 8192), retryPrompt));
     text = extractAIText(result);
     recordAIUsage(config, extractTokenUsage(result, retryPrompt, text));
     if (text) return text;
@@ -443,7 +451,7 @@ async function callOpenAIAPI(config: AIModelConfig, prompt: string): Promise<str
   const body = JSON.stringify({
     model: config.model || 'gpt-3.5-turbo',
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 4096,
+    max_tokens: normalizeMaxOutputTokens(config.maxOutputTokens),
   });
 
   const options = {

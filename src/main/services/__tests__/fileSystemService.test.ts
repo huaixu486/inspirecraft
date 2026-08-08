@@ -108,6 +108,19 @@ test('reads directory entries and delegates non-permanent deletion to recycle bi
   assert.throws(() => harness.service.read(path.join(harness.outside, 'secret.txt')), /outside workspace/);
 });
 
+test('toggles a workspace file read-only attribute and reports it in directory entries', async t => {
+  const harness = makeHarness();
+  t.after(() => fs.rmSync(harness.root, { recursive: true, force: true }));
+  const filePath = path.join(harness.workspace, 'protected.txt');
+  fs.writeFileSync(filePath, 'protected');
+
+  assert.deepEqual(harness.service.setReadOnly({ filePath, readOnly: true }), { readOnly: true });
+  assert.equal((await harness.service.listDirectoryEntries(harness.workspace))[0].readOnly, true);
+  assert.deepEqual(harness.service.setReadOnly({ filePath, readOnly: false }), { readOnly: false });
+  assert.equal((await harness.service.listDirectoryEntries(harness.workspace))[0].readOnly, false);
+  assert.throws(() => harness.service.setReadOnly({ filePath: path.join(harness.outside, 'escape.txt'), readOnly: true }), /outside workspace/);
+});
+
 test('creates guarded folders, blank files and template-based output', async t => {
   const harness = makeHarness();
   t.after(() => fs.rmSync(harness.root, { recursive: true, force: true }));

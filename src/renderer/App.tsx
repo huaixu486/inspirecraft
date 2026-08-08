@@ -10,7 +10,6 @@ import {
   SearchOutlined,
   MessageOutlined,
   FolderOpenOutlined,
-  QuestionCircleOutlined,
   UserOutlined,
 } from '@ant-design/icons';
 import NotificationRuntime from './components/Runtime/NotificationRuntime';
@@ -29,9 +28,10 @@ import { Project, WorkbenchPage } from '../shared/types';
 import WorkbenchContextBar from './components/Workbench/WorkbenchContextBar';
 import FriendChatWorkspace from './components/Collaboration/FriendChatWorkspace';
 import ProjectQuickDrawer from './components/ProjectSwitcher/ProjectQuickDrawer';
-import { openProjectSwitcher, useProjectPickerStore } from './stores/projectPickerStore';
+import { openProjectSwitcher } from './stores/projectPickerStore';
 import { useCollaborationRuntimeStore } from './stores/collaborationRuntimeStore';
 import FirstUseGuide, { GuidePage, hasCompletedFirstUseGuide } from './components/Onboarding/FirstUseGuide';
+import { matchesKeyboardShortcut } from './utils/keyboardShortcuts';
 
 const { Title, Text } = Typography;
 const LazyCommandPalette = lazy(() => import('./components/CommandPalette/CommandPalette'));
@@ -121,8 +121,8 @@ const App: React.FC = () => {
   }>({ phase: 'idle', direction: 'toOverview' });
   const [fabDockExpanded, setFabDockExpanded] = useState(false);
   const fabDockTimerRef = useRef<number>(0);
-  const projectPickerOpen = useProjectPickerStore(state => state.open);
   const aiJobs = useAIJobStore(state => state.jobs);
+  const globalSearchShortcut = useSettingsStore(state => state.keyboardShortcuts.globalSearch);
 
   useEffect(() => () => {
     if (fabDockTimerRef.current) window.clearTimeout(fabDockTimerRef.current);
@@ -134,17 +134,17 @@ const App: React.FC = () => {
     return () => window.clearTimeout(timer);
   }, [bootDone]);
 
-  // Ctrl+K / Cmd+K 全局快捷键
+  // User-configurable global search shortcut.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      if (matchesKeyboardShortcut(e, globalSearchShortcut)) {
         e.preventDefault();
         setCommandPaletteOpen(prev => !prev);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [globalSearchShortcut]);
 
   // 使用细粒度 selector，避免 store 任意字段变化触发 App 重渲染
   const projects = useProjectStore(s => s.projects);
@@ -890,12 +890,6 @@ const App: React.FC = () => {
         </div>
 
         <Space size={8} className="app-topbar-actions">
-          <Button
-            icon={<QuestionCircleOutlined />}
-            title="功能引导"
-            aria-label="功能引导"
-            onClick={() => setFirstUseGuideOpen(true)}
-          />
           <Badge count={onlineFriendCount + pendingRequestCount + unreadAIMessageCount} size="small" overflowCount={9} offset={[-1, 3]}>
             <Button
               icon={<MessageOutlined />}
@@ -996,7 +990,7 @@ const App: React.FC = () => {
 
       {/* 左下角浮动工具栏：悬停展开，移出收起 */}
       <div
-        className={`app-fab-dock${fabDockExpanded ? ' app-fab-dock-expanded' : ''}${globalPage === 'settings' || globalPage === 'recycle-bin' || projectPickerOpen ? ' app-fab-dock-active' : ''}`}
+        className={`app-fab-dock${fabDockExpanded ? ' app-fab-dock-expanded' : ''}${globalPage === 'settings' || globalPage === 'recycle-bin' ? ' app-fab-dock-active' : ''}`}
         onMouseEnter={() => {
           if (fabDockTimerRef.current) window.clearTimeout(fabDockTimerRef.current);
           fabDockTimerRef.current = window.setTimeout(() => {
@@ -1014,12 +1008,11 @@ const App: React.FC = () => {
       >
         <Button
           shape="circle"
-          icon={<FolderOpenOutlined style={{ color: projectPickerOpen ? '#1677ff' : undefined }} />}
+          icon={<FolderOpenOutlined />}
           type="default"
           onClick={openProjectSwitcher}
           title="项目切换"
-          className={`app-settings-fab${projectPickerOpen ? ' app-settings-fab-active' : ''}`}
-          style={{ borderColor: projectPickerOpen ? '#1677ff' : undefined }}
+          className="app-settings-fab"
         />
         <Button
           shape="circle"

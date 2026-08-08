@@ -8,6 +8,7 @@ import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
 import { AIConfig, WritingTemplate, TemplateNode, StageConfig, TemplateOutputFileType, TemplateFormatRules } from '../../../shared/types';
 import { getAllStages, getGlobalStageProgress } from '../../utils/timelineStages';
 import { requireIpcObject } from '../../utils/ipcResult';
+import { composePromptAsync } from '../../utils/promptComposer';
 import { syncProjectStageFiles } from '../../utils/autoStageDocs';
 import {
   mapTemplateNodes,
@@ -1943,6 +1944,13 @@ ${content.slice(0, 22000)}`;
 }
 `;
     const prompt = `${currentType === 'example' ? examplePrompt : directPrompt}${strictJsonInstruction}`;
+    // 模板类型使用各自独立、可编辑的提示词配置，避免代码内文案覆盖设置。
+    const promptScene = currentType === 'example' ? 'templateExampleExtract' : 'templateDirectExtract';
+    const configuredPrompt = await composePromptAsync(promptScene, {
+      fileCount: String(fileCount),
+      multiFileNote,
+      content: content.slice(0, 22000),
+    });
 
     const aiConfig = requireIpcObject<AIConfig>(await window.electronAPI.loadAIConfig(), '加载 AI 配置失败');
     const useParallel = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1 && window.electronAPI.callAIParallelDetails;
@@ -1951,13 +1959,13 @@ ${content.slice(0, 22000)}`;
     if (useParallel) {
       const details = await useAIJobStore.getState().runAIJob<{ synthesis: string; variants: Array<{ modelName: string; ok: boolean; output: string; error?: string }> }>(
         {
-          scene: 'templateExtract',
+          scene: promptScene,
           title: 'AI 识别模板结构',
           resultPreview: (value) => value.synthesis,
         },
         async ({ setProgress, throwIfCancelled }) => {
           setProgress(35);
-          const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
+          const value = await window.electronAPI.callAIParallelDetails({ prompt: configuredPrompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
           throwIfCancelled();
           setProgress(85);
           return value;
@@ -1971,13 +1979,13 @@ ${content.slice(0, 22000)}`;
     } else {
       response = await useAIJobStore.getState().runAIJob<string>(
         {
-          scene: 'templateExtract',
+          scene: promptScene,
           title: 'AI 识别模板结构',
           resultPreview: (value) => value,
         },
         async ({ setProgress, throwIfCancelled }) => {
           setProgress(35);
-          const value = await window.electronAPI.callAI(prompt);
+          const value = await window.electronAPI.callAI(configuredPrompt);
           throwIfCancelled();
           setProgress(85);
           return String(value || '');

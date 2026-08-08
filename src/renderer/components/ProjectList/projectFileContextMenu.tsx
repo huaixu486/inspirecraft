@@ -8,7 +8,9 @@ import {
   ExportOutlined,
   FileZipOutlined,
   FolderOpenOutlined,
+  LockOutlined,
   SendOutlined,
+  UnlockOutlined,
 } from '@ant-design/icons';
 import type { FileItem } from './useProjectFileData';
 
@@ -22,6 +24,7 @@ export interface ProjectFileContextActions {
   onSendToReview: (item: FileItem) => void;
   onSendToReport: (item: FileItem) => void;
   onShare: (item: FileItem) => void;
+  onToggleReadOnly: (item: FileItem) => void;
 }
 
 const createProjectFileContextMenu = (
@@ -31,6 +34,14 @@ const createProjectFileContextMenu = (
   { key: 'open', icon: <ExportOutlined />, label: item.isDirectory ? '打开文件夹' : '打开文件', onClick: () => actions.onOpen(item) },
   { key: 'reveal', icon: <FolderOpenOutlined />, label: '在文件资源管理器中显示', onClick: () => actions.onReveal(item) },
   { key: 'copy-path', icon: <CopyOutlined />, label: '复制完整路径', onClick: () => actions.onCopyPath(item) },
+  !item.isDirectory
+    ? {
+      key: 'toggle-read-only',
+      icon: item.readOnly ? <UnlockOutlined /> : <LockOutlined />,
+      label: item.readOnly ? '取消只读' : '设为只读',
+      onClick: () => actions.onToggleReadOnly(item),
+    }
+    : null,
   { key: 'compress', icon: <FileZipOutlined />, label: '压缩为 ZIP', onClick: () => actions.onCompress(item) },
   !item.isDirectory && item.ext.toLowerCase() === '.zip'
     ? { key: 'extract', icon: <FileZipOutlined />, label: '解压到同名文件夹', onClick: () => actions.onExtract(item) }

@@ -29,10 +29,12 @@ import {
   WarningOutlined,
 } from '@ant-design/icons';
 import { OutputField, PromptRule, PromptScene, PromptTemplate, StructuredPrompt } from '../../../shared/types';
-import { PROMPT_SCENE_LABELS } from '../../../shared/promptScenes';
+import { PROMPT_CATEGORY_LABELS, PROMPT_SCENE_CATEGORIES, PROMPT_SCENE_LABELS } from '../../../shared/promptScenes';
 import { usePromptStore } from '../../stores/promptStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
 import { assembleStructuredPrompt, extractPlaceholders } from '../../utils/promptComposer';
+import { getAllStages } from '../../utils/timelineStages';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -46,6 +48,10 @@ const RULE_TYPE_OPTIONS: Array<{ value: RuleType; label: string }> = [
 ];
 
 const SCENE_INFO: Record<PromptScene, { usage: string; example: string }> = {
+  draft: { usage: '在团队写作中生成非分章的完整第一稿时使用', example: '根据用户要求、模板、项目资料和阶段记忆直接生成可编辑初稿' },
+  longFormSection: { usage: '技术报告、研究报告等长篇文档逐章生成时使用', example: '按本章要求、目标篇幅和相关资料生成一章完整正文' },
+  sectionExpansion: { usage: '分章结果低于目标篇幅，需要二次扩写时使用', example: '继承用户要求和模板约束，将已有章节补充到目标篇幅' },
+  precisionRewrite: { usage: '团队写作中只修订用户选中的文字时使用', example: '仅返回选区的替换文本，不修改选区外内容' },
   report: { usage: '\u5728\u9879\u76ee\u8be6\u60c5\u3001\u4efb\u52a1\u89c4\u5212\u6216\u5199\u4f5c\u9762\u677f\u4e2d\u751f\u6210\u9636\u6bb5\u62a5\u544a\u65f6\u4f7f\u7528', example: '\u751f\u6210\u5199\u4f5c\u65b9\u5411\u3001\u6750\u6599\u8ba1\u5212\u3001\u4eba\u5de5\u5f85\u529e\u548c AI \u5f85\u529e' },
   review: { usage: '\u5728\u6587\u6863\u5ba1\u67e5\u5de5\u4f5c\u53f0\u4e2d\u8ba9 AI \u68c0\u67e5\u7f3a\u5931\u3001\u683c\u5f0f\u548c\u5185\u5bb9\u504f\u5dee\u65f6\u4f7f\u7528', example: '\u6309\u6a21\u677f\u7ed3\u6784\u5217\u51fa\u95ee\u9898\u3001\u98ce\u9669\u548c\u4fee\u6539\u5efa\u8bae' },
   rewrite: { usage: '\u5728\u5199\u4f5c\u5de5\u4f5c\u53f0\u4e2d\u5bf9\u5355\u4e2a\u7ae0\u8282\u8fdb\u884c AI \u6539\u5199\u65f6\u4f7f\u7528', example: '\u6839\u636e\u5f53\u524d\u7ae0\u8282\u3001\u6a21\u677f\u8981\u6c42\u548c\u53c2\u8003\u6750\u6599\u751f\u6210\u66ff\u6362\u6587\u672c' },
@@ -55,10 +61,24 @@ const SCENE_INFO: Record<PromptScene, { usage: string; example: string }> = {
   description: { usage: '\u5728\u7528\u6237\u6ca1\u6709\u624b\u52a8\u586b\u5199\u9879\u76ee\u63cf\u8ff0\u65f6\u81ea\u52a8\u751f\u6210\u4fa7\u8fb9\u680f\u7b80\u4ecb', example: '\u6839\u636e\u9879\u76ee\u540d\u3001\u9636\u6bb5\u548c\u6587\u4ef6\u5217\u8868\u751f\u6210\u4e00\u53e5\u8bdd\u6982\u62ec' },
   taskExecute: { usage: '\u6267\u884c\u4efb\u52a1\u89c4\u5212\u4e2d\u7684 AI \u4efb\u52a1\u65f6\u4f7f\u7528', example: '\u6309\u4efb\u52a1\u6307\u4ee4\u6269\u5199\u3001\u6da6\u8272\u3001\u6574\u7406\u6216\u8f6c\u6362\u6587\u6863\u5185\u5bb9' },
   sectionAnalysis: { usage: '\u5206\u6790\u5355\u4e2a\u7ae0\u8282\u5b8c\u6210\u5ea6\u65f6\u4f7f\u7528', example: '\u5224\u65ad\u7ae0\u8282\u662f\u5b8c\u6210\u3001\u90e8\u5206\u5b8c\u6210\u8fd8\u662f\u7f3a\u5931' },
+  workflowPlanning: { usage: '在报告工作台生成按章节可选择的工作流草稿时使用', example: '把章节问题转换为可编辑、可勾选的人工或 AI 写作步骤' },
   templateExtract: { usage: '\u4ece\u5bfc\u5165\u6587\u6863\u4e2d\u63d0\u53d6\u6a21\u677f\u7ed3\u6784\u548c\u683c\u5f0f\u89c4\u5219\u65f6\u4f7f\u7528', example: '\u8bc6\u522b\u6807\u9898\u5c42\u7ea7\u3001\u586b\u5199\u8bf4\u660e\u3001\u8303\u6587\u5199\u6cd5\u548c\u683c\u5f0f\u7ea6\u675f' },
+  templateExampleExtract: { usage: '导入范文并识别通用写法、方向和格式时使用', example: '从多篇范文提炼可迁移的写作方向，不照搬项目事实' },
+  templateDirectExtract: { usage: '导入可直接套用的模板并识别结构与硬性要求时使用', example: '区分章节、填写说明、范文和格式规则' },
+  templateExampleAnalysis: { usage: '首次分析模板关联范文的写作规律时使用', example: '形成风格、章节写法、篇幅及开头结尾模式分析' },
+  templateExampleCompare: { usage: '新增范文后与已有分析进行增量比较时使用', example: '只记录新范文带来的结构、格式或写法差异' },
 };
 
 const DEFAULT_STRUCTURED: Record<PromptScene, StructuredPrompt> = {
+  draft: { scene: 'draft', mode: 'raw', role: '完整第一稿写作助手', goals: ['生成完整、可编辑的第一稿'], rules: [], outputFields: [{ key: 'draft', label: '第一稿正文', description: '完整正文' }] },
+  longFormSection: { scene: 'longFormSection', mode: 'raw', role: '长篇分章写作助手', goals: ['生成当前章节完整正文'], rules: [], outputFields: [{ key: 'section', label: '章节正文', description: '当前章节正文' }] },
+  sectionExpansion: { scene: 'sectionExpansion', mode: 'raw', role: '章节扩写助手', goals: ['扩写到目标篇幅'], rules: [], outputFields: [{ key: 'section', label: '扩写后正文', description: '扩写后的完整章节' }] },
+  precisionRewrite: { scene: 'precisionRewrite', mode: 'raw', role: '选区精确修订助手', goals: ['只修改选中文字'], rules: [], outputFields: [{ key: 'text', label: '修订后选区', description: '用于替换选区的文本' }] },
+  workflowPlanning: { scene: 'workflowPlanning', mode: 'raw', role: '阶段写作工作流规划助手', goals: ['生成可选择、可编辑的写作步骤'], rules: [], outputFields: [{ key: 'sectionAdvice', label: '章节建议', description: '可转换为工作流的章节写作步骤' }] },
+  templateExampleExtract: { scene: 'templateExampleExtract', mode: 'raw', role: '范文模板识别助手', goals: ['提炼范文的通用写法与格式'], rules: [], outputFields: [{ key: 'nodes', label: '写作方向', description: '范文中可迁移的写作方向' }] },
+  templateDirectExtract: { scene: 'templateDirectExtract', mode: 'raw', role: '直接套用模板识别助手', goals: ['识别模板结构、要求、范文和格式'], rules: [], outputFields: [{ key: 'nodes', label: '模板章节', description: '模板原始章节与约束' }] },
+  templateExampleAnalysis: { scene: 'templateExampleAnalysis', mode: 'raw', role: '范文写法分析助手', goals: ['形成可复用的范文写作分析'], rules: [], outputFields: [{ key: 'sectionGuidance', label: '章节指导', description: '各章节的写法与篇幅参考' }] },
+  templateExampleCompare: { scene: 'templateExampleCompare', mode: 'raw', role: '范文差异分析助手', goals: ['只输出新范文带来的差异'], rules: [], outputFields: [{ key: 'differences', label: '范文差异', description: '新增或不同的写法与格式' }] },
   report: {
     scene: 'report',
     mode: 'structured',
@@ -129,10 +149,19 @@ const DEFAULT_STRUCTURED: Record<PromptScene, StructuredPrompt> = {
   templateExtract: { scene: 'templateExtract', mode: 'structured', role: '\u6587\u6863\u6a21\u677f\u7ed3\u6784\u63d0\u53d6\u52a9\u624b', goals: ['\u8bc6\u522b\u6587\u6863\u6807\u9898\u5c42\u7ea7', '\u63d0\u53d6\u586b\u5199\u8981\u6c42\u548c\u8303\u6587\u7279\u5f81', '\u63d0\u53d6\u53ef\u590d\u7528\u683c\u5f0f\u89c4\u5219'], rules: [{ id: 'template-hard-soft', type: 'must', enabled: true, text: '\u533a\u5206\u786c\u6027\u586b\u5199\u8981\u6c42\u548c\u8303\u6587\u8868\u8fbe\u7279\u5f81' }, { id: 'template-structure', type: 'must', enabled: true, text: '\u4fdd\u7559\u7ae0\u8282\u5c42\u7ea7\u5173\u7cfb' }], outputFields: [{ key: 'nodes', label: '\u6a21\u677f\u7ae0\u8282', description: '\u5e26\u5c42\u7ea7\u7684\u7ae0\u8282\u7ed3\u6784' }, { key: 'formatRules', label: '\u683c\u5f0f\u89c4\u5219', description: '\u6807\u9898\u3001\u6b63\u6587\u3001\u8868\u683c\u7b49\u683c\u5f0f\u8981\u6c42' }] },
 };
 
-const SCENE_OPTIONS = Object.entries(PROMPT_SCENE_LABELS).map(([value, label]) => ({
-  value: value as PromptScene,
+const SCENE_OPTIONS = Object.entries(PROMPT_CATEGORY_LABELS).map(([category, label]) => ({
   label,
+  options: Object.entries(PROMPT_SCENE_LABELS)
+    .filter(([scene]) => scene !== 'templateExtract' && PROMPT_SCENE_CATEGORIES[scene as PromptScene] === category)
+    .map(([value, sceneLabel]) => ({ value: value as PromptScene, label: sceneLabel })),
 }));
+
+function createInternalOutputFieldKey(fields: OutputField[]) {
+  const existingKeys = new Set(fields.map(field => field.key));
+  let index = 1;
+  while (existingKeys.has(`customField${index}`)) index += 1;
+  return `customField${index}`;
+}
 
 function cloneDefault(scene: PromptScene): StructuredPrompt {
   const value = DEFAULT_STRUCTURED[scene];
@@ -152,6 +181,9 @@ function isProbablyMojibake(value?: string): boolean {
 
 function normalizeStructured(template: PromptTemplate | null, scene: PromptScene): StructuredPrompt {
   const source = template?.structured;
+  if (!source && template) {
+    return { ...cloneDefault(scene), mode: 'raw', rawPrompt: template.content || '' };
+  }
   if (!source || isProbablyMojibake(source.role)) {
     return cloneDefault(scene);
   }
@@ -323,7 +355,10 @@ function buildAiFillPrompt(scene: PromptScene, info: { usage: string; example: s
 
 const PromptSettings: React.FC = () => {
   const { templates, saveTemplate, resetTemplate } = usePromptStore();
+  const customStages = useSettingsStore(state => state.customStages);
+  const allStages = useMemo(() => getAllStages(customStages), [customStages]);
   const [selectedScene, setSelectedScene] = useState<PromptScene>('report');
+  const [selectedStageId, setSelectedStageId] = useState('common');
   const [draft, setDraft] = useState<StructuredPrompt>(() => cloneDefault('report'));
   const [previewOpen, setPreviewOpen] = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
@@ -335,10 +370,16 @@ const PromptSettings: React.FC = () => {
   const [aiRequirement, setAiRequirement] = useState('');
   const [aiGenerating, setAiGenerating] = useState(false);
 
-  const currentTemplate = useMemo(() => {
+  const selectedStage = allStages.find(stage => stage.id === selectedStageId);
+  const exactTemplate = useMemo(() => {
     const sceneTemplates = templates.filter(template => template.scene === selectedScene);
-    return sceneTemplates.find(template => !template.isBuiltin) || sceneTemplates.find(template => template.isBuiltin) || null;
-  }, [selectedScene, templates]);
+    return selectedStageId === 'common'
+      ? sceneTemplates.find(template => !template.stageId && !template.stageName) || null
+      : sceneTemplates.find(template => template.stageId === selectedStageId || template.stageName === selectedStage?.name) || null;
+  }, [selectedScene, selectedStage?.name, selectedStageId, templates]);
+  const currentTemplate = useMemo(() => exactTemplate || (
+    templates.find(template => template.scene === selectedScene && !template.stageId && !template.stageName) || null
+  ), [exactTemplate, selectedScene, templates]);
 
   useEffect(() => {
     const normalized = normalizeStructured(currentTemplate, selectedScene);
@@ -379,14 +420,18 @@ const PromptSettings: React.FC = () => {
       const now = new Date().toISOString();
       const structured: StructuredPrompt = { ...nextDraft, scene: selectedScene, rawPrompt: sourceDraft };
       const content = structured.mode === 'raw' ? sourceDraft : assembleStructuredPrompt(structured);
-      const base = currentTemplate;
+      const base = exactTemplate;
       const template: PromptTemplate = {
-        id: base && !base.isBuiltin ? base.id : `user-${selectedScene}`,
+        id: base?.id || `user-${selectedScene}-${selectedStageId}`,
         scene: selectedScene,
-        name: base?.name && !isProbablyMojibake(base.name) ? base.name : `${PROMPT_SCENE_LABELS[selectedScene]} - \u81ea\u5b9a\u4e49`,
+        stageId: selectedStage?.id,
+        stageName: selectedStage?.name,
+        name: base?.name && !isProbablyMojibake(base.name)
+          ? base.name
+          : `${PROMPT_SCENE_LABELS[selectedScene]} - ${selectedStage?.name || '通用'}`,
         content,
         isBuiltin: false,
-        createdAt: base && !base.isBuiltin ? base.createdAt : now,
+        createdAt: base?.createdAt || now,
         updatedAt: now,
         structured,
       };
@@ -405,8 +450,8 @@ const PromptSettings: React.FC = () => {
   };
 
   const restoreDefault = async () => {
-    if (currentTemplate && !currentTemplate.isBuiltin) {
-      await resetTemplate(currentTemplate.id);
+    if (exactTemplate) {
+      await resetTemplate(exactTemplate.id);
       message.success('\u5df2\u6062\u590d\u9ed8\u8ba4\u63d0\u793a\u8bcd');
       return;
     }
@@ -481,6 +526,17 @@ const PromptSettings: React.FC = () => {
           <Col xs={24} md={7}>
             <Text strong>{'\u9009\u62e9\u63d0\u793a\u8bcd\u573a\u666f'}</Text>
             <Select value={selectedScene} options={SCENE_OPTIONS} onChange={(value: PromptScene) => setSelectedScene(value)} style={{ width: '100%', marginTop: 8 }} />
+            <Text strong style={{ display: 'block', marginTop: 12 }}>适用项目阶段</Text>
+            <Select
+              value={selectedStageId}
+              onChange={setSelectedStageId}
+              style={{ width: '100%', marginTop: 8 }}
+              options={[
+                { value: 'common', label: '通用（所有阶段的默认版本）' },
+                ...allStages.map(stage => ({ value: stage.id, label: stage.name })),
+              ]}
+            />
+            {selectedStage && !exactTemplate && <Text type="secondary">当前继承通用版本，保存后将创建“{selectedStage.name}”专用提示词。</Text>}
           </Col>
           <Col xs={24} md={17}>
             <div style={{ border: '1px solid #f0f0f0', borderRadius: 8, overflow: 'hidden' }}>
@@ -496,7 +552,7 @@ const PromptSettings: React.FC = () => {
                 <Col span={4} style={{ padding: '10px 12px', background: '#fafafa' }}><Text type="secondary">{'\u72b6\u6001'}</Text></Col>
                 <Col span={20} style={{ padding: '10px 12px' }}>
                   <Space wrap>
-                    <Tag color={currentTemplate?.isBuiltin ? 'default' : 'blue'}>{currentTemplate?.isBuiltin ? '\u7cfb\u7edf\u9ed8\u8ba4' : '\u7528\u6237\u81ea\u5b9a\u4e49'}</Tag>
+                    <Tag color="blue">可编辑配置</Tag>
                     <Tag color={draft.mode === 'raw' ? 'orange' : 'green'}>{draft.mode === 'raw' ? '\u9ad8\u7ea7\u6e90\u7801\u6a21\u5f0f' : '\u53ef\u8bfb\u7ed3\u6784\u6a21\u5f0f'}</Tag>
                     {placeholders.map(key => <Tag key={key}>{`{{${key}}}`}</Tag>)}
                   </Space>
@@ -568,16 +624,15 @@ const PromptSettings: React.FC = () => {
           />
         </Card>
 
-        <Card size="small" title={'4. AI \u9700\u8981\u8f93\u51fa\u54ea\u4e9b\u5185\u5bb9'} extra={<Button size="small" icon={<PlusOutlined />} onClick={() => setDraft(prev => ({ ...prev, mode: 'structured', outputFields: [...prev.outputFields, { key: '', label: '', description: '' }] }))}>{'\u6dfb\u52a0\u8f93\u51fa\u9879'}</Button>} style={{ marginTop: 16 }}>
+        <Card size="small" title={'4. AI \u9700\u8981\u8f93\u51fa\u54ea\u4e9b\u5185\u5bb9'} extra={<Button size="small" icon={<PlusOutlined />} onClick={() => setDraft(prev => ({ ...prev, mode: 'structured', outputFields: [...prev.outputFields, { key: createInternalOutputFieldKey(prev.outputFields), label: '', description: '' }] }))}>{'\u6dfb\u52a0\u8f93\u51fa\u9879'}</Button>} style={{ marginTop: 16 }}>
           <List
             dataSource={draft.outputFields}
             locale={{ emptyText: '\u6682\u65e0\u8f93\u51fa\u9879' }}
             renderItem={(field, index) => (
               <List.Item actions={[<Button key="delete" type="text" danger icon={<DeleteOutlined />} onClick={() => setDraft(prev => ({ ...prev, mode: 'structured', outputFields: prev.outputFields.filter((_, fieldIndex) => fieldIndex !== index) }))} />]}>
                 <Row gutter={12} style={{ width: '100%' }}>
-                  <Col xs={24} md={5}><Input value={field.label} onChange={event => updateField(index, { label: event.target.value })} placeholder={'\u7ed9\u7528\u6237\u770b\u7684\u540d\u79f0'} /></Col>
-                  <Col xs={24} md={5}><Input value={field.key} onChange={event => updateField(index, { key: event.target.value })} placeholder={'\u6280\u672f\u5b57\u6bb5\u540d'} /></Col>
-                  <Col xs={24} md={14}><Input value={field.description} onChange={event => updateField(index, { description: event.target.value })} placeholder={'\u8bf4\u660e\u8fd9\u4e2a\u8f93\u51fa\u9879\u5e94\u8be5\u5305\u542b\u4ec0\u4e48'} /></Col>
+                  <Col xs={24} md={7}><Input value={field.label} onChange={event => updateField(index, { label: event.target.value })} placeholder={'\u8f93\u51fa\u9879\u540d\u79f0'} /></Col>
+                  <Col xs={24} md={17}><Input value={field.description} onChange={event => updateField(index, { description: event.target.value })} placeholder={'\u8bf4\u660e\u8fd9\u4e2a\u8f93\u51fa\u9879\u5e94\u8be5\u5305\u542b\u4ec0\u4e48'} /></Col>
                 </Row>
               </List.Item>
             )}

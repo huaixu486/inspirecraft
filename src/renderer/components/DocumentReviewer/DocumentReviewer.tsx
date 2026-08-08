@@ -17,8 +17,8 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { AIConfig, DocumentVersion, ProjectDocument, ReviewConfig, ReviewIssue, ReviewResult, TaskItem } from '../../../shared/types';
 import { detectTimelineStage, getAllStages } from '../../utils/timelineStages';
 import { requireIpcObject } from '../../utils/ipcResult';
-import DiffMatchPatch from 'diff-match-patch';
 import { composePromptAsync } from '../../utils/promptComposer';
+import { computeDocumentDiffRows, summarizeDocumentDiff, type DocumentDiffRow } from '../../utils/documentDiff';
 import { buildLifecyclePatch, reviewLifecycleStatus } from '../../utils/documentLifecycle';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
 import { pickProjectFiles } from '../../stores/projectPickerStore';
@@ -867,38 +867,6 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
     return () => { cancelled = true; };
   }, [currentProject?.id, currentProject?.folderPath]);
 
-  // 行级 diff：先按行拆分，再对每行做字符级 diff 高亮
-  type DiffLine = { type: 'equal' | 'insert' | 'delete'; text: string; lineA?: number; lineB?: number; charDiffs?: [number, string][] };
-
-  const computeLineDiff = (textA: string, textB: string): DiffLine[] => {
-    const dmp = new DiffMatchPatch();
-    const lineDiffs = dmp.diff_linesToChars_(textA, textB);
-    const diffs = dmp.diff_main(lineDiffs.chars1, lineDiffs.chars2, false);
-    dmp.diff_charsToLines_(diffs, lineDiffs.lineArray);
-    dmp.diff_cleanupSemantic(diffs);
-
-    const result: DiffLine[] = [];
-    let lineA = 1, lineB = 1;
-    for (const [op, text] of diffs) {
-      const lines = text.split('\n');
-      const actualLines = lines[lines.length - 1] === '' ? lines.slice(0, -1) : lines;
-      for (const line of actualLines) {
-        if (op === 0) {
-          result.push({ type: 'equal', text: line, lineA, lineB });
-          lineA++;
-          lineB++;
-        } else if (op === -1) {
-          result.push({ type: 'delete', text: line, lineA });
-          lineA++;
-        } else if (op === 1) {
-          result.push({ type: 'insert', text: line, lineB });
-          lineB++;
-        }
-      }
-    }
-    return result;
-  };
-
   const comparableVersions = useMemo((): ReviewerComparableVersion[] => {
     if (!currentProject) return [];
     const currentStage = currentStageName || '';
@@ -1002,20 +970,12 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
   const contentA = selectedVersionMetaA?.content || '';
   const contentB = selectedVersionMetaB?.content || '';
 
-  const diffResult = useMemo((): DiffLine[] => {
+  const baseDiffRows = useMemo((): DocumentDiffRow[] => {
     if (!selectedVersionA || !selectedVersionB) return [];
-    return computeLineDiff(contentA, contentB);
+    return computeDocumentDiffRows(contentA, contentB);
   }, [contentA, contentB, selectedVersionA, selectedVersionB]);
 
-  const diffStats = useMemo(() => {
-    let insert = 0, deleteCount = 0, equal = 0;
-    for (const line of diffResult) {
-      if (line.type === 'equal') equal++;
-      else if (line.type === 'insert') insert++;
-      else if (line.type === 'delete') deleteCount++;
-    }
-    return { insert, delete: deleteCount, equal, total: insert + deleteCount + equal };
-  }, [diffResult]);
+  const diffStats = useMemo(() => summarizeDocumentDiff(baseDiffRows), [baseDiffRows]);
   type FormatDiffFieldChange = {
     fieldKey: string;
     label: string;
@@ -1169,54 +1129,17 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
   const selectedFormatDiffs = formatDiffs.filter(item => selectedFormatDiffKeys[item.key]);
   const selectedFormatDiffKeySet = useMemo(() => new Set(selectedFormatDiffs.map(item => item.key)), [selectedFormatDiffs]);
   const formatDiffByLine = useMemo(() => new Map(formatDiffs.map(item => [item.index + 1, item])), [formatDiffs]);
-  type DiffRow = { left?: DiffLine; right?: DiffLine; formatDiff?: FormatDiffItem };
-
-  const diffRows = useMemo((): DiffRow[] => {
-    const rows: DiffRow[] = [];
-    const resolveFormatDiff = (left?: DiffLine, right?: DiffLine) => {
+  const diffRows = useMemo(() => {
+    const resolveFormatDiff = (left?: DocumentDiffRow['left'], right?: DocumentDiffRow['right']) => {
       const leftHit = left?.lineA ? formatDiffByLine.get(left.lineA) : undefined;
       const rightHit = right?.lineB ? formatDiffByLine.get(right.lineB) : undefined;
       return leftHit || rightHit;
     };
-
-    for (let index = 0; index < diffResult.length; index++) {
-      const line = diffResult[index];
-      if (line.type === 'equal') {
-        rows.push({ left: line, right: line, formatDiff: resolveFormatDiff(line, line) });
-        continue;
-      }
-
-      if (line.type === 'delete') {
-        const deletes: DiffLine[] = [];
-        while (index < diffResult.length && diffResult[index].type === 'delete') {
-          deletes.push(diffResult[index]);
-          index++;
-        }
-        const inserts: DiffLine[] = [];
-        while (index < diffResult.length && diffResult[index].type === 'insert') {
-          inserts.push(diffResult[index]);
-          index++;
-        }
-        index--;
-        const count = Math.max(deletes.length, inserts.length);
-        for (let offset = 0; offset < count; offset++) {
-          const left = deletes[offset];
-          const right = inserts[offset];
-          rows.push({ left, right, formatDiff: resolveFormatDiff(left, right) });
-        }
-        continue;
-      }
-
-      const inserts: DiffLine[] = [];
-      while (index < diffResult.length && diffResult[index].type === 'insert') {
-        inserts.push(diffResult[index]);
-        index++;
-      }
-      index--;
-      for (const right of inserts) rows.push({ right, formatDiff: resolveFormatDiff(undefined, right) });
-    }
-    return rows;
-  }, [diffResult, formatDiffByLine]);
+    return baseDiffRows.map(row => ({
+      ...row,
+      formatDiff: resolveFormatDiff(row.left, row.right),
+    }));
+  }, [baseDiffRows, formatDiffByLine]);
 
   const toggleFormatDiff = (key: string, checked: boolean) => {
     setSelectedFormatDiffKeys(prev => ({ ...prev, [key]: checked }));
@@ -1363,6 +1286,7 @@ const DocumentReviewer: React.FC<{ onBack?: () => void; focus?: import('../../..
         return;
       }
       const prompt = await composePromptAsync('rewrite', {
+        stage: getProjectDocStageName(selectedDoc),
         sectionTitle: '（全文改稿）',
         requirement: `修改要求：${instruction}`,
         example: 'None',

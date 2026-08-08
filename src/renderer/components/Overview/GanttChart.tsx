@@ -26,6 +26,8 @@ const PROJECT_COL = 100;
 const STAGE_COL = 100;
 
 const COMPACT_GANTT_HEIGHT = 315;
+const OVERLAY_MOTION_MS = 300;
+const OVERLAY_SETTLE_FALLBACK_MS = OVERLAY_MOTION_MS + 140;
 
 interface TimelineOverlayRect {
   top: number;
@@ -599,8 +601,8 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [overlayMotionReady, setOverlayMotionReady] = useState(false);
   const [overlayExpanded, setOverlayExpanded] = useState(false);
+  const [overlayClosing, setOverlayClosing] = useState(false);
   const [expandedContentVisible, setExpandedContentVisible] = useState(false);
-  const [originRect, setOriginRect] = useState<TimelineOverlayRect | null>(null);
   const [targetRect, setTargetRect] = useState<TimelineOverlayRect | null>(null);
   const suppressOpenRef = useRef(false);
   const overlayFrameRef = useRef(0);
@@ -613,13 +615,9 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
     const viewportWidth = document.documentElement.clientWidth;
     const viewportHeight = document.documentElement.clientHeight;
     const viewportPadding = viewportWidth <= 720 ? 12 : 24;
-    // Never make the expanded surface narrower than the source card. Keeping
-    // the rendered width fixed also prevents the Gantt chart from remeasuring
-    // itself on every animation frame.
-    const targetWidth = Math.max(
-      280,
-      Math.min(viewportWidth - viewportPadding, Math.max(origin.width, viewportWidth - viewportPadding * 2)),
-    );
+    // Keep equal spacing on both sides. The shell remains fixed at this size
+    // during motion so the chart does not remeasure on every animation frame.
+    const targetWidth = Math.max(280, viewportWidth - viewportPadding * 2);
     const targetHeight = Math.max(
       Math.min(origin.height, viewportHeight - viewportPadding * 2),
       Math.min(760, viewportHeight - viewportPadding * 2),
@@ -638,7 +636,7 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
       const nextOrigin = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
       overlayClosingRef.current = false;
       flushSync(() => {
-        setOriginRect(nextOrigin);
+        setOverlayClosing(false);
         setTargetRect(getTargetRect(nextOrigin));
         // Lay out the full chart before motion starts. The shell is clipped to
         // the compact card at this point, so this work cannot interrupt the
@@ -664,33 +662,30 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
     if (!overlayVisible || overlayClosingRef.current) return;
     if (overlaySettleTimerRef.current) window.clearTimeout(overlaySettleTimerRef.current);
     overlayClosingRef.current = true;
-    if (compactCardRef.current) {
-      const rect = compactCardRef.current.getBoundingClientRect();
-      setOriginRect({ top: rect.top, left: rect.left, width: rect.width, height: rect.height });
-    }
+    setOverlayClosing(true);
     setOverlayExpanded(false);
     overlaySettleTimerRef.current = window.setTimeout(() => {
       overlaySettleTimerRef.current = 0;
       if (!overlayClosingRef.current) return;
       overlayClosingRef.current = false;
+      setOverlayClosing(false);
       setOverlayVisible(false);
       setOverlayMotionReady(false);
       setExpandedContentVisible(false);
-      setOriginRect(null);
       setTargetRect(null);
-    }, 300);
+    }, OVERLAY_SETTLE_FALLBACK_MS);
   }, [overlayVisible]);
 
   const handleOverlayTransitionEnd = useCallback((event: React.TransitionEvent<HTMLDivElement>) => {
-    if (event.target !== event.currentTarget || event.propertyName !== 'clip-path') return;
+    if (event.target !== event.currentTarget || event.propertyName !== 'transform') return;
     if (overlayClosingRef.current) {
       if (overlaySettleTimerRef.current) window.clearTimeout(overlaySettleTimerRef.current);
       overlaySettleTimerRef.current = 0;
       overlayClosingRef.current = false;
+      setOverlayClosing(false);
       setOverlayVisible(false);
       setOverlayMotionReady(false);
       setExpandedContentVisible(false);
-      setOriginRect(null);
       setTargetRect(null);
       return;
     }
@@ -723,7 +718,6 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
       const rect = compactCardRef.current.getBoundingClientRect();
       const nextOrigin = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
       setOverlayMotionReady(false);
-      setOriginRect(nextOrigin);
       setTargetRect(getTargetRect(nextOrigin));
       if (overlayResizeTimerRef.current) window.clearTimeout(overlayResizeTimerRef.current);
       overlayResizeTimerRef.current = window.setTimeout(() => {
@@ -758,11 +752,6 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
 
   const hiddenRect: TimelineOverlayRect = { top: -10000, left: -10000, width: 960, height: 410 };
   const shellRect = overlayVisible ? (targetRect || hiddenRect) : hiddenRect;
-  const animationOrigin = overlayVisible ? (originRect || shellRect) : shellRect;
-  const originOffsetX = animationOrigin.left - shellRect.left;
-  const originOffsetY = animationOrigin.top - shellRect.top;
-  const originClipRight = Math.max(0, shellRect.width - Math.min(animationOrigin.width, shellRect.width));
-  const originClipBottom = Math.max(0, shellRect.height - Math.min(animationOrigin.height, shellRect.height));
   const overlayTimelineHeight = Math.max(COMPACT_GANTT_HEIGHT, (targetRect?.height || 720) - 98);
 
   return (
@@ -776,7 +765,7 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
       </div>
 
       {createPortal(
-        <div className={`gantt-shared-overlay${overlayMotionReady ? ' is-motion-ready' : ''}${overlayExpanded ? ' is-expanded' : ''}${overlayVisible ? '' : ' is-hidden'}`}>
+        <div className={`gantt-shared-overlay${overlayMotionReady ? ' is-motion-ready' : ''}${overlayExpanded ? ' is-expanded' : ''}${overlayClosing ? ' is-closing' : ''}${overlayVisible ? '' : ' is-hidden'}`}>
           <div className="gantt-shared-mask" onClick={handleOverlayClose} />
           <div
             className="gantt-shared-shell"
@@ -785,10 +774,6 @@ const GanttChart: React.FC<GanttChartProps> = ({ isActive, layoutTransitioning =
               left: shellRect.left,
               width: shellRect.width,
               height: shellRect.height,
-              '--gantt-origin-x': `${originOffsetX}px`,
-              '--gantt-origin-y': `${originOffsetY}px`,
-              '--gantt-origin-clip-right': `${originClipRight}px`,
-              '--gantt-origin-clip-bottom': `${originClipBottom}px`,
             } as React.CSSProperties}
             onTransitionEnd={handleOverlayTransitionEnd}
           >

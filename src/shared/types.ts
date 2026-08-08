@@ -116,6 +116,8 @@ export interface AIModelConfig {
   model: string;
   endpoint?: string;
   enabled?: boolean;
+  /** Maximum tokens requested from this model for one response. */
+  maxOutputTokens?: number;
 }
 
 export interface AIConfig {
@@ -441,6 +443,8 @@ export interface AppSettings {
   recycleBinRetentionDays?: number; // 回收站自动清理天数，1-365
   userProfile?: UserProfile; // 用户资料，未设置时显示"未登录"
   enableSystemNotifications?: boolean; // Enable Windows system notifications
+  autoLaunchEnabled?: boolean; // Launch ProjectHub when the user signs in to Windows
+  closeWindowBehavior?: 'ask' | 'background' | 'quit'; // Close button behavior
   autoProjectDescriptionEnabled?: boolean; // Automatically generate an empty project overview after file activity settles
   autoStageMemoryEnabled?: boolean; // Learn reusable writing memory from the final document when a stage is completed
   holidayDataSource?: HolidayDataSource; // Calendar holiday source
@@ -450,6 +454,13 @@ export interface AppSettings {
   compositionWeights?: CompositionWeightConfig; // Custom prompt composition weights
   compositionWeightsByScene?: Partial<Record<PromptScene, CompositionWeightConfig>>; // Per-scene prompt composition weights
   customStages?: StageConfig[]; // 自定义阶段配置
+  keyboardShortcuts?: AppKeyboardShortcuts; // User-configurable application shortcuts
+}
+
+export type AppShortcutAction = 'globalSearch';
+
+export interface AppKeyboardShortcuts {
+  globalSearch: string;
 }
 
 // ─── 统一跳转上下文 ─────────────────────────────────────
@@ -495,6 +506,10 @@ export interface WorkbenchFocus {
 
 /** 提示词场景 */
 export type PromptScene =
+  | 'draft'          // 完整第一稿
+  | 'longFormSection' // 长篇分章写作
+  | 'sectionExpansion' // 章节扩写
+  | 'precisionRewrite' // 选区精确修订
   | 'report'         // 阶段报告生成
   | 'review'         // 文档审查
   | 'rewrite'        // 章节改稿
@@ -504,7 +519,12 @@ export type PromptScene =
   | 'description'    // 项目描述生成
   | 'taskExecute'    // 任务执行
   | 'sectionAnalysis' // 章节完成度分析
-  | 'templateExtract'; // 模板结构提取
+  | 'workflowPlanning' // 阶段写作工作流规划
+  | 'templateExtract' // 旧版模板结构提取（兼容历史配置）
+  | 'templateExampleExtract' // 范文模板识别
+  | 'templateDirectExtract' // 直接套用模板识别
+  | 'templateExampleAnalysis' // 范文首次分析
+  | 'templateExampleCompare'; // 范文增量对比
 
 export type AIJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -564,6 +584,9 @@ export interface StructuredPrompt {
 export interface PromptTemplate {
   id: string;
   scene: PromptScene;
+  /** 未设置时为通用版本；设置后只在对应项目阶段生效。 */
+  stageId?: string;
+  stageName?: string;
   name: string;
   content: string;
   isBuiltin: boolean;

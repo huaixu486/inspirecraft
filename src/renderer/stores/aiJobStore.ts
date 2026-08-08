@@ -47,6 +47,7 @@ type AIActivity = {
   requestId?: string;
   correlationId?: string;
   workItemId?: string;
+  silent?: boolean;
   error?: string;
 };
 
@@ -156,6 +157,9 @@ export const useAIJobStore = create<AIJobState>((set, get) => ({
   },
 
   syncExternalActivity: (activity) => {
+    // Intermediate calls of a multi-step business task are deliberately
+    // invisible. The owning runAIJob controls the single aggregate lifecycle.
+    if (activity.silent) return;
     const localJob = activity.requestId ? get().jobs.find(job => job.id === activity.requestId) : undefined;
     if (localJob) {
       if (activity.status === 'completed') {

@@ -160,6 +160,30 @@ export const detectTimelineStage = (
   return candidates[0]?.stage.name || fallbackStage;
 };
 
+export const getCurrentStageDocumentProgress = (
+  projectDocs: ProjectDocument[],
+  templates: WritingTemplate[],
+  versions: DocumentVersion[],
+  allStages: StageConfig[],
+): { stage: string | null; progress: number; documentCount: number } => {
+  if (projectDocs.length === 0) return { stage: null, progress: 0, documentCount: 0 };
+  const detectDocumentStage = (doc: ProjectDocument) => {
+    const template = templates.find(item => item.id === doc.templateId);
+    const version = versions.find(item => item.id === doc.versionId);
+    return detectTimelineStage(allStages, doc.name, doc.sourceFilePath, template?.name, template?.category, version?.fileName);
+  };
+  const latestDocument = [...projectDocs].sort((a, b) =>
+    toMs(b.sourceFileModifiedAt || b.analyzedAt || b.createdAt)
+    - toMs(a.sourceFileModifiedAt || a.analyzedAt || a.createdAt)
+  )[0];
+  const stage = detectDocumentStage(latestDocument);
+  const stageDocuments = projectDocs.filter(doc => detectDocumentStage(doc) === stage);
+  const progress = stageDocuments.length
+    ? Math.round(stageDocuments.reduce((sum, doc) => sum + Math.max(0, Math.min(100, Number(doc.overallProgress) || 0)), 0) / stageDocuments.length)
+    : 0;
+  return { stage, progress, documentCount: stageDocuments.length };
+};
+
 export const buildProjectStageSegments = (
   project: Project,
   projectDocs: ProjectDocument[],

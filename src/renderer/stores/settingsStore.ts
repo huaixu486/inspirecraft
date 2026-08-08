@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import {
   AppSettings,
+  AppKeyboardShortcuts,
+  AppShortcutAction,
   CalendarDayRecord,
   CalendarItinerary,
   CompositionWeightConfig,
@@ -9,6 +11,7 @@ import {
   UserProfile,
 } from '../../shared/types';
 import { DEFAULT_STAGES } from '../utils/timelineStages';
+import { DEFAULT_KEYBOARD_SHORTCUTS, normalizeKeyboardShortcuts, normalizeKeyboardShortcut } from '../utils/keyboardShortcuts';
 import { assertIpcMutationSucceeded, requireIpcObject } from '../utils/ipcResult';
 
 interface SettingsState {
@@ -21,12 +24,14 @@ interface SettingsState {
   compositionWeights: CompositionWeightConfig | null;
   compositionWeightsByScene: Partial<Record<import('../../shared/types').PromptScene, CompositionWeightConfig>>;
   enableSystemNotifications: boolean;
+  autoLaunchEnabled: boolean;
   autoProjectDescriptionEnabled: boolean;
   autoStageMemoryEnabled: boolean;
   holidayDataSource: HolidayDataSource;
   holidayApiUrl: string;
   calendarDayRecords: CalendarDayRecord[];
   calendarItineraries: CalendarItinerary[];
+  keyboardShortcuts: AppKeyboardShortcuts;
   isLoading: boolean;
 
   loadSettings: () => Promise<void>;
@@ -35,12 +40,14 @@ interface SettingsState {
   updateRecycleBinRetentionDays: (days: number) => Promise<void>;
   updateUserProfile: (profile: UserProfile) => Promise<void>;
   updateSystemNotifications: (enabled: boolean) => Promise<void>;
+  updateAutoLaunchEnabled: (enabled: boolean) => Promise<void>;
   updateAutoProjectDescriptionEnabled: (enabled: boolean) => Promise<void>;
   updateAutoStageMemoryEnabled: (enabled: boolean) => Promise<void>;
   updateHolidaySettings: (settings: { source?: HolidayDataSource; apiUrl?: string }) => Promise<void>;
   updateCalendarDayRecords: (records: CalendarDayRecord[]) => Promise<void>;
   updateCalendarItineraries: (itineraries: CalendarItinerary[]) => Promise<void>;
   updateCalendarItineraryById: (id: string, updates: Partial<CalendarItinerary>) => Promise<void>;
+  updateKeyboardShortcut: (action: AppShortcutAction, shortcut: string) => Promise<void>;
   updateCompositionWeights: (weights: CompositionWeightConfig | null) => Promise<void>;
   updateCompositionWeightsForScene: (scene: import('../../shared/types').PromptScene, weights: CompositionWeightConfig | null) => Promise<void>;
   refreshWorkspaceUsed: () => Promise<void>;
@@ -65,12 +72,14 @@ function buildSettingsSnapshot(state: SettingsState, overrides: Partial<AppSetti
     compositionWeights: state.compositionWeights ?? undefined,
     compositionWeightsByScene: state.compositionWeightsByScene,
     enableSystemNotifications: state.enableSystemNotifications,
+    autoLaunchEnabled: state.autoLaunchEnabled,
     autoProjectDescriptionEnabled: state.autoProjectDescriptionEnabled,
     autoStageMemoryEnabled: state.autoStageMemoryEnabled,
     holidayDataSource: state.holidayDataSource,
     holidayApiUrl: state.holidayApiUrl,
     calendarDayRecords: state.calendarDayRecords,
     calendarItineraries: state.calendarItineraries,
+    keyboardShortcuts: state.keyboardShortcuts,
     ...overrides,
   };
 }
@@ -85,18 +94,24 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   compositionWeights: null,
   compositionWeightsByScene: {},
   enableSystemNotifications: true,
+  autoLaunchEnabled: false,
   autoProjectDescriptionEnabled: true,
   autoStageMemoryEnabled: true,
   holidayDataSource: 'auto',
   holidayApiUrl: 'https://timor.tech/api/holiday/year/{year}',
   calendarDayRecords: [],
   calendarItineraries: [],
+  keyboardShortcuts: DEFAULT_KEYBOARD_SHORTCUTS,
   isLoading: false,
 
   loadSettings: async () => {
     set({ isLoading: true });
     try {
-      const settings = requireIpcObject<AppSettings>(await window.electronAPI.loadSettings(), '加载设置失败');
+      const [settingsValue, autoLaunchStatus] = await Promise.all([
+        window.electronAPI.loadSettings(),
+        window.electronAPI.getAutoLaunch(),
+      ]);
+      const settings = requireIpcObject<AppSettings>(settingsValue, '加载设置失败');
       if (settings) {
         set({
           workspacePath: settings.workspacePath,
@@ -107,12 +122,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           compositionWeights: settings.compositionWeights ?? null,
           compositionWeightsByScene: settings.compositionWeightsByScene ?? {},
           enableSystemNotifications: settings.enableSystemNotifications !== false,
+          autoLaunchEnabled: autoLaunchStatus.success
+            ? autoLaunchStatus.enabled
+            : settings.autoLaunchEnabled === true,
           autoProjectDescriptionEnabled: settings.autoProjectDescriptionEnabled !== false,
           autoStageMemoryEnabled: settings.autoStageMemoryEnabled !== false,
           holidayDataSource: settings.holidayDataSource || 'auto',
           holidayApiUrl: settings.holidayApiUrl || 'https://timor.tech/api/holiday/year/{year}',
           calendarDayRecords: settings.calendarDayRecords || [],
           calendarItineraries: settings.calendarItineraries || [],
+          keyboardShortcuts: normalizeKeyboardShortcuts(settings.keyboardShortcuts),
           isLoading: false,
         });
         // 异步计算工作区大小，不阻塞设置加载
@@ -186,6 +205,22 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  updateAutoLaunchEnabled: async (enabled: boolean) => {
+    const previous = get().autoLaunchEnabled;
+    set({ autoLaunchEnabled: enabled });
+    try {
+      const result = await window.electronAPI.setAutoLaunch(enabled);
+      if (!result.success || result.enabled !== enabled) {
+        throw new Error(result.error || 'Windows 未能更新启动项');
+      }
+      await saveSettings(buildSettingsSnapshot(get(), { autoLaunchEnabled: enabled }));
+    } catch (error) {
+      set({ autoLaunchEnabled: previous });
+      try { await window.electronAPI.setAutoLaunch(previous); } catch {}
+      throw error;
+    }
+  },
+
   updateAutoProjectDescriptionEnabled: async (enabled: boolean) => {
     const previous = get().autoProjectDescriptionEnabled;
     set({ autoProjectDescriptionEnabled: enabled });
@@ -256,6 +291,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to update calendar itinerary:', error);
       set({ calendarItineraries: previous });
+    }
+  },
+
+  updateKeyboardShortcut: async (action, shortcut) => {
+    const previous = get().keyboardShortcuts;
+    const normalized = normalizeKeyboardShortcut(shortcut);
+    const next = { ...previous, [action]: normalized };
+    set({ keyboardShortcuts: next });
+    try {
+      await saveSettings(buildSettingsSnapshot(get(), { keyboardShortcuts: next }));
+    } catch (error) {
+      console.error('Failed to save keyboard shortcut:', error);
+      set({ keyboardShortcuts: previous });
+      throw error;
     }
   },
 

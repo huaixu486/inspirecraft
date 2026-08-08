@@ -1,13 +1,13 @@
 import React from 'react';
 import { Button, Card, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd';
 import { ExclamationCircleOutlined, RobotOutlined, SwapOutlined } from '@ant-design/icons';
+import type { DocumentDiffLine, DocumentDiffRowKind, DocumentDiffStats } from '../../utils/documentDiff';
 
 const { Paragraph, Text } = Typography;
 
 interface ComparableVersion { id: string; source: string; fileName: string; filePath?: string; content: string; createdAt: string }
-interface DiffLine { type: 'equal' | 'insert' | 'delete'; text: string; lineA?: number; lineB?: number }
 interface FormatDiffItem { key: string; index: number; title: string; summary: string; fieldChanges: Array<{ fieldKey: string; text: string }> }
-interface DiffRow { left?: DiffLine; right?: DiffLine; formatDiff?: FormatDiffItem }
+interface DiffRow { kind: DocumentDiffRowKind; left?: DocumentDiffLine; right?: DocumentDiffLine; formatDiff?: FormatDiffItem }
 
 interface VersionComparisonPanelProps {
   stageName?: string;
@@ -18,7 +18,7 @@ interface VersionComparisonPanelProps {
   metaB?: ComparableVersion;
   parsingById: Record<string, boolean>;
   isAnalyzing: boolean;
-  diffStats: { insert: number; delete: number; equal: number; total: number };
+  diffStats: DocumentDiffStats;
   formatStatusById: Record<string, { loading?: boolean; error?: string }>;
   formatDiffs: FormatDiffItem[];
   selectedFormatDiffs: FormatDiffItem[];
@@ -41,14 +41,14 @@ const VersionComparisonPanel: React.FC<VersionComparisonPanelProps> = ({
   stageName, versions, selectedA, selectedB, metaA, metaB, parsingById, isAnalyzing, diffStats, formatStatusById, formatDiffs, selectedFormatDiffs, selectedFormatDiffKeys, diffRows, applyingFormat, diffAnalysis, formatVersionDate, getSourceLabel, canReadFormat, onSelectA, onSelectB, onAnalyze, onSelectAllFormats, onToggleFormat, onApplyFormat,
 }) => {
   const selectedKeySet = new Set(selectedFormatDiffs.map(item => item.key));
-  const renderCell = (line: DiffLine | undefined, side: 'left' | 'right', isLast: boolean) => {
+  const renderCell = (line: DocumentDiffLine | undefined, side: 'left' | 'right', isLast: boolean) => {
     const textColor = !line ? '#64748b' : line.type === 'equal' ? '#cbd5e1' : line.type === 'delete' || side === 'left' ? '#fca5a5' : '#86efac';
     const background = !line ? '#0f172a' : line.type === 'equal' ? '#111827' : line.type === 'delete' || side === 'left' ? '#3a1a1a' : '#16351f';
     return (
       <div style={{ minHeight: 32, display: 'flex', alignItems: 'stretch', minWidth: 0, fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace", fontSize: 12.5, lineHeight: 1.65, background, borderBottom: isLast ? 'none' : '1px solid rgba(148, 163, 184, 0.16)', borderRight: side === 'left' ? '1px solid #d1d5db' : undefined, borderLeft: side === 'right' ? '1px solid #d1d5db' : undefined }}>
         <span style={{ width: 42, flexShrink: 0, padding: '5px 6px 5px 0', textAlign: 'right', color: line ? '#64748b' : '#334155', background: 'rgba(255,255,255,0.04)', borderRight: '1px solid rgba(255,255,255,0.08)', userSelect: 'none' }}>{side === 'left' ? line?.lineA || '' : line?.lineB || ''}</span>
         <span style={{ width: 20, flexShrink: 0, padding: '5px 0', textAlign: 'center', color: textColor, fontWeight: 700, userSelect: 'none' }}>{!line ? '' : line.type === 'insert' ? '+' : line.type === 'delete' ? '-' : ' '}</span>
-        <span style={{ flex: 1, minWidth: 0, padding: '5px 10px 5px 4px', color: textColor, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{line?.text || ' '}</span>
+        <span style={{ flex: 1, minWidth: 0, padding: '5px 10px 5px 4px', color: textColor, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{line?.charDiffs?.length ? line.charDiffs.map(([operation, text], index) => <span key={`${index}-${operation}`} style={{ color: operation === 0 ? '#e5e7eb' : textColor, background: operation === 0 ? 'transparent' : side === 'left' ? 'rgba(239, 68, 68, 0.28)' : 'rgba(34, 197, 94, 0.24)', borderRadius: operation === 0 ? 0 : 2 }}>{text}</span>) : line?.text || ' '}</span>
       </div>
     );
   };
@@ -75,8 +75,8 @@ const VersionComparisonPanel: React.FC<VersionComparisonPanelProps> = ({
         {selectedA && selectedB ? (
           <>
             <div style={{ display: 'flex', gap: 16, rowGap: 6, flexWrap: 'wrap', padding: '8px 16px', background: '#f6f8fa', borderRadius: 8, fontSize: 13 }}>
-              <span style={{ color: '#8c8c8c' }}>共 <strong>{diffStats.total}</strong> 行</span><span style={{ color: '#52c41a' }}>+{diffStats.insert} 新增</span><span style={{ color: '#ff4d4f' }}>-{diffStats.delete} 删除</span><span style={{ color: '#8c8c8c' }}>{diffStats.equal} 未变</span>
-              {diffStats.total > 0 && <span style={{ marginLeft: 'auto', color: '#8c8c8c', fontSize: 12, whiteSpace: 'nowrap' }}>变更率 {((diffStats.insert + diffStats.delete) / diffStats.total * 100).toFixed(1)}%</span>}
+              <span style={{ color: '#8c8c8c' }}>共 <strong>{diffStats.total}</strong> 段</span><span style={{ color: '#52c41a' }}>+{diffStats.insert} 新增</span><span style={{ color: '#ff4d4f' }}>-{diffStats.delete} 删除</span><span style={{ color: '#fa8c16' }}>{diffStats.modified} 修改</span><span style={{ color: '#8c8c8c' }}>{diffStats.equal} 未变</span>
+              {diffStats.total > 0 && <span style={{ marginLeft: 'auto', color: '#8c8c8c', fontSize: 12, whiteSpace: 'nowrap' }}>变更率 {((diffStats.insert + diffStats.delete + diffStats.modified) / diffStats.total * 100).toFixed(1)}%</span>}
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, rowGap: 6, flexWrap: 'wrap', padding: '8px 12px', background: '#fff7e6', border: '1px solid #ffe7ba', borderRadius: 8 }}>

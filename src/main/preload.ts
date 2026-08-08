@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFileWithApp: (filePath: string) => ipcRenderer.invoke('file:openWithDefaultApp', filePath),
   compressToZip: (sourcePath: string) => ipcRenderer.invoke('file:compressToZip', sourcePath),
   extractZip: (zipPath: string) => ipcRenderer.invoke('file:extractZip', zipPath),
-  startDrag: (filePath: string) => ipcRenderer.sendSync('shell:startDrag', filePath),
+  startDrag: (filePaths: string[]) => ipcRenderer.sendSync('shell:startDrag', filePaths),
   getPathForFile: (file: any) => webUtils.getPathForFile(file),
   renameFile: (params: { filePath: string; newName: string }) => ipcRenderer.invoke('file:rename', params),
   importFiles: (params: { folderPath: string; filePaths: string[] }) => ipcRenderer.invoke('file:importFiles', params),
@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   duplicateFiles: (params: { sourcePaths: string[]; targetFolder: string }) => ipcRenderer.invoke('file:duplicate', params),
   moveFiles: (params: { sourcePaths: string[]; targetFolder: string }) => ipcRenderer.invoke('file:move', params),
   deleteFile: (filePath: string, options?: { permanent?: boolean }) => ipcRenderer.invoke('file:delete', filePath, options),
+  setFileReadOnly: (params: { filePath: string; readOnly: boolean }) => ipcRenderer.invoke('file:setReadOnly', params),
   createFolder: (params: { folderPath: string; folderName: string }) => ipcRenderer.invoke('file:createFolder', params),
   readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
   readDir: (dirPath: string) => ipcRenderer.invoke('file:readDir', dirPath),
@@ -71,7 +72,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // AI操作
   loadAIConfig: () => ipcRenderer.invoke('ai:loadConfig'),
   saveAIConfig: (config: any) => ipcRenderer.invoke('ai:saveConfig', config),
-  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => ipcRenderer.invoke('ai:call', prompt),
+  callAI: (prompt: string | { prompt: string; modelId?: string; modelIds?: string[]; mode?: 'single' | 'parallel'; config?: any; usageRequestId?: string; usageTitle?: string; usageScene?: string; silentActivity?: boolean }) => ipcRenderer.invoke('ai:call', prompt),
   callAIParallelDetails: (params: { prompt: string; modelId?: string; modelIds?: string[]; config?: any; usageRequestId?: string; usageTitle?: string; usageScene?: string }) => ipcRenderer.invoke('ai:callParallelDetails', params),
   getAIUsageStatistics: () => ipcRenderer.invoke('ai:usageStatistics'),
   getAIUsageForRequest: (requestId: string) => ipcRenderer.invoke('ai:usageForRequest', requestId),
@@ -156,6 +157,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 设置操作
   loadSettings: () => ipcRenderer.invoke('settings:load'),
   saveSettings: (config: any) => ipcRenderer.invoke('settings:save', config),
+  getAutoLaunch: () => ipcRenderer.invoke('system:getAutoLaunch'),
+  setAutoLaunch: (enabled: boolean) => ipcRenderer.invoke('system:setAutoLaunch', enabled),
   createProjectFolder: (params: { projectName: string; workspacePath: string }) =>
     ipcRenderer.invoke('project:createFolder', params),
   getWorkspaceSize: (workspacePath: string) => ipcRenderer.invoke('workspace:getSize', workspacePath),

@@ -1,5 +1,11 @@
 import { AIConfig, AIModelConfig } from '../types';
 
+const normalizeMaxOutputTokens = (value?: number) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 8192;
+  return Math.max(512, Math.min(65536, Math.round(parsed)));
+};
+
 export function normalizeAIConfig(config: AIConfig | null): AIConfig | null {
   if (!config) return null;
   if (Array.isArray(config.models) && config.models.length > 0) {
@@ -8,6 +14,7 @@ export function normalizeAIConfig(config: AIConfig | null): AIConfig | null {
       id: model.id || `model-${Date.now()}-${index}`,
       name: model.name || model.model || `模型 ${index + 1}`,
       enabled: model.enabled !== false,
+      maxOutputTokens: normalizeMaxOutputTokens(model.maxOutputTokens),
     }));
     const activeModelId = config.activeModelId && models.some(model => model.id === config.activeModelId)
       ? config.activeModelId
@@ -30,6 +37,7 @@ export function normalizeAIConfig(config: AIConfig | null): AIConfig | null {
       model: config.model,
       endpoint: config.endpoint,
       enabled: true,
+      maxOutputTokens: 8192,
     };
     return {
       models: [legacyModel],

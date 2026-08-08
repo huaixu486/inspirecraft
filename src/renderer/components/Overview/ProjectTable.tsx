@@ -343,23 +343,28 @@ const ProjectTable: React.FC<Props> = ({ onEnterProject, onPreviewProject }) => 
     autoScanCancelledRef.current = false;
 
     const startTimer = window.setTimeout(() => {
-      if (!autoScanCancelledRef.current) void runFullScan();
+      if (!autoScanCancelledRef.current && !document.hidden) void runFullScan();
     }, 3000);
 
     const periodicTimer = window.setInterval(() => {
-      if (!autoScanCancelledRef.current) void runFullScan();
+      if (!autoScanCancelledRef.current && !document.hidden) void runFullScan();
     }, 15 * 60 * 1000);
 
     const handleFocus = () => {
-      if (!autoScanCancelledRef.current && !autoScanBusyRef.current) void runFullScan();
+      if (!document.hidden && !autoScanCancelledRef.current && !autoScanBusyRef.current) void runFullScan();
+    };
+    const handleVisibilityChange = () => {
+      if (!document.hidden && !autoScanCancelledRef.current && !autoScanBusyRef.current) void runFullScan();
     };
     window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       autoScanCancelledRef.current = true;
       window.clearTimeout(startTimer);
       window.clearInterval(periodicTimer);
       window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [projects.length, allStages.length, runFullScan]);
 

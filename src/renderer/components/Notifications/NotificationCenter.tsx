@@ -67,6 +67,10 @@ const typeLabel: Record<NotificationItem['type'], string> = {
 };
 
 const aiSceneLabel: Record<AIJob['scene'], string> = {
+  draft: 'AI 第一稿写作',
+  longFormSection: 'AI 长篇分章写作',
+  sectionExpansion: 'AI 章节扩写',
+  precisionRewrite: 'AI 精确修订',
   report: 'AI 报告生成',
   review: 'AI 文档审查',
   rewrite: 'AI 文稿改写',
@@ -76,7 +80,12 @@ const aiSceneLabel: Record<AIJob['scene'], string> = {
   description: 'AI 项目概述编写',
   taskExecute: 'AI 任务执行',
   sectionAnalysis: 'AI 章节分析',
+  workflowPlanning: 'AI 写作工作流规划',
   templateExtract: 'AI 模板提取',
+  templateExampleExtract: 'AI 范文模板识别',
+  templateDirectExtract: 'AI 直接模板识别',
+  templateExampleAnalysis: 'AI 范文写法分析',
+  templateExampleCompare: 'AI 范文差异分析',
   general: 'AI 处理',
 };
 

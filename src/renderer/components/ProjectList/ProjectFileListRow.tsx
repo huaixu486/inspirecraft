@@ -9,6 +9,7 @@ import {
   FileTextOutlined,
   FileWordOutlined,
   FolderOutlined,
+  LockOutlined,
 } from '@ant-design/icons';
 import type { FileItem } from './useProjectFileData';
 
@@ -181,7 +182,12 @@ const ProjectFileListRow: React.FC<ProjectFileListRowProps> = ({
       <Text type="secondary" style={{ width: 140, flexShrink: 0, fontSize: 11, lineHeight: '20px', textAlign: 'right', whiteSpace: 'nowrap' }}>
         {formatDate(item.modifiedAt)}
       </Text>
-      <div data-no-file-drag="true" style={{ width: 34, flexShrink: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+      <div data-no-file-drag="true" style={{ width: 88, flexShrink: 0, display: 'flex', gap: 4, justifyContent: 'flex-end', alignItems: 'center' }}>
+        {item.readOnly && (
+          <Tag icon={<LockOutlined />} color="default" style={{ margin: 0, paddingInline: 5, fontSize: 10, lineHeight: '18px' }} title="该文件为只读">
+            只读
+          </Tag>
+        )}
         <Popconfirm
           title={`确定删除 ${item.name}？`}
           onConfirm={event => { event?.stopPropagation(); onDelete(); }}

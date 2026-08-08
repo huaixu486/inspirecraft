@@ -156,6 +156,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
     treeLoading,
     loadContents,
     loadTreeStats,
+    updateFileItem,
   } = useProjectFileData({
     currentPath,
     onContentsLoaded: () => syncProjectStageFiles(project, {
@@ -337,7 +338,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
         name: d.name, isDirectory: true, ext: '', size: 0, modifiedAt: '', path: d.path,
       }))
       : treeFiles.filter(f => matchesTreeFilter(f) && matchesSearch(f)).map(f => ({
-        name: f.name, isDirectory: false, ext: f.ext, size: f.size, modifiedAt: f.modifiedAt, path: f.path,
+        name: f.name, isDirectory: false, ext: f.ext, size: f.size, modifiedAt: f.modifiedAt, path: f.path, readOnly: f.readOnly,
       }))
     )
     : items;
@@ -688,6 +689,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
       onSendToReview: target => { void handleSendToWorkbench(target, 'review'); },
       onSendToReport: target => { void handleSendToWorkbench(target, 'report'); },
       onShare: target => { void handleOpenShareModal(target); },
+      onToggleReadOnly: target => { void handleToggleReadOnly(target); },
     }),
   });
 
@@ -931,6 +933,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
       event.preventDefault();
       return;
     }
+    const dragPaths = selectedPaths.has(item.path) ? Array.from(selectedPaths) : [item.path];
     setSelectedPaths(prev => (prev.has(item.path) ? prev : new Set([item.path])));
     lastClickRef.current = null;
     suppressClickRef.current = true;
@@ -938,7 +941,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
     setIsDragOver(false);
 
     // 不设置 event.dataTransfer，全部交给 Electron startDrag 处理，避免冲突
-    const result = window.electronAPI.startDrag(item.path);
+    const result = window.electronAPI.startDrag(dragPaths);
     if (!result?.success) {
       setIsDraggingFileOut(false);
       message.warning(result?.error || '系统拖拽启动失败');
@@ -1058,7 +1061,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
   }, [selectedPaths, renamingPath, items]);
 
   // 删除文件或文件夹
-  const handleDeleteFile = async (item: FileItem) => {
+  const handleDeleteFile = async (item: FileItem, refresh = true) => {
     const result = item.isDirectory
       ? await window.electronAPI.deleteFolder(item.path)
       : await window.electronAPI.deleteFile(item.path);
@@ -1074,9 +1077,28 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
         });
         message.success(`已将 ${item.name} 移入回收站`);
       }
+      setSelectedPaths(previous => {
+        const next = new Set(previous);
+        next.delete(item.path);
+        return next;
+      });
+      if (refresh) await Promise.all([loadContents(), loadTreeStats()]);
     } else {
-      message.error(`删除 ${item.name} 失败`);
+      message.error(result.error || `删除 ${item.name} 失败`);
     }
+  };
+
+  const handleToggleReadOnly = async (item: FileItem) => {
+    if (item.isDirectory) return;
+    const readOnly = !item.readOnly;
+    const result = await window.electronAPI.setFileReadOnly({ filePath: item.path, readOnly });
+    if (!result.success) {
+      message.error(result.error || `${readOnly ? '设为只读' : '取消只读'}失败`);
+      return;
+    }
+    const appliedReadOnly = result.readOnly ?? readOnly;
+    updateFileItem(item.path, { readOnly: appliedReadOnly });
+    message.success(appliedReadOnly ? `已将 ${item.name} 设为只读` : `已取消 ${item.name} 的只读属性`);
   };
 
   // 批量删除选中文件
@@ -1085,12 +1107,11 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
     const toDelete = items.filter(i => paths.includes(i.path));
     if (toDelete.length === 0) return;
     for (const item of toDelete) {
-      await handleDeleteFile(item);
+      await handleDeleteFile(item, false);
     }
     message.success(`已将 ${toDelete.length} 个项目移入回收站`);
     setSelectedPaths(new Set());
-    loadContents();
-    loadTreeStats();
+    await Promise.all([loadContents(), loadTreeStats()]);
   };
 
   // 内部拖拽：普通拖动为移动，Ctrl+拖动为复制
@@ -1337,18 +1358,8 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
       onClick={(e) => { if (e.target === e.currentTarget) setSelectedPaths(new Set()); }}
     >
       {/* Header — sticky 吸顶，滚动时保持可见 */}
-      <div style={{
-        position: 'sticky', top: 0, zIndex: 10,
-        marginBottom: 18, padding: '12px 14px', background: 'rgba(255,255,255,0.96)',
-        backdropFilter: 'blur(10px)', border: '1px solid #e5e7eb', borderRadius: 12,
-        boxShadow: '0 8px 24px rgba(15, 23, 42, 0.06)',
-      }}>
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(300px, 1fr) minmax(430px, auto) minmax(360px, 1fr)',
-          alignItems: 'center',
-          gap: 16,
-        }}>
+      <div className="workbench-dock-surface file-explorer-dock">
+        <div className="workbench-dock-grid">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
             <Button
               type="text"
@@ -1511,7 +1522,7 @@ const ProjectFileExplorer: React.FC<Props> = ({ project, onBack, focus }) => {
             <Text type="secondary" style={{ flex: 1, fontSize: 11 }}>名称</Text>
             <Text type="secondary" style={{ width: 80, fontSize: 11, textAlign: 'right' }}>大小</Text>
             <Text type="secondary" style={{ width: 140, fontSize: 11, textAlign: 'right' }}>修改时间</Text>
-            <Text type="secondary" style={{ width: 70, fontSize: 11, textAlign: 'center' }}>操作</Text>
+            <Text type="secondary" style={{ width: 88, fontSize: 11, textAlign: 'center' }}>操作</Text>
           </div>
           {isFiltering && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, padding: '4px 8px', background: '#e6f7ff', borderRadius: 4, flexWrap: 'wrap' }}>

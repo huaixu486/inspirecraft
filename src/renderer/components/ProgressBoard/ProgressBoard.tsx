@@ -9,9 +9,16 @@ import { useTemplateStore } from '../../stores/templateStore';
 import { useKnowledgeStore } from '../../stores/knowledgeStore';
 import { useStageLifecycleStore } from '../../stores/stageLifecycleStore';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { getAllStages, getProjectProgress } from '../../utils/timelineStages';
+import { detectTimelineStage, getAllStages, getCurrentStageDocumentProgress } from '../../utils/timelineStages';
 import { composePromptAsync } from '../../utils/promptComposer';
-import { buildQuickDraftTaskInstructions, buildQuickDraftTemplateContext } from '../../utils/quickDraftPrompt';
+import {
+  buildLongFormSectionPlan,
+  buildQuickDraftTemplateContext,
+  countDraftCharacters,
+  selectRelevantReferenceExcerpts,
+  shouldGenerateLongForm,
+  type DraftReferenceDocument,
+} from '../../utils/quickDraftPrompt';
 import { mapDraftToTemplateSections } from '../../utils/draftSectionMapper';
 import { isRevisionWorkflowFocus } from '../../utils/workflowTaskRouting';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
@@ -38,7 +45,7 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack, hideHeader = fals
   const pendingWorkflowFocus = useNavigationStore(state => state.activeFocus);
   const acknowledgeWorkflowFocus = useNavigationStore(state => state.acknowledgeActiveFocus);
   const { projectDocs, loadProjectDocs } = useProjectDocStore();
-  const { customStages } = useSettingsStore();
+  const { customStages, enableSystemNotifications } = useSettingsStore();
   const { tasks, loadTasks, updateTask, setTaskExecutor } = useTaskStore();
   const { templates, reviews, loadTemplates, loadReviews } = useTemplateStore();
   const { stageMemories, loadKnowledge } = useKnowledgeStore();
@@ -91,9 +98,17 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack, hideHeader = fals
   const projectMemories = useMemo(() => currentProject ? stageMemories.filter(memory => memory.projectId === currentProject.id) : [], [currentProject, stageMemories]);
   const enabledProjectMemories = useMemo(() => projectMemories.filter(memory => !excludedMemoryIds.includes(memory.id)), [excludedMemoryIds, projectMemories]);
   const selectedWritingTemplate = templates.find(template => template.id === selectedWritingTemplateId);
+  const selectedWritingStage = selectedWritingTemplate
+    ? detectTimelineStage(allStages, selectedWritingTemplate.name, selectedWritingTemplate.category, selectedWritingTemplate.description)
+    : '';
   const selectedRevisionDoc = projectDocsList.find(doc => doc.id === selectedRevisionDocId);
   const selectedRevisionDocPath = selectedRevisionDoc ? (selectedRevisionDoc.sourceFilePath || projectVersions.find(version => version.id === selectedRevisionDoc.versionId)?.filePath || '') : '';
-  const projectProgress = currentProject ? getProjectProgress(currentProject, projectDocsList, templates, projectVersions, allStages) : 0;
+  const projectProgress = useMemo(
+    () => currentProject
+      ? getCurrentStageDocumentProgress(projectDocsList, templates, projectVersions, allStages).progress
+      : 0,
+    [allStages, currentProject, projectDocsList, projectVersions, templates],
+  );
   const openTasks = useMemo(() => projectTasks.filter(task => task.status !== 'completed'), [projectTasks]);
   const highPriorityTasks = useMemo(() => openTasks.filter(task => task.priority === 'high'), [openTasks]);
   const latestReview = [...projectReviews].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
@@ -260,14 +275,35 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack, hideHeader = fals
     message.success(`已加入 ${selected.length} 份项目参考资料`);
   };
 
-  const collectWritingReferences = async () => {
-    const projectContents = await Promise.all(selectedWritingDocIds.map(async id => {
+  const collectWritingReferences = async (): Promise<DraftReferenceDocument[]> => {
+    const projectResults = await Promise.all(selectedWritingDocIds.map(async id => {
       const doc = projectDocsList.find(item => item.id === id);
       const content = await readProjectDoc(id);
-      return content ? `【项目文件：${doc?.name || '未命名'}】\n${content}` : '';
+      return content ? { name: doc?.name || '未命名项目文件', content, kind: 'project' as const } : null;
     }));
-    const externalContents = externalReferences.map(item => item.content ? `【临时外部资料：${item.name}】\n${item.content}` : '');
-    return [...projectContents, ...externalContents].filter(Boolean).join('\n\n').slice(0, 24000);
+    const projectContents: DraftReferenceDocument[] = projectResults.filter(
+      (item): item is NonNullable<typeof item> => item !== null,
+    );
+    const externalContents = externalReferences
+      .filter(item => item.content)
+      .map(item => ({ name: item.name, content: String(item.content), kind: 'external' as const }));
+    const templateSources: DraftReferenceDocument[] = [];
+    if (selectedWritingTemplate?.filePath) {
+      const parsed = await window.electronAPI.parseDocumentSilent?.(selectedWritingTemplate.filePath);
+      if (parsed?.success && String(parsed.content || '').trim()) {
+        templateSources.push({
+          name: fileName(selectedWritingTemplate.filePath),
+          content: String(parsed.content).trim(),
+          kind: 'template',
+        });
+      }
+    }
+    const collected = [...projectContents, ...externalContents, ...templateSources];
+    const expectedCount = selectedWritingDocIds.length + externalReferences.length + (selectedWritingTemplate?.filePath ? 1 : 0);
+    if (collected.length < expectedCount) {
+      message.warning(`有 ${expectedCount - collected.length} 份参考文件未能提取文本，未将空内容发送给 AI`);
+    }
+    return collected;
   };
 
   const handleGenerateDraft = async () => {
@@ -275,31 +311,107 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack, hideHeader = fals
       message.warning('请先选择用于起草的写作模板');
       return;
     }
-    const reference = await collectWritingReferences();
+    const referenceDocuments = await collectWritingReferences();
     const memories = enabledProjectMemories.map(item => `【${item.stageName}】${item.summary}`).join('\n').slice(0, 8000) || '暂无可用阶段记忆';
     const instruction = (writingInstruction || workflowPromptSuggestion).trim() || '请依据模板完成一版可供人工继续编辑的初稿。';
     const templateContext = buildQuickDraftTemplateContext(selectedWritingTemplate);
     const projectContext = [
       `【当前项目】${currentProject.name}`,
       currentProject.description?.trim() ? `【项目简介】${currentProject.description.trim()}` : '',
-      reference,
     ].filter(Boolean).join('\n\n') || '当前仅有项目名称，暂无其他项目资料。';
+    const sectionPlan = buildLongFormSectionPlan(selectedWritingTemplate);
+    const useLongForm = shouldGenerateLongForm(selectedWritingTemplate, sectionPlan);
     setIsGeneratingDraft(true);
     try {
-      const base = await composePromptAsync('rewrite', {
-        sectionTitle: selectedWritingTemplate.name,
-        requirement: `${instruction}\n\n${templateContext.requirements}`,
-        example: templateContext.examples,
-        stageMemory: memories,
-        reference: projectContext,
-        currentContent: '当前尚无初稿。请从零起草一份完整、连贯、可继续修改的第一稿。',
-      });
-      const prompt = `${base}\n\n${buildQuickDraftTaskInstructions(templateContext.mode)}`;
       const result = await useAIJobStore.getState().runAIJob<string>(
-        { scene: 'rewrite', title: `AI 写作：${selectedWritingTemplate.name}`, projectId: currentProject.id, resultPreview: value => String(value || '').slice(0, 240) },
+        { scene: useLongForm ? 'longFormSection' : 'draft', title: `AI 写作：${selectedWritingTemplate.name}`, projectId: currentProject.id, resultPreview: value => String(value || '').slice(0, 240) },
         async ({ jobId, setProgress, throwIfCancelled }) => {
+          if (useLongForm) {
+            const completedSections: string[] = [];
+            for (let index = 0; index < sectionPlan.length; index += 1) {
+              throwIfCancelled();
+              const section = sectionPlan[index];
+              const references = selectRelevantReferenceExcerpts(
+                referenceDocuments,
+                `${section.title}\n${section.guidance}`,
+              );
+              const prompt = await composePromptAsync('longFormSection', {
+                stage: selectedWritingStage,
+                templateName: selectedWritingTemplate.name,
+                sectionIndex: String(index + 1),
+                sectionCount: String(sectionPlan.length),
+                sectionTitle: section.title,
+                instruction,
+                projectContext,
+                outline: (selectedWritingTemplate.nodes || []).map((node, nodeIndex) => `${nodeIndex + 1}. ${node.title}`).join('\n'),
+                sectionGuidance: section.guidance || '围绕本节标题形成完整、专业、可编辑的正文。',
+                targetMin: String(section.targetMin),
+                targetMax: String(section.targetMax),
+                stageMemory: memories,
+                references,
+                templateRequirements: templateContext.requirements,
+                templateExamples: templateContext.examples,
+              });
+              setProgress(5 + Math.floor((index / sectionPlan.length) * 85));
+              let sectionDraft = String(await window.electronAPI.callAI({
+                prompt,
+                usageRequestId: jobId,
+                usageTitle: `AI 写作：${selectedWritingTemplate.name} · ${section.title}`,
+                usageScene: 'longFormSection',
+                silentActivity: true,
+              }) || '').trim();
+              throwIfCancelled();
+
+              const minimumAccepted = Math.floor(section.targetMin * 0.72);
+              if (countDraftCharacters(sectionDraft) < minimumAccepted) {
+                const expansionPrompt = await composePromptAsync('sectionExpansion', {
+                  stage: selectedWritingStage,
+                  sectionTitle: section.title,
+                  currentLength: String(countDraftCharacters(sectionDraft)),
+                  targetMin: String(section.targetMin),
+                  instruction,
+                  sectionGuidance: section.guidance,
+                  templateRequirements: templateContext.requirements,
+                  references,
+                  draft: sectionDraft,
+                });
+                sectionDraft = String(await window.electronAPI.callAI({
+                  prompt: expansionPrompt,
+                  usageRequestId: jobId,
+                  usageTitle: `AI 扩写：${selectedWritingTemplate.name} · ${section.title}`,
+                  usageScene: 'sectionExpansion',
+                  silentActivity: true,
+                }) || '').trim();
+                throwIfCancelled();
+              }
+              if (!sectionDraft) throw new Error(`“${section.title}”未生成可用正文`);
+              completedSections.push(`${section.title}\n${sectionDraft}`);
+            }
+            setProgress(92);
+            const combined = completedSections.join('\n\n');
+            const expectedMinimum = sectionPlan.reduce((sum, section) => sum + section.targetMin, 0);
+            if (countDraftCharacters(combined) < Math.floor(expectedMinimum * 0.65)) {
+              throw new Error(`长篇初稿仅生成 ${countDraftCharacters(combined)} 字符，未达到模板最低篇幅要求，请检查模型输出上限或重试`);
+            }
+            return combined;
+          }
+
+          const reference = referenceDocuments
+            .map(item => `【${item.kind === 'template' ? '模板范文' : item.kind === 'external' ? '外部资料' : '项目资料'}：${item.name}｜已提取 ${item.content.length} 字符】\n${item.content}`)
+            .join('\n\n')
+            .slice(0, 28000);
+          const prompt = await composePromptAsync('draft', {
+            stage: selectedWritingStage,
+            sectionTitle: selectedWritingTemplate.name,
+            instruction,
+            templateRequirements: templateContext.requirements,
+            templateExamples: templateContext.examples,
+            stageMemory: memories,
+            reference: [projectContext, `【参考资料清单与实际传入正文】\n${reference || '未选择或未成功解析任何参考文件'}`].filter(Boolean).join('\n\n'),
+            currentContent: '当前尚无初稿。请从零起草一份完整、连贯、可继续修改的第一稿。',
+          });
           setProgress(25);
-          const value = await window.electronAPI.callAI({ prompt, usageRequestId: jobId, usageTitle: `AI 写作：${selectedWritingTemplate.name}`, usageScene: 'rewrite' });
+          const value = await window.electronAPI.callAI({ prompt, usageRequestId: jobId, usageTitle: `AI 写作：${selectedWritingTemplate.name}`, usageScene: 'draft' });
           throwIfCancelled();
           setProgress(88);
           return String(value || '').trim();
@@ -323,6 +435,14 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack, hideHeader = fals
           selectedDocIds: [...selectedWritingDocIds],
         },
       });
+      if (useLongForm && enableSystemNotifications !== false) {
+        await window.electronAPI.showSystemNotification?.({
+          title: `AI 写作已完成：${selectedWritingTemplate.name}`,
+          body: `全部 ${sectionPlan.length} 个章节已生成、合并并通过篇幅校验。`,
+          target: 'project-report',
+          projectId: currentProject.id,
+        });
+      }
       message.success('已生成初稿，可先人工编辑后导出 Word');
     } catch (error: any) {
       if (!isAIJobCancelledError(error)) {
@@ -408,20 +528,20 @@ const ProgressBoard: React.FC<ProgressBoardProps> = ({ onBack, hideHeader = fals
     const instruction = revisionInstruction.trim() || '请提升表达的清晰度、专业性与逻辑连贯性，不改变事实。';
     setIsGeneratingRevision(true);
     try {
-      const base = await composePromptAsync('rewrite', {
+      const prompt = await composePromptAsync('precisionRewrite', {
+        stage: selectedRevisionDoc ? detectTimelineStage(allStages, selectedRevisionDoc.name, selectedRevisionDoc.sourceFilePath) : '',
         sectionTitle: selectedRevisionDoc?.name || '选中文本',
-        requirement: instruction,
-        example: '无',
+        instruction,
+        templateRequirements: '保持原文事实、术语和语气；仅修改用户选中的内容。',
         stageMemory: projectMemories.map(item => item.summary).join('\n').slice(0, 5000) || '无',
         reference: '无',
         currentContent: revisionSelection,
       });
-      const prompt = `${base}\n\n[精确修订]\n仅修订下方选中的原文，不要增删选区外内容。直接返回修改后的文本，不要使用 Markdown、不解释修改过程。\n\n原文：\n${revisionSelection}`;
       const result = await useAIJobStore.getState().runAIJob<string>(
-        { scene: 'rewrite', title: `AI 修订：${selectedRevisionDoc?.name || '选中文本'}`, projectId: currentProject.id, docId: selectedRevisionDocId, resultPreview: value => String(value || '').slice(0, 240) },
+        { scene: 'precisionRewrite', title: `AI 修订：${selectedRevisionDoc?.name || '选中文本'}`, projectId: currentProject.id, docId: selectedRevisionDocId, resultPreview: value => String(value || '').slice(0, 240) },
         async ({ jobId, setProgress, throwIfCancelled }) => {
           setProgress(30);
-          const value = await window.electronAPI.callAI({ prompt, usageRequestId: jobId, usageTitle: `AI 修订：${selectedRevisionDoc?.name || '选中文本'}`, usageScene: 'rewrite' });
+          const value = await window.electronAPI.callAI({ prompt, usageRequestId: jobId, usageTitle: `AI 修订：${selectedRevisionDoc?.name || '选中文本'}`, usageScene: 'precisionRewrite' });
           throwIfCancelled();
           setProgress(88);
           return String(value || '').trim();

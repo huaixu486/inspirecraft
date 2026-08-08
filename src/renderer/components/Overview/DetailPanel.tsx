@@ -34,9 +34,8 @@ import { deriveProjectNextActions, ProjectNextAction } from '../../utils/project
 import { getProjectDocumentLifecycleColor, getProjectDocumentLifecycleLabel } from '../../utils/documentLifecycle';
 import { getActiveStageCompletionEvent, selectStageExtractionDocument } from '../../utils/stageCompletion';
 import ProjectDescriptionSection from './ProjectDescriptionSection';
-import ProjectNextActions from './ProjectNextActions';
 import ProjectOverviewStats from './ProjectOverviewStats';
-import ProjectQuickPlanSection from './ProjectQuickPlanSection';
+import ProjectNextStepsSection from './ProjectNextStepsSection';
 import DetailPanelHeader from './DetailPanelHeader';
 
 const { Title, Text, Paragraph } = Typography;
@@ -683,7 +682,9 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
       reviews,
       stageMemories,
       allStages,
-      limit: 5,
+      // The first three derived entries can be task mirrors. Keep enough
+      // candidates so the merged module still has distinct system suggestions.
+      limit: 8,
     });
   }, [currentProject?.id, contentReady, tasks, projectDocs, versions, templates, reviews, stageMemories, allStages]);
 
@@ -1541,7 +1542,26 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
             onClear={() => { void handleClearDescription(); }}
           />
 
-          <ProjectNextActions actions={nextActions} onOpen={handleOpenNextAction} />
+          <ProjectNextStepsSection
+            editing={quickPlanEditing}
+            title={quickPlanTitle}
+            description={quickPlanDesc}
+            type={quickPlanType}
+            tasks={recentPlanTasks}
+            actions={nextActions.filter(action => action.kind !== 'task').slice(0, 3)}
+            titleInputRef={quickPlanTitleRef}
+            onOpenEditor={handleOpenQuickPlanEditor}
+            onTitleChange={setQuickPlanTitle}
+            onDescriptionChange={setQuickPlanDesc}
+            onTypeChange={setQuickPlanType}
+            onConfirm={() => { void handleConfirmQuickPlan(); }}
+            onCancel={handleCancelQuickPlan}
+            onOpenTask={openWorkflowTask}
+            onToggleComplete={(task, checked) => { void handleToggleTaskComplete(task, checked); }}
+            onToggleType={task => { void handleToggleTaskType(task); }}
+            onOpenAction={handleOpenNextAction}
+            getDestinationLabel={getWorkflowDestinationLabel}
+          />
 
           <ProjectOverviewStats
             status={statusInfo}
@@ -1553,24 +1573,6 @@ const DetailPanel: React.FC<DetailPanelProps> = ({ project, isOpen, isOpening = 
             activeStagePercent={activeStagePercent}
           />
 
-          <ProjectQuickPlanSection
-            editing={quickPlanEditing}
-            title={quickPlanTitle}
-            description={quickPlanDesc}
-            type={quickPlanType}
-            tasks={recentPlanTasks}
-            titleInputRef={quickPlanTitleRef}
-            onOpenEditor={handleOpenQuickPlanEditor}
-            onTitleChange={setQuickPlanTitle}
-            onDescriptionChange={setQuickPlanDesc}
-            onTypeChange={setQuickPlanType}
-            onConfirm={() => { void handleConfirmQuickPlan(); }}
-            onCancel={handleCancelQuickPlan}
-            onOpenTask={openWorkflowTask}
-            onToggleComplete={(task, checked) => { void handleToggleTaskComplete(task, checked); }}
-            onToggleType={task => { void handleToggleTaskType(task); }}
-            getDestinationLabel={getWorkflowDestinationLabel}
-          />
         </div>
       ),
     },

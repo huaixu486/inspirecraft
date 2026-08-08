@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
 import { PromptScene, PromptTemplate } from '../types';
+import { readVersionedJsonFile } from './versionedJson';
 
 /** 替换模板中的 {{变量}} 占位符 */
 function fillTemplate(template: string, context: Record<string, string>): string {
@@ -16,13 +17,17 @@ function fillTemplate(template: string, context: Record<string, string>): string
   });
 }
 
+function normalizeStageName(value?: string): string {
+  return String(value || '').trim().toLocaleLowerCase();
+}
+
 /** 从磁盘加载提示词模板 */
 function loadTemplatesFromDisk(): PromptTemplate[] {
   try {
     const dataDir = path.join(app.getPath('userData'), 'project-manager-data');
     const filePath = path.join(dataDir, 'prompt-templates.json');
     if (!fs.existsSync(filePath)) return [];
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return readVersionedJsonFile<PromptTemplate[]>(filePath, []).data;
   } catch {
     return [];
   }
@@ -41,14 +46,18 @@ export function composePromptMain(
 ): string {
   const templates = loadTemplatesFromDisk();
   const sceneTemplates = templates.filter(t => t.scene === scene);
-  const userTemplate = sceneTemplates.find(t => !t.isBuiltin);
-  const builtinTemplate = sceneTemplates.find(t => t.isBuiltin);
-  const chosen = userTemplate || builtinTemplate;
+  const stageName = normalizeStageName(context.stage || context.stageName || context.currentStage);
+  const chosen = (stageName
+    ? sceneTemplates.find(template => normalizeStageName(template.stageName) === stageName)
+    : undefined)
+    || sceneTemplates.find(template => !template.stageId && !template.stageName)
+    || sceneTemplates[0];
 
   if (!chosen) {
     console.warn(`[promptComposer:main] No template found for scene: ${scene}`);
     return '';
   }
 
-  return fillTemplate(chosen.content, context);
+  const header = `[提示词配置]\n场景：${scene}\n阶段：${chosen.stageName || context.stage || context.stageName || '通用'}\n配置：${chosen.name}`;
+  return `${header}\n\n${fillTemplate(chosen.content, context)}`;
 }

@@ -78,6 +78,28 @@ test('direct template body replaces red guidance and inherits the real body plac
   assert.doesNotMatch(result, /w:eastAsia="宋体"|w:sz w:val="24"|<w:b\/>/);
 });
 
+test('explicit template paragraph rules override placeholder paragraph formatting on export', () => {
+  const configured = template();
+  configured.formatRules = {
+    body: {
+      fontRequirement: { fontFamily: 'Arial', fontSize: 11, lineHeight: 1.5 },
+      paragraphRequirement: { alignment: 'justify', indentFirstLine: 2, spaceBefore: 3, spaceAfter: 6 },
+    },
+  };
+  const source = `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc>
+    <w:p><w:r><w:t>一、问题描述</w:t></w:r></w:p>
+    <w:p><w:pPr><w:jc w:val="center"/><w:ind w:firstLineChars="100"/></w:pPr><w:r><w:t>（说明实际难题）</w:t></w:r></w:p>
+  </w:tc></w:tr></w:tbl></w:body></w:document>`;
+  const result = fillTemplateDocumentXmlWithContent(source, configured, { '1': '正文内容' });
+
+  assert.match(result, /w:jc w:val="both"/);
+  assert.match(result, /w:firstLineChars="200"/);
+  assert.match(result, /w:before="60"/);
+  assert.match(result, /w:after="120"/);
+  assert.match(result, /w:line="360"/);
+  assert.doesNotMatch(result, /w:jc w:val="center"/);
+});
+
 test('direct template replaces a continuation sample row with generated continuation content', () => {
   const configured = template();
   configured.nodes = [{

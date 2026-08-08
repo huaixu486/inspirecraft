@@ -47,6 +47,7 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
     model: '',
     endpoint: '',
     enabled: true,
+    maxOutputTokens: 8192,
   });
 
   const handleSave = async (values: any) => {
@@ -234,6 +235,14 @@ const AIModelSettings: React.FC<Props> = ({ config, onConfigChange }) => {
                         <Form.Item name={[field.name, 'apiKey']} label="API Key" rules={[{ required: true, message: '请输入 API Key' }]}><Input.Password placeholder="sk-..." /></Form.Item>
                         <Form.Item name={[field.name, 'model']} label="模型标识" rules={[{ required: true, message: '请输入接口支持的模型标识' }]} extra="填写接口实际接受的 model 值，例如 gpt-4o、deepseek-chat。">
                           <Input placeholder={provider === 'claude' ? 'claude-sonnet-4-20250514' : 'gpt-4o'} />
+                        </Form.Item>
+                        <Form.Item
+                          name={[field.name, 'maxOutputTokens']}
+                          label="单次最大输出 Tokens"
+                          extra="默认 8192。应不超过该模型或接口供应商允许的最大输出值；长篇报告仍会按章节分段生成。"
+                          rules={[{ required: true, message: '请设置单次最大输出 Tokens' }]}
+                        >
+                          <InputNumber min={512} max={65536} step={1024} style={{ width: '100%' }} />
                         </Form.Item>
                         {provider === 'custom' && (
                           <Form.Item name={[field.name, 'endpoint']} label="接口端点" rules={[{ required: true, message: '请输入接口端点' }]} style={{ gridColumn: '1 / -1' }}><Input placeholder="https://api.example.com/v1/chat/completions" /></Form.Item>

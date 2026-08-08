@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { detectTimelineStage, getAllStages } from '../timelineStages';
+import type { ProjectDocument } from '../../../shared/types';
+import { detectTimelineStage, getAllStages, getCurrentStageDocumentProgress } from '../timelineStages';
 
 const stages = getAllStages([]);
 
@@ -30,3 +31,15 @@ test('unmatched files fall back to the configured other stage', () => {
   assert.equal(detectTimelineStage(stages, '会议纪要.docx'), '其他');
 });
 
+test('current stage progress uses document completion instead of completed-stage ratio', () => {
+  const docs = [
+    { id: 'proposal', name: '项目提案.docx', overallProgress: 100, createdAt: '2026-07-01T00:00:00.000Z' },
+    { id: 'research-a', name: '项目可研报告.docx', overallProgress: 20, createdAt: '2026-07-02T00:00:00.000Z' },
+    { id: 'research-b', name: '可研附件.docx', overallProgress: 60, createdAt: '2026-07-03T00:00:00.000Z' },
+  ] as ProjectDocument[];
+
+  assert.deepEqual(
+    getCurrentStageDocumentProgress(docs, [], [], stages),
+    { stage: '可研', progress: 40, documentCount: 2 },
+  );
+});

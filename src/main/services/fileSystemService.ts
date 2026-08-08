@@ -232,6 +232,19 @@ export function createFileSystemService(
       return recycleBinService.moveToRecycleBin(filePath);
     },
 
+    setReadOnly(params: { filePath: string; readOnly: boolean }) {
+      const check = checkWithinWorkspace(params.filePath);
+      if (!check.ok) throw new Error(check.error);
+      if (!fs.existsSync(params.filePath)) throw new Error('文件不存在');
+      const stat = fs.statSync(params.filePath);
+      if (!stat.isFile()) throw new Error('只读属性仅支持文件');
+      const nextMode = params.readOnly
+        ? stat.mode & ~0o222
+        : stat.mode | 0o200;
+      fs.chmodSync(params.filePath, nextMode);
+      return { readOnly: (fs.statSync(params.filePath).mode & 0o200) === 0 };
+    },
+
     read(filePath: string) {
       const check = checkWithinWorkspace(filePath);
       if (!check.ok) throw new Error(check.error);
@@ -253,7 +266,14 @@ export function createFileSystemService(
         .map(async entry => {
           const entryPath = path.join(dirPath, entry.name);
           const stat = await fs.promises.stat(entryPath);
-          return { name: entry.name, path: entryPath, isDirectory: entry.isDirectory(), modifiedAt: stat.mtime.toISOString(), size: stat.size };
+          return {
+            name: entry.name,
+            path: entryPath,
+            isDirectory: entry.isDirectory(),
+            modifiedAt: stat.mtime.toISOString(),
+            size: stat.size,
+            readOnly: !entry.isDirectory() && (stat.mode & 0o200) === 0,
+          };
         }));
       return result.sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name, 'zh-CN'));
     },

@@ -21,6 +21,7 @@ import { useKnowledgeStore } from '../../stores/knowledgeStore';
 import { AIConfig, ProjectDocument, ReferenceMaterial, SectionAnalysis, StageMemoryEntry, TaskItem, WritingTemplate } from '../../../shared/types';
 import { buildProjectStageSegments, detectTimelineStage, getAllStages } from '../../utils/timelineStages';
 import { requireIpcObject } from '../../utils/ipcResult';
+import { composePromptAsync } from '../../utils/promptComposer';
 import { isAIJobCancelledError, useAIJobStore } from '../../stores/aiJobStore';
 import { pickProjectFiles } from '../../stores/projectPickerStore';
 import StageDocumentPanel from './StageDocumentPanel';
@@ -1658,6 +1659,29 @@ ${referenceContext}
 当前文档内容摘录：
 ${documentContent.slice(0, 9000)}`;
 
+      // 运行时只使用设置页中可编辑的场景提示词；上面的旧文案仅保留为迁移期源码参考。
+      const configuredPrompt = await composePromptAsync('workflowPlanning', {
+        projectName: currentProject.name,
+        stage: selectedStage,
+        stageVersion: `V${selectedStageVersionIndex + 1} / ${stageDocs.length}`,
+        docName: selectedReportDoc.name,
+        createdAt: dayjs(getDocCreatedAt(selectedReportDoc)).format('YYYY-MM-DD HH:mm'),
+        progress: String(effectiveProgress),
+        templateName: selectedDocTemplate.name,
+        templateCategory: selectedDocTemplate.category,
+        templateDescription: selectedDocTemplate.description || '无',
+        templateMode: isExampleTemplate ? '范文模板' : '直接套用模板',
+        templateRequirements: templateRequirementText || '无',
+        templateNodes: templateNodes || '无',
+        formatRules,
+        templateExample: templateExample || '无',
+        sectionStatus: sectionStatus || '暂无章节分析',
+        reviewIssues,
+        stageMemory: stageMemoryContext,
+        reference: referenceContext,
+        content: documentContent.slice(0, 9000),
+      });
+
       const aiConfig = requireIpcObject<AIConfig>(await window.electronAPI.loadAIConfig(), '加载 AI 配置失败');
       const useParallelVersions = aiConfig?.multiModelMode === 'parallel' && (aiConfig.parallelModelIds?.length || 0) > 1;
       let response = '';
@@ -1666,7 +1690,7 @@ ${documentContent.slice(0, 9000)}`;
       if (useParallelVersions && window.electronAPI.callAIParallelDetails) {
         const details = await useAIJobStore.getState().runAIJob<{ synthesis: string; synthesisModelName?: string; variants: Array<{ modelId: string; modelName: string; ok: boolean; output: string; error?: string }> }>(
           {
-            scene: 'report',
+            scene: 'workflowPlanning',
             title: '生成 AI 阶段报告',
             projectId: currentProject.id,
             docId: selectedReportDoc.id,
@@ -1674,7 +1698,7 @@ ${documentContent.slice(0, 9000)}`;
           },
           async ({ setProgress, throwIfCancelled }) => {
             setProgress(35);
-            const value = await window.electronAPI.callAIParallelDetails({ prompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
+            const value = await window.electronAPI.callAIParallelDetails({ prompt: configuredPrompt, config: aiConfig, modelIds: aiConfig.parallelModelIds, modelId: aiConfig.activeModelId });
             throwIfCancelled();
             setProgress(85);
             return value;
@@ -1694,7 +1718,7 @@ ${documentContent.slice(0, 9000)}`;
       } else {
         response = await useAIJobStore.getState().runAIJob<string>(
           {
-            scene: 'report',
+            scene: 'workflowPlanning',
             title: '生成 AI 阶段报告',
             projectId: currentProject.id,
             docId: selectedReportDoc.id,
@@ -1702,7 +1726,7 @@ ${documentContent.slice(0, 9000)}`;
           },
           async ({ setProgress, throwIfCancelled }) => {
             setProgress(35);
-            const value = await window.electronAPI.callAI({ prompt });
+            const value = await window.electronAPI.callAI({ prompt: configuredPrompt });
             throwIfCancelled();
             setProgress(85);
             return String(value || '');

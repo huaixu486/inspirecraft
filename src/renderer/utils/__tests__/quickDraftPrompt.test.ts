@@ -2,8 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { WritingTemplate } from '../../../shared/types';
 import {
+  buildLongFormSectionPlan,
+  buildLongFormSectionPrompt,
   buildQuickDraftTaskInstructions,
   buildQuickDraftTemplateContext,
+  countDraftCharacters,
+  selectRelevantReferenceExcerpts,
+  shouldGenerateLongForm,
 } from '../quickDraftPrompt';
 
 const makeTemplate = (overrides: Partial<WritingTemplate> = {}): WritingTemplate => ({
@@ -56,4 +61,54 @@ test('first-draft instructions require a complete draft and only sparse fact mar
   assert.match(instructions, /资料有限/);
   assert.match(instructions, /少量、分散出现/);
   assert.match(instructions, /不要输出“【待补充/);
+});
+
+test('technical reports are split into sections and honor explicit length ranges', () => {
+  const template = makeTemplate({
+    name: '技术报告',
+    category: '技术报告',
+    nodes: [
+      { id: '1', title: '一、项目背景', level: 1, isRequired: true, requirementText: '建议字数：约800-1000字' },
+      { id: '2', title: '二、技术方案', level: 1, isRequired: true, requirementText: '不少于1500字' },
+      { id: '3', title: '三、试验验证', level: 1, isRequired: true, requirementText: '600～800字' },
+    ],
+  });
+  const plan = buildLongFormSectionPlan(template);
+
+  assert.equal(plan.length, 3);
+  assert.deepEqual([plan[0].targetMin, plan[0].targetMax], [800, 1000]);
+  assert.deepEqual([plan[1].targetMin, plan[1].targetMax], [1500, 1875]);
+  assert.deepEqual([plan[2].targetMin, plan[2].targetMax], [600, 800]);
+  assert.equal(shouldGenerateLongForm(template, plan), true);
+});
+
+test('reference selection favors excerpts related to the current section', () => {
+  const selected = selectRelevantReferenceExcerpts([
+    { name: '背景.docx', kind: 'project', content: '项目背景主要介绍行业发展和建设必要性。' },
+    { name: '试验.docx', kind: 'project', content: '试验验证采用缺陷样本集，统计识别准确率并分析误报漏报。' },
+  ], '试验验证 识别准确率');
+
+  assert.match(selected, /试验\.docx/);
+  assert.match(selected, /识别准确率/);
+});
+
+test('section prompts request substantial body text without inventing experiment results', () => {
+  const template = makeTemplate({ name: '技术报告' });
+  const section = { ...buildLongFormSectionPlan(template)[0], targetMin: 1200, targetMax: 1500 };
+  const prompt = buildLongFormSectionPrompt({
+    template,
+    section,
+    sectionIndex: 0,
+    sectionCount: 4,
+    instruction: '先生成初稿，试验数据后续补充',
+    projectContext: '导线缺陷检测项目',
+    stageMemory: '暂无',
+    references: '现有资料',
+    templateContext: buildQuickDraftTemplateContext(template),
+  });
+
+  assert.match(prompt, /1200-1500/);
+  assert.match(prompt, /待试验补充/);
+  assert.match(prompt, /不重复输出章节标题/);
+  assert.equal(countDraftCharacters('一 段\n正文'), 4);
 });

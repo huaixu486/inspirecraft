@@ -36,6 +36,8 @@ export type AIUsageContext = {
   workItemId?: string;
   requestTitle?: string;
   scene?: string;
+  /** Keep usage accounting, but suppress per-call activity notifications. */
+  silentActivity?: boolean;
   startedAt?: number;
 };
 const requestContext = new AsyncLocalStorage<AIUsageContext>();
@@ -52,6 +54,7 @@ export interface AIActivity {
   requestId?: string;
   correlationId?: string;
   workItemId?: string;
+  silent?: boolean;
   error?: string;
 }
 
@@ -106,6 +109,7 @@ export function emitAIActivity(activity: Omit<AIActivity, 'createdAt' | 'request
     requestId: requestContext.getStore()?.requestId,
     correlationId: requestContext.getStore()?.correlationId,
     workItemId: requestContext.getStore()?.workItemId,
+    silent: requestContext.getStore()?.silentActivity,
   } satisfies AIActivity);
 }
 

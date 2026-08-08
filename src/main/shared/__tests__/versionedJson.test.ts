@@ -9,6 +9,7 @@ import {
   writeVersionedJsonFile,
 } from '../versionedJson';
 import { extractRegisteredProjectPaths } from '../registeredProjectPaths';
+import { readWorkspaceRootFromSettingsFile } from '../workspaceSettings';
 
 const withTempFile = (callback: (filePath: string) => void) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'projecthub-schema-'));
@@ -64,4 +65,22 @@ test('registered external project roots are read from legacy and versioned proje
     schemaVersion: CURRENT_DATA_SCHEMA_VERSION + 1,
     data: rows,
   }), []);
+});
+
+test('workspace root is read from legacy and versioned settings data', () => {
+  withTempFile(filePath => {
+    const workspacePath = path.join(path.dirname(filePath), 'workspace');
+
+    fs.writeFileSync(filePath, JSON.stringify({
+      workspacePath,
+      workspaceCapacity: 10,
+    }), 'utf-8');
+    assert.equal(readWorkspaceRootFromSettingsFile(filePath), path.resolve(workspacePath));
+
+    writeVersionedJsonFile(filePath, {
+      workspacePath,
+      workspaceCapacity: 10,
+    });
+    assert.equal(readWorkspaceRootFromSettingsFile(filePath), path.resolve(workspacePath));
+  });
 });

@@ -31,6 +31,10 @@ export const defineCoreFileIpc = (service: FileSystemService) => {
     try { return { success: true, recycleEntry: await service.delete(filePath, options) }; }
     catch (error: any) { return { success: false, error: error?.message || String(error) }; }
   });
+  defineIpcHandler('file:setReadOnly', async (_event, params: { filePath: string; readOnly: boolean }) => {
+    try { return { success: true, ...service.setReadOnly(params) }; }
+    catch (error: any) { return { success: false, error: error?.message || String(error) }; }
+  });
   defineIpcHandler('file:read', async (_event, filePath: string) => service.read(filePath));
   defineIpcHandler('file:readDir', async (_event, dirPath: string) => service.readDir(dirPath));
   defineIpcHandler('file:listDirectoryEntries', async (_event, dirPath: string) => {
